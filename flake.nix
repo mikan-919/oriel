@@ -13,10 +13,14 @@
     {
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
-           rustc
-           cargo
-           rust-analyzer
+            rustc
+            cargo
+            rust-analyzer
+            rustfmt
+            clippy
         ];
+
+        RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
       };
     };
 }
