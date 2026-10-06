@@ -8,7 +8,13 @@ export interface IntegrationEnv {
   LINEAR_CLIENT_ID?: string;
 }
 
-type Device = { device_id: string; name: string; user_id: string; host_hash: string };
+export type Device = { device_id: string; name: string; user_id: string; host_hash: string; repository: string | null; repository_generation: string };
+type WorkingRepository = { owner: string; name: string };
+type Page<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+type LinkedIssue = {
+  id: string; identifier: string; title: string; url: string; description: string | null;
+  state: { name: string; type: string }; team: { id: string }; attachments: Page<{ url: string }>;
+};
 type Session = { hash: string; user: { id: string; display_name: string } };
 type Provider = "github" | "linear";
 type Repository = { installation_id: number; repository_id: number; owner: string; name: string };
@@ -65,8 +71,9 @@ export class Integrations {
 
   static daemonRoute(request: Request): boolean {
     const path = new URL(request.url).pathname;
-    return request.method === "GET" && /^\/api\/integrations\/[a-f0-9]{32}(?:\/issues)?$/.test(path) ||
-      request.method === "POST" && /^\/api\/integrations\/[a-f0-9]{32}\/github\/token$/.test(path);
+    return request.method === "GET" && (/^\/api\/integrations\/[a-f0-9]{32}(?:\/issues)?$/.test(path) ||
+      request.headers.has("Authorization") && /^\/api\/integrations\/[a-f0-9]{32}\/linear\/issues$/.test(path)) ||
+      request.method === "POST" && /^\/api\/integrations\/[a-f0-9]{32}\/(?:github\/token|repository)$/.test(path);
   }
 
   private config(provider: Provider): void {
@@ -140,6 +147,39 @@ export class Integrations {
 
   async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const repositoryRoute = /^\/api\/integrations\/([a-f0-9]{32})\/(repository|linear\/issues)$/.exec(url.pathname);
+    if (repositoryRoute && request.method === (repositoryRoute[2] === "repository" ? "POST" : "GET")) {
+      let session: Session | undefined;
+      let device: Device;
+      if (repositoryRoute[2] === "repository" || request.headers.has("Authorization")) {
+        device = await this.auth.host(request, repositoryRoute[1]);
+      } else {
+        session = await this.auth.session(request);
+        const owned = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", repositoryRoute[1]).toArray()[0];
+        if (!owned || owned.user_id !== session.user.id) this.auth.fail(403, "Device belongs to another account");
+        device = owned;
+      }
+      const check = () => {
+        if (session) this.auth.liveSession(session);
+        this.liveDevice(device);
+        const current = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device.device_id).toArray()[0];
+        if (current.repository !== device.repository || current.repository_generation !== device.repository_generation) this.auth.fail(409, "Device repository changed");
+      };
+      check();
+      if (repositoryRoute[2] === "linear/issues") return this.auth.json(await this.repositoryIssues(device, check));
+      const body = await this.auth.body(request);
+      check();
+      let repository: WorkingRepository | null = null;
+      if (body.repository !== null) {
+        const value = body.repository as Record<string, unknown> | undefined;
+        if (!value || typeof value.owner !== "string" || typeof value.name !== "string") this.auth.fail(400, "Invalid GitHub repository");
+        repository = { owner: value.owner.trim().toLowerCase(), name: value.name.trim().toLowerCase() };
+        if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(repository.owner) ||
+            !/^[a-z0-9._-]{1,100}$/.test(repository.name) || repository.name === "." || repository.name === "..") this.auth.fail(400, "Invalid GitHub repository");
+      }
+      this.sql.exec("UPDATE devices SET repository = ?, repository_generation = ? WHERE device_id = ?", repository ? JSON.stringify(repository) : null, random(), device.device_id);
+      return this.auth.json({ ok: true });
+    }
     const callback = /^\/api\/integrations\/callback\/(github|linear)$/.exec(url.pathname);
     if (callback && request.method === "GET") return this.callback(request, callback[1] as Provider, url);
     if (Integrations.daemonRoute(request)) {
@@ -462,6 +502,76 @@ export class Integrations {
         this.auth.fail(502, `GitHub repository access verification failed${code}. Reconnect GitHub if its user authorization was revoked.`);
       }
       this.auth.fail(502, step === "request" ? "GitHub installation token request could not reach GitHub." : "GitHub returned an invalid installation token response.");
+    }
+  }
+
+  private async repositoryIssues(device: Device, check: () => void): Promise<unknown> {
+    const repository = JSON.parse(device.repository ?? "null") as WorkingRepository | null;
+    const connection = this.row(device.user_id, "linear");
+    if (!connection?.active || !connection.target) return { repository, linear: null };
+    const team = JSON.parse(connection.target) as Team;
+    if (!repository) return { repository, linear: { team, issues: [] } };
+    const guard = () => { this.current(connection, "active", check); };
+    const prefix = `https://github.com/${repository.owner}/${repository.name}/issues/`;
+    const issues = new Map<string, Omit<LinkedIssue, "team" | "attachments"> & { github_issues: { number: number; url: string }[] }>();
+    const next = (page: Page<unknown>, seen: Set<string>): string | null => {
+      if (!page.pageInfo.hasNextPage) return null;
+      const cursor = page.pageInfo.endCursor;
+      if (!cursor || seen.has(cursor)) throw new Error("Linear pagination failed");
+      seen.add(cursor);
+      return cursor;
+    };
+    const link = (value: string): { number: number; url: string } | null => {
+      // Inspect the actual attachment path, not URL's dot-segment-normalized path.
+      const match = /^https:\/\/([^/]+)\/([^/?#]+)\/([^/?#]+)\/(issues)\/(\d+)\/?(?:[?#].*)?$/i.exec(value);
+      if (!match || match[1].toLowerCase() !== "github.com" || match[2].toLowerCase() !== repository.owner ||
+          match[3].toLowerCase() !== repository.name || match[4] !== "issues") return null;
+      const number = Number(match[5]);
+      if (!Number.isSafeInteger(number) || number <= 0) return null;
+      return { number, url: `${prefix}${number}` };
+    };
+    try {
+      const credential = await this.credential(connection, "active", check);
+      let after: string | null = null;
+      const issueCursors = new Set<string>();
+      do {
+        const data: { issues: Page<LinkedIssue> } = await this.linear(credential.access_token,
+          "query($team:ID!,$prefix:String!,$after:String){issues(first:100,after:$after,includeArchived:true,filter:{team:{id:{eq:$team}},attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id identifier title url description state{name type} team{id} attachments(first:100,includeArchived:true,filter:{url:{startsWithIgnoreCase:$prefix}}){nodes{url} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}",
+          { team: team.team_id, prefix, after });
+        guard();
+        for (const issue of data.issues.nodes) {
+          if (issue.team.id !== team.team_id) continue;
+          const { attachments, team: _team, ...metadata } = issue;
+          const existing = issues.get(issue.id) ?? { ...metadata, github_issues: [] };
+          const numbers = new Set(existing.github_issues.map(link => link.number));
+          let page = attachments;
+          const attachmentCursors = new Set<string>();
+          for (;;) {
+            for (const attachment of page.nodes) {
+              const github = link(attachment.url);
+              if (github && !numbers.has(github.number)) {
+                numbers.add(github.number);
+                existing.github_issues.push(github);
+              }
+            }
+            const cursor = next(page, attachmentCursors);
+            if (!cursor) break;
+            const more: { issue: { team: { id: string }; attachments: Page<{ url: string }> } | null } = await this.linear(credential.access_token,
+              "query($id:String!,$prefix:String!,$after:String!){issue(id:$id){team{id} attachments(first:100,after:$after,includeArchived:true,filter:{url:{startsWithIgnoreCase:$prefix}}){nodes{url} pageInfo{hasNextPage endCursor}}}}",
+              { id: issue.id, prefix, after: cursor });
+            guard();
+            if (!more.issue || more.issue.team.id !== team.team_id) throw new Error("Linear issue unavailable");
+            page = more.issue.attachments;
+          }
+          if (existing.github_issues.length) issues.set(issue.id, existing);
+        }
+        after = next(data.issues, issueCursors);
+      } while (after);
+      guard();
+      return { repository, linear: { team, issues: [...issues.values()] } };
+    } catch (error) {
+      if (error instanceof Error && "status" in error) throw error;
+      this.auth.fail(502, "Linked Linear issues could not be retrieved");
     }
   }
 

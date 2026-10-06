@@ -250,6 +250,17 @@ function githubFixture({ paginated = false } = {}) {
     refreshCount: 0,
     pkce: undefined,
     team: { team_id: "team", team_name: "Engineering", workspace_id: "workspace" },
+    linkedIssues: [{
+      id: "linked-42", identifier: "ENG-42", title: "Implement the GitHub request", url: "https://linear.app/example/issue/ENG-42",
+      description: "HOW: implement the requested change; human approval remains separate.",
+      state: { name: "Todo", type: "unstarted" }, team: { id: "team" },
+      attachments: [{ url: "https://github.com/octocat/connected/issues/42" }],
+    }],
+    issuePageSize: 100,
+    attachmentPageSize: 100,
+    linkedFetch: undefined,
+    linkedRequests: [],
+    githubRequests: 0,
     env: {
       GITHUB_CLIENT_ID: "github-client", GITHUB_CLIENT_SECRET: "github-secret", GITHUB_APP_ID: "123",
       INTEGRATION_ENCRYPTION_KEY: "CD".repeat(32),
@@ -298,11 +309,35 @@ function githubFixture({ paginated = false } = {}) {
         const { query, variables } = await request.json();
         if (query.includes("teams(")) return Response.json({ data: { organization: { id: "workspace" },
           teams: { nodes: [{ id: "team", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } });
+        if (query.includes("attachments(")) {
+          fixture.linkedRequests.push({ query, variables });
+          if (fixture.linkedFetch) await fixture.linkedFetch({ query, variables });
+          assert.equal(variables.prefix.startsWith("https://github.com/"), true);
+          const relevant = issue => issue.attachments.filter(attachment =>
+            attachment.url.toLowerCase().startsWith(variables.prefix.toLowerCase()));
+          const page = (nodes, after, size) => {
+            const start = after ? Number(after) : 0;
+            const end = Math.min(nodes.length, start + size);
+            return { nodes: nodes.slice(start, end), pageInfo: { hasNextPage: end < nodes.length, endCursor: end < nodes.length ? String(end) : null } };
+          };
+          if (query.includes("issue(id:")) {
+            const issue = fixture.linkedIssues.find(issue => issue.id === variables.id);
+            return Response.json({ data: { issue: issue ? {
+              team: issue.team, attachments: page(relevant(issue), variables.after, fixture.attachmentPageSize),
+            } : null } });
+          }
+          assert.equal(variables.team, fixture.team.team_id);
+          const candidates = fixture.linkedIssues.filter(issue => issue.team.id === variables.team && relevant(issue).length);
+          const issues = page(candidates, variables.after, fixture.issuePageSize);
+          issues.nodes = issues.nodes.map(issue => ({ ...issue, attachments: page(relevant(issue), null, fixture.attachmentPageSize) }));
+          return Response.json({ data: { issues } });
+        }
         assert.equal(variables.id, "team");
         if (fixture.issues) await fixture.issues();
         return Response.json({ data: { team: { issues: { nodes: [{ identifier: "ENG-42", title: "Linear issue" }] } } } });
       }
       assert.equal(url.origin, "https://api.github.com");
+      fixture.githubRequests++;
       if (url.pathname === "/app/installations/101/access_tokens") {
         const jwt = request.headers.get("Authorization").slice("Bearer ".length);
         const [header, payload, signature] = jwt.split(".");
@@ -712,5 +747,214 @@ test("Installation token rejection preserves the connection and never releases p
     assert.equal(restored.status, 200);
     assert.equal(restored.data.repository.repository_id, fixture.repository.repository_id);
     assert.equal(restored.data.token, "limited-installation-token");
+  } finally { await worker.dispose(); }
+});
+
+test("Only the paired host reports normalized repository metadata; existing devices migrate without losing ownership", { timeout: 30000 }, async () => {
+  const worker = await runtime();
+  try {
+    const { owner, daemon } = await pair(worker);
+    const stranger = client(worker);
+    await stranger.enroll(authenticator());
+    const route = `/api/integrations/${device}/repository`;
+    const repository = { owner: "octocat", name: "working" };
+    const devices = () => owner.api("/api/devices");
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null }]);
+    assert.equal((await owner.api(route, { repository })).status, 401);
+    assert.equal((await stranger.api(route, { repository })).status, 401);
+    assert.equal((await stranger.api(route, { repository }, { Authorization: `Bearer ${"e".repeat(64)}` })).status, 403);
+    assert.equal((await daemon.api(`/api/integrations/${"f".repeat(32)}/repository`, { repository }, hostHeaders)).status, 403);
+    for (const value of [undefined, {}, { owner: "octocat/path", name: "working" }, { owner: "https://github.com/octocat", name: "working" },
+      { owner: "octocat", name: "../working" }, { owner: "user:password@github.com", name: "working" }, { owner: "octocat", name: "." }]) {
+      assert.equal((await daemon.api(route, { repository: value }, hostHeaders)).status, 400);
+    }
+    assert.deepEqual((await daemon.api(route, { repository: { owner: " OctoCat ", name: " WORKING ", remote: "private-remote" }, transcript: "private-transcript" }, hostHeaders)).data, { ok: true });
+    assert.deepEqual((await devices()).data.devices[0].repository, repository);
+    const storage = await worker.unsafeGetDurableObjectStorage("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.doesNotMatch(JSON.stringify(await storage.exec("SELECT * FROM devices")), /private-remote|private-transcript/);
+    await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.deepEqual((await devices()).data.devices[0].repository, repository);
+    assert.deepEqual((await daemon.api(route, { repository: null }, hostHeaders)).data, { ok: true });
+    assert.equal((await devices()).data.devices[0].repository, null);
+    await storage.exec("ALTER TABLE devices RENAME TO current_devices");
+    await storage.exec("CREATE TABLE devices (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL, host_hash TEXT NOT NULL)");
+    await storage.exec("INSERT INTO devices SELECT device_id, name, user_id, host_hash FROM current_devices");
+    await storage.exec("DROP TABLE current_devices");
+    await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null }]);
+    assert.equal((await daemon.api(route, { repository }, hostHeaders)).status, 200);
+    assert.deepEqual((await devices()).data.devices[0].repository, repository);
+  } finally { await worker.dispose(); }
+});
+
+test("Repository-linked Linear discovery requires device ownership, respects missing context and never calls GitHub", { timeout: 30000 }, async () => {
+  const fixture = githubFixture();
+  const worker = await runtime({ ...fixture.env, GITHUB_CLIENT_ID: "", GITHUB_APP_ID: "", GITHUB_APP_PRIVATE_KEY: "" }, request => fixture.fetch(request));
+  try {
+    const { owner, daemon } = await pair(worker);
+    const stranger = client(worker);
+    await stranger.enroll(authenticator());
+    const route = `/api/integrations/${device}/linear/issues`;
+    const report = repository => daemon.api(`/api/integrations/${device}/repository`, { repository }, hostHeaders);
+    assert.deepEqual((await owner.api(route)).data, { repository: null, linear: null });
+    assert.equal((await stranger.api(route)).status, 403);
+    assert.equal((await client(worker).api(route)).status, 401);
+    assert.equal((await owner.api(route, undefined, { Origin: "https://evil.example" })).status, 403);
+    assert.equal((await owner.api(route, undefined, { Authorization: "Bearer invalid" })).status, 401);
+    assert.equal((await owner.api(route, undefined, { Authorization: `Bearer ${"e".repeat(64)}` })).status, 403);
+    await connect(owner, fixture, "linear");
+    assert.deepEqual((await owner.api(route)).data, { repository: null, linear: { team: fixture.team, issues: [] } });
+    const repository = { owner: "octocat", name: "working" };
+    await report(repository);
+    assert.deepEqual((await owner.api(route)).data, { repository, linear: { team: fixture.team, issues: [] } });
+    fixture.linkedIssues[0].attachments = [{ url: "https://github.com/octocat/working/issues/42" }];
+    const { team: _team, attachments: _attachments, ...issue } = fixture.linkedIssues[0];
+    const expected = { repository, linear: { team: fixture.team, issues: [{ ...issue, github_issues: [{ number: 42, url: "https://github.com/octocat/working/issues/42" }] }] } };
+    assert.deepEqual((await owner.api(route)).data, expected);
+    assert.deepEqual((await daemon.api(route, undefined, { ...hostHeaders, Origin: "" })).data, expected);
+    const other = "d".repeat(32);
+    const start = await daemon.api("/api/pair/start", { device_id: other, name: "other-repository" }, hostHeaders);
+    await owner.api("/api/pair/claim", { token: new URL(start.data.url).hash.slice("#pair=".length) });
+    const user = (await owner.api("/api/session")).data.user;
+    await daemon.api(`/api/pair/${other}/confirm`, { user_id: user.id }, hostHeaders);
+    await daemon.api(`/api/integrations/${other}/repository`, { repository: { owner: "octocat", name: "elsewhere" } }, hostHeaders);
+    assert.deepEqual((await owner.api(`/api/integrations/${other}/linear/issues`)).data, {
+      repository: { owner: "octocat", name: "elsewhere" }, linear: { team: fixture.team, issues: [] },
+    });
+    const foreignDevice = "c".repeat(32);
+    const foreignHeaders = { Authorization: `Bearer ${"e".repeat(64)}` };
+    const foreignStart = await daemon.api("/api/pair/start", { device_id: foreignDevice, name: "foreign-account" }, foreignHeaders);
+    await stranger.api("/api/pair/claim", { token: new URL(foreignStart.data.url).hash.slice("#pair=".length) });
+    const foreignUser = (await stranger.api("/api/session")).data.user;
+    await daemon.api(`/api/pair/${foreignDevice}/confirm`, { user_id: foreignUser.id }, foreignHeaders);
+    await daemon.api(`/api/integrations/${foreignDevice}/repository`, { repository }, foreignHeaders);
+    assert.deepEqual((await stranger.api(`/api/integrations/${foreignDevice}/linear/issues`)).data, { repository, linear: null });
+    assert.equal((await owner.api(`/api/integrations/${foreignDevice}/linear/issues`)).status, 403);
+    assert.equal((await daemon.api(`/api/integrations/${foreignDevice}/linear/issues`, undefined, hostHeaders)).status, 403);
+    await report(null);
+    assert.deepEqual((await owner.api(route)).data, { repository: null, linear: { team: fixture.team, issues: [] } });
+    await owner.api("/api/integrations/linear/disconnect", {});
+    assert.deepEqual((await owner.api(route)).data, { repository: null, linear: null });
+    assert.equal(fixture.githubRequests, 0);
+  } finally { await worker.dispose(); }
+});
+
+test("Linked Linear discovery traverses all issues and attachments, deduplicates actual links and rejects URL impostors", { timeout: 30000 }, async () => {
+  const fixture = githubFixture();
+  const template = fixture.linkedIssues[0];
+  const url = number => `https://github.com/octocat/working/issues/${number}`;
+  fixture.linkedIssues = Array.from({ length: 125 }, (_, index) => ({ ...template, id: `issue-${index}`, identifier: `ENG-${index}`,
+    description: index === 124 ? null : `HOW ${index}`, attachments: [{ url: url(index + 1) }] }));
+  const duplicate = { ...fixture.linkedIssues[124], attachments: [{ url: url(126) }] };
+  const boundary = { ...template, id: "boundary", identifier: "ENG-boundary", attachments: [
+    ...Array.from({ length: 100 }, () => ({ url: url(0) })),
+    { url: "HTTPS://GITHUB.COM/OctoCat/Working/issues/00042/?via=linear#attached" },
+    { url: `${url(42)}#duplicate` }, { url: url(Number.MAX_SAFE_INTEGER) },
+    ...["9007199254740992", "-1", "1.2", "1/extra", "1//", "1/../2", "%31"].map(number => ({ url: url(number) })),
+  ] };
+  fixture.linkedIssues.push(duplicate, boundary);
+  for (const attachments of [
+    [{ url: "https://github.com/octocat/working/pull/1" }], [{ url: "https://github.com/octocat/elsewhere/issues/1" }],
+    [{ url: "https://github.com.evil.example/octocat/working/issues/1" }], [{ url: "http://github.com/octocat/working/issues/1" }],
+    [{ url: "https://user:password@github.com/octocat/working/issues/1" }], [{ url: url(0) }], [],
+  ]) fixture.linkedIssues.push({ ...template, id: `impostor-${fixture.linkedIssues.length}`,
+    title: `GitHub ${url(42)}`, description: `Implement ${url(42)}`, attachments });
+  fixture.linkedIssues.push({ ...template, id: "wrong-team", team: { id: "foreign-team" }, attachments: [{ url: url(42) }] });
+  const worker = await runtime(fixture.env, request => fixture.fetch(request));
+  try {
+    const { owner, daemon } = await pair(worker);
+    await connect(owner, fixture, "linear");
+    await daemon.api(`/api/integrations/${device}/repository`, { repository: { owner: "octocat", name: "working" } }, hostHeaders);
+    const result = await owner.api(`/api/integrations/${device}/linear/issues`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    const actual = result.data.linear.issues;
+    const expected = fixture.linkedIssues.slice(0, 125).map(({ team, attachments, ...issue }, index) => ({
+      ...issue, github_issues: [{ number: index + 1, url: url(index + 1) }, ...(index === 124 ? [{ number: 126, url: url(126) }] : [])],
+    }));
+    const { team, attachments, ...metadata } = boundary;
+    expected.push({ ...metadata, github_issues: [{ number: 42, url: url(42) }, { number: Number.MAX_SAFE_INTEGER, url: url(Number.MAX_SAFE_INTEGER) }] });
+    assert.deepEqual(actual, expected);
+    assert.equal(fixture.githubRequests, 0);
+  } finally { await worker.dispose(); }
+});
+
+test("Repository-linked snapshots fail closed across browser logout, repository changes, device ownership and provider replacement", { timeout: 120000 }, async t => {
+  for (const race of ["logout", "clear", "repository-roundtrip", "owner", "disconnect", "reconnect"]) await t.test(race, async () => {
+    const fixture = githubFixture();
+    fixture.linkedIssues[0].attachments.push({ url: "https://github.com/octocat/connected/issues/43" });
+    fixture.attachmentPageSize = 1;
+    const worker = await runtime(fixture.env, request => fixture.fetch(request));
+    let release;
+    try {
+      const { owner, daemon } = await pair(worker);
+      await connect(owner, fixture, "linear");
+      const report = repository => daemon.api(`/api/integrations/${device}/repository`, { repository }, hostHeaders);
+      const repository = { owner: "octocat", name: "connected" };
+      await report(repository);
+      let entered;
+      const fetching = new Promise(resolve => { entered = resolve; });
+      const gate = new Promise(resolve => { release = resolve; });
+      fixture.linkedFetch = async ({ variables }) => { if (variables.id) { entered(); await gate; } };
+      const pending = race === "logout" ? owner.api(`/api/integrations/${device}/linear/issues`) :
+        daemon.api(`/api/integrations/${device}/linear/issues`, undefined, hostHeaders);
+      await fetching;
+      if (race === "logout") await owner.api("/api/auth/logout", {});
+      else if (race === "clear") await report(null);
+      else if (race === "repository-roundtrip") {
+        await report({ owner: "octocat", name: "different" });
+        await report(repository);
+      } else if (race === "owner") {
+        const stranger = client(worker);
+        const user = await stranger.enroll(authenticator());
+        const storage = await worker.unsafeGetDurableObjectStorage("oriel-relay", "AccountRegistry", { name: "accounts" });
+        await storage.exec("UPDATE devices SET user_id = ? WHERE device_id = ?", user.id, device);
+      } else {
+        await owner.api("/api/integrations/linear/disconnect", {});
+        if (race === "reconnect") await connect(owner, fixture, "linear");
+      }
+      release();
+      const failed = await pending;
+      assert.equal(failed.status, race === "logout" ? 401 : race === "owner" ? 403 : 409);
+      assert.equal(failed.data.linear, undefined);
+      assert.doesNotMatch(JSON.stringify(failed.data), /ENG-42|human approval|private-linear/);
+    } finally { release?.(); await worker.dispose(); }
+  });
+});
+
+test("Linked Linear provider failures are sanitized and pagination cannot cycle or silently truncate", { timeout: 30000 }, async () => {
+  const fixture = githubFixture();
+  const worker = await runtime(fixture.env, request => fixture.fetch(request));
+  try {
+    const { owner, daemon } = await pair(worker);
+    await connect(owner, fixture, "linear");
+    await daemon.api(`/api/integrations/${device}/repository`, { repository: { owner: "octocat", name: "connected" } }, hostHeaders);
+    fixture.apiFailed = true;
+    const route = `/api/integrations/${device}/linear/issues`;
+    const failed = await owner.api(route);
+    assert.equal(failed.status, 502);
+    assert.doesNotMatch(JSON.stringify(failed.data), /secret-provider|private-linear/);
+    fixture.apiFailed = false;
+    const fetch = fixture.fetch.bind(fixture);
+    const original = fixture.linkedIssues[0];
+    fixture.linkedIssues.push({ ...original, id: "second" });
+    fixture.issuePageSize = 1;
+    fixture.fetch = async request => {
+      const response = await fetch(request);
+      if (new URL(request.url).pathname !== "/graphql") return response;
+      const data = await response.json();
+      if (data.data?.issues) data.data.issues.pageInfo = { hasNextPage: true, endCursor: "1" };
+      return Response.json(data);
+    };
+    assert.equal((await owner.api(route)).status, 502);
+    fixture.fetch = fetch;
+    fixture.linkedIssues = [original];
+    fixture.fetch = async request => {
+      const response = await fetch(request);
+      if (new URL(request.url).pathname !== "/graphql") return response;
+      const data = await response.json();
+      if (data.data?.issues) data.data.issues.nodes[0].attachments.pageInfo = { hasNextPage: true, endCursor: null };
+      return Response.json(data);
+    };
+    assert.equal((await owner.api(route)).status, 502);
   } finally { await worker.dispose(); }
 });

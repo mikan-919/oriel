@@ -29,6 +29,13 @@ button {
     margin: 0.25rem;
 }
 
+button:disabled {
+    color: #bdbdbd;
+    background: #333;
+    border-color: #666;
+    cursor: not-allowed;
+}
+
 select {
     box-sizing: border-box;
     max-width: 100%;
@@ -44,6 +51,14 @@ label {
 p,
 li {
     overflow-wrap: anywhere;
+}
+
+a {
+    color: #8ab4f8;
+}
+
+#repository-issues .how-description {
+    white-space: pre-wrap;
 }
 
 #terminal-view {
@@ -106,6 +121,11 @@ const integrationActions = document.getElementById("integration-actions");
 const integrationStatus = document.getElementById("integration-status");
 const issuesStatus = document.getElementById("issues-status");
 const refreshIssuesButton = document.getElementById("refresh-issues");
+const repositoryWork = document.getElementById("repository-work");
+const repositoryDetails = document.getElementById("repository-details");
+const repositoryStatus = document.getElementById("repository-status");
+const repositoryIssues = document.getElementById("repository-issues");
+const refreshRepositoryButton = document.getElementById("refresh-repository");
 const providers = ["github", "linear"];
 const providerNames = {github: "GitHub", linear: "Linear"};
 const providerControls = Object.fromEntries(providers.map((provider) => [provider, {
@@ -122,6 +142,8 @@ let integrations = null;
 let accountEpoch = 0;
 let integrationsRequest = 0;
 let issuesRequest = 0;
+let repositoryRequest = 0;
+let repositoryDeviceId = null;
 let integrationNotice = connectionRequest.returned
     ? `${providerNames[connectionRequest.returned]} authorization succeeded. Choose a repository or team below and save the target to finish connecting.`
     : connectionRequest.failed
@@ -198,6 +220,8 @@ function render() {
         controls.save.disabled = busy || !user || controls.select.value === "";
     }
     refreshIssuesButton.disabled = busy || !user || (!integrations?.github && !integrations?.linear);
+    repositoryWork.hidden = !user || !devices.length;
+    refreshRepositoryButton.disabled = busy || !user || !repositoryDeviceId;
 }
 
 function disconnect() {
@@ -215,12 +239,17 @@ function setUser(next) {
         accountEpoch++;
         integrationsRequest++;
         issuesRequest++;
+        repositoryRequest++;
+        repositoryDeviceId = null;
         integrations = null;
         for (const controls of Object.values(providerControls)) {
             controls.select.replaceChildren();
             controls.issues.replaceChildren();
         }
         issuesStatus.textContent = "";
+        repositoryDetails.textContent = "";
+        repositoryStatus.textContent = "";
+        repositoryIssues.replaceChildren();
         if (user || !next) integrationNotice = "";
         devices = [];
         deviceList.replaceChildren();
@@ -339,11 +368,21 @@ async function authenticate(kind) {
 
 async function refreshDevices() {
     if (!user) return;
-    const ownerId = user.id;
+    const epoch = accountEpoch;
     const result = await api("/api/devices");
-    if (user?.id !== ownerId) return;
+    if (!currentAccount(epoch)) return;
     devices = result.devices;
     deviceList.replaceChildren();
+    repositoryRequest++;
+    repositoryIssues.replaceChildren();
+    if (!devices.some((device) => device.device_id === repositoryDeviceId)) {
+        repositoryDeviceId = devices.length === 1 ? devices[0].device_id : null;
+    }
+    const selected = devices.find((device) => device.device_id === repositoryDeviceId);
+    repositoryDetails.textContent = selected ? `${selected.name} (${selected.device_id})` : "";
+    repositoryStatus.textContent = selected
+        ? "Refresh linked issues to read this device's reported repository."
+        : "Choose a device to read its repository-linked Linear work.";
     deviceSummary.textContent = devices.length ? "Open an owned device:" : "No paired devices yet.";
     for (const device of devices) {
         const item = document.createElement("li");
@@ -354,7 +393,20 @@ async function refreshDevices() {
         open.textContent = "Open terminal";
         open.disabled = busy;
         open.addEventListener("click", () => perform(() => openTerminal(device)));
-        item.append(label, open);
+        const repository = document.createElement("p");
+        repository.id = `repository-${device.device_id}`;
+        repository.textContent = device.repository
+            ? `Last reported repository: ${device.repository.owner}/${device.repository.name}`
+            : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
+        const work = document.createElement("button");
+        work.type = "button";
+        work.textContent = "Linked Linear issues";
+        work.disabled = busy;
+        work.addEventListener("click", () => perform(async () => {
+            repositoryDeviceId = device.device_id;
+            await refreshRepositoryIssues();
+        }));
+        item.append(label, repository, open, work);
         deviceList.append(item);
     }
     if (pairClaimed && pairInfo && devices.some((device) => device.device_id === pairInfo.device_id)) {
@@ -435,6 +487,7 @@ async function refreshAccountData() {
         })(),
     ]);
     const failure = results.find((result) => result.status === "rejected");
+    await refreshRepositoryIssues();
     if (failure) throw failure.reason;
 }
 
@@ -446,6 +499,8 @@ async function refreshIntegrations() {
     if (!currentAccount(epoch) || request !== integrationsRequest) return;
     integrations = result;
     issuesRequest++;
+    repositoryRequest++;
+    repositoryIssues.replaceChildren();
     for (const provider of providers) {
         const controls = providerControls[provider];
         controls.select.replaceChildren();
@@ -496,7 +551,11 @@ async function saveTarget(provider) {
     integrations[provider] = target;
     clearProviderSelection(provider);
     integrationNotice = `${providerNames[provider]} target saved. This connection is shared by all devices paired to your account.`;
-    await refreshIntegrations();
+    try {
+        await refreshIntegrations();
+    } finally {
+        if (currentAccount(epoch)) await refreshRepositoryIssues();
+    }
 }
 
 async function disconnectProvider(provider) {
@@ -512,7 +571,11 @@ async function disconnectProvider(provider) {
     if (provider === "github") {
         integrationNotice += " Previously issued GitHub installation tokens may remain valid until expiry (up to 1 hour).";
     }
-    await refreshIntegrations();
+    try {
+        await refreshIntegrations();
+    } finally {
+        if (currentAccount(epoch)) await refreshRepositoryIssues();
+    }
 }
 
 function clearProviderSelection(provider) {
@@ -520,6 +583,11 @@ function clearProviderSelection(provider) {
     providerControls[provider].select.replaceChildren();
     providerControls[provider].issues.replaceChildren();
     issuesRequest++;
+    if (provider === "linear") {
+        repositoryRequest++;
+        repositoryIssues.replaceChildren();
+        repositoryStatus.textContent = "Refresh linked issues to read the current Linear team.";
+    }
     issuesStatus.textContent = "Refresh recent issues to load the current targets.";
     render();
 }
@@ -559,6 +627,82 @@ async function refreshIssues() {
         if (error.sessionExpired) throw error;
         if (!currentAccount(epoch) || request !== issuesRequest) return;
         issuesStatus.textContent = `Could not load recent issues: ${errorText(error)}`;
+        throw error;
+    }
+}
+
+function issueLink(label, address, host) {
+    const url = new URL(address);
+    if (url.protocol !== "https:" || url.hostname !== host || url.username || url.password || url.port) {
+        throw new Error("The service returned an unexpected issue address.");
+    }
+    const link = document.createElement("a");
+    link.textContent = label;
+    link.href = url.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+}
+
+async function refreshRepositoryIssues() {
+    const device = devices.find((device) => device.device_id === repositoryDeviceId);
+    if (!user || !device) return;
+    const epoch = accountEpoch;
+    const request = ++repositoryRequest;
+    repositoryDetails.textContent = `${device.name} (${device.device_id})`;
+    repositoryIssues.replaceChildren();
+    repositoryStatus.textContent = "Loading repository-linked Linear issues…";
+    try {
+        const result = await integrationApi(`/api/integrations/${device.device_id}/linear/issues`);
+        if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
+        device.repository = result.repository;
+        const label = result.repository
+            ? `${result.repository.owner}/${result.repository.name}`
+            : null;
+        document.getElementById(`repository-${device.device_id}`).textContent = label
+            ? `Last reported repository: ${label}`
+            : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
+        if (!label) {
+            repositoryStatus.textContent = "No GitHub repository reported. Start the updated orield in a checkout with a GitHub origin, then refresh linked issues.";
+            return;
+        }
+        repositoryDetails.textContent += ` — ${label}`;
+        if (!result.linear) {
+            repositoryStatus.textContent = "Connect Linear and save a team above to read linked work.";
+            return;
+        }
+        const items = document.createDocumentFragment();
+        for (const issue of result.linear.issues) {
+            const item = document.createElement("li");
+            const title = document.createElement("p");
+            title.append(issueLink(issue.identifier, issue.url, "linear.app"), `: ${issue.title}`);
+            const state = document.createElement("p");
+            state.textContent = `Linear state: ${issue.state.name} (${issue.state.type})`;
+            const links = document.createElement("p");
+            links.append("GitHub WHAT: ");
+            for (const [index, reference] of issue.github_issues.entries()) {
+                if (index) links.append(", ");
+                links.append(issueLink(`#${reference.number}`, reference.url, "github.com"));
+            }
+            const how = document.createElement("details");
+            const summary = document.createElement("summary");
+            summary.textContent = "HOW (Linear description)";
+            const description = document.createElement("p");
+            description.className = "how-description";
+            description.textContent = issue.description || "No HOW description.";
+            how.append(summary, description);
+            item.append(title, state, links, how);
+            items.append(item);
+        }
+        repositoryIssues.replaceChildren(items);
+        repositoryStatus.textContent = result.linear.issues.length
+            ? `${result.linear.team.team_name}: ${result.linear.issues.length} linked Linear issues for ${label}.`
+            : `No Linear issues in ${result.linear.team.team_name} are linked to GitHub Issues in ${label}. Add the corresponding GitHub Issue URL as a link attachment in Linear; matching titles alone are not links.`;
+    } catch (error) {
+        if (error.sessionExpired) throw error;
+        if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
+        repositoryIssues.replaceChildren();
+        repositoryStatus.textContent = `Could not load linked Linear issues: ${errorText(error)}`;
         throw error;
     }
 }
@@ -673,6 +817,7 @@ for (const provider of providers) {
     controls.select.addEventListener("change", render);
 }
 refreshIssuesButton.addEventListener("click", () => perform(refreshIssues));
+refreshRepositoryButton.addEventListener("click", () => perform(refreshRepositoryIssues));
 document.getElementById("close-terminal").addEventListener("click", () => {
     disconnect();
     status.textContent = "Terminal closed. The device remains paired.";
@@ -786,6 +931,14 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                         <h2>"Your devices"</h2>
                         <p id="device-summary">"Sign in to see your devices."</p>
                         <ul id="devices"></ul>
+                    </section>
+                    <section id="repository-work" hidden="">
+                        <h2>"Repository-linked work"</h2>
+                        <p>"Only Linear issues with a GitHub Issue link attachment in this device's reported repository are shown. Titles and descriptions are not used to guess links. This view is read-only; execution approval stays in Linear."</p>
+                        <p id="repository-details"></p>
+                        <button id="refresh-repository" type="button">"Refresh linked issues"</button>
+                        <p id="repository-status" role="status"></p>
+                        <ul id="repository-issues" aria-label="Repository-linked Linear issues"></ul>
                     </section>
                 </main>
                 <section id="terminal-view" hidden="">

@@ -27,8 +27,18 @@ import {
 // Integrations: sign in to Oriel Web, connect GitHub/Linear, choose and save the
 // repository/team there. Connections belong to the Passkey account and are shared
 // by all its paired devices, including devices paired after connecting.
-// `orield integrations` reads recent 20 issues through Relay; no local OAuth,
-// provider credentials, or Secret Service is required. These commands never start Codex.
+// Run `orield` from a GitHub checkout: it reports only origin's owner/repository,
+// never the local path, remote credentials, or provider secrets. HTTPS and standard
+// SSH GitHub remotes are recognized through `git remote get-url origin`.
+// `orield integrations` reads the selected team's Linear issues with GitHub Issue
+// link attachments for this working repository; it never starts Codex. Web's device
+// view shows the same links, HOW description, and current Linear state. Discovery
+// includes older/archived matches and all pages; unrelated team tasks and PR links
+// are excluded. Add GitHub Issue URLs as link attachments in Linear; native issue
+// synchronization is not required and no text is copied between WHAT and HOW.
+// The last reported repository remains visible while a device is offline; starting
+// outside a recognized GitHub checkout clears it. Browser ownership and the device
+// bearer protect discovery/reporting. No local OAuth or Secret Service is required.
 // GitHub: register a GitHub App, enable user OAuth, and install it on the chosen
 // repository. Repository permissions: Contents, Issues, Pull requests = read/write;
 // Metadata = read. Organization installations also need Members = read to verify

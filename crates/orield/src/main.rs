@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 mod integrations;
+mod repository;
 
 #[derive(Serialize, PartialEq, Eq)]
 struct DeviceIdentity {
@@ -486,7 +487,10 @@ async fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
     let second = args.next();
-    ensure!(args.next().is_none(), "usage: orield [--help | integrations]");
+    ensure!(
+        args.next().is_none(),
+        "usage: orield [--help | integrations]"
+    );
     let mode = match (first.as_deref(), second.as_deref()) {
         (None, None) => false,
         (Some(arg), None) if arg == "--help" || arg == "-h" => {
@@ -499,7 +503,9 @@ async fn main() -> Result<()> {
                     "Already paired devices reconnect automatically without a pairing prompt.\n",
                     "Keep the identity file private; it contains the persistent host secret.\n\n",
                     "Connect GitHub and Linear in Oriel Web; connections are shared by your devices.\n",
-                    "integrations: fetch the connected repository/team's recent 20 issues through relay.\n",
+                    "integrations: show connected GitHub selection and Linear issues linked to\n",
+                    "GitHub Issues in the working directory's GitHub origin repository.\n",
+                    "Only normalized repository names are reported; no jobs are started or approved.\n",
                     "Provider credentials stay encrypted in relay; no local credential store is needed.\n\n",
                     "Identity: $XDG_CONFIG_HOME/oriel/device.json, falling back to\n",
                     "$HOME/.config/oriel/device.json; ORIEL_IDENTITY_FILE overrides the path.\n",
@@ -534,6 +540,7 @@ async fn main() -> Result<()> {
     if mode {
         return integrations::run(&relay_url, &identity).await;
     }
+    repository::report_current(&relay_url, &identity).await?;
 
     let terminal = spawn_terminal("codex")?;
 

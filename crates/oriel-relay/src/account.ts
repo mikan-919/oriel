@@ -8,7 +8,7 @@ import {
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
-import { Integrations, type IntegrationEnv } from "./integrations";
+import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 
 export interface AccountEnv extends IntegrationEnv {}
 
@@ -31,7 +31,6 @@ type Credential = {
   counter: number;
   transports: string;
 };
-type Device = { device_id: string; name: string; user_id: string; host_hash: string };
 type Pairing = {
   device_id: string;
   name: string;
@@ -255,7 +254,9 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           device_id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           user_id TEXT NOT NULL REFERENCES users(id),
-          host_hash TEXT NOT NULL
+          host_hash TEXT NOT NULL,
+          repository TEXT,
+          repository_generation TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS devices_owner ON devices(user_id, name, device_id);
         CREATE TABLE IF NOT EXISTS pairings (
@@ -267,6 +268,9 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           candidate_id TEXT REFERENCES users(id)
         );
       `);
+      const columns = this.sql.exec<{ name: string }>("PRAGMA table_info(devices)").toArray();
+      if (!columns.some(column => column.name === "repository")) this.sql.exec("ALTER TABLE devices ADD COLUMN repository TEXT");
+      if (!columns.some(column => column.name === "repository_generation")) this.sql.exec("ALTER TABLE devices ADD COLUMN repository_generation TEXT NOT NULL DEFAULT ''");
     });
     this.integrations = new Integrations(this.sql, env, {
       host: async (request, id) => {
@@ -322,9 +326,9 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           break;
         case "GET /api/devices": {
           const session = await this.requireSession(request);
-          response = json({ devices: this.sql.exec<{ device_id: string; name: string }>(
-            "SELECT device_id, name FROM devices WHERE user_id = ? ORDER BY name, device_id", session.user.id,
-          ).toArray() });
+          response = json({ devices: this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
+            "SELECT device_id, name, repository FROM devices WHERE user_id = ? ORDER BY name, device_id", session.user.id,
+          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null") })) });
           break;
         }
         case "POST /api/auth/register/options":
