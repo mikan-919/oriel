@@ -244,6 +244,7 @@ function githubFixture({ paginated = false } = {}) {
     githubAuthorizationRevoked: false,
     oauthError: undefined,
     noInstallations: false,
+    tokenStatus: undefined,
     githubToken: "private-github-access",
     linearToken: "private-linear-access",
     refreshCount: 0,
@@ -313,6 +314,7 @@ function githubFixture({ paginated = false } = {}) {
           repository_ids: [501],
           permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" },
         });
+        if (fixture.tokenStatus) return Response.json({ message: "private-provider-diagnostic", token: "must-not-leak-token" }, { status: fixture.tokenStatus });
         return Response.json({ token: "limited-installation-token", expires_at: new Date(Date.now() + 3600000).toISOString() });
       }
       if (url.pathname === "/repos/octocat/connected/issues") {
@@ -690,5 +692,25 @@ test("Authorization outcomes distinguish rejected credentials, failed target acc
     const stranger = client(worker);
     await stranger.enroll(authenticator());
     assert.equal((await stranger.api("/api/integrations")).data.authorization.github, null);
+  } finally { await worker.dispose(); }
+});
+
+test("Installation token rejection preserves the connection and never releases provider credentials", { timeout: 30000 }, async () => {
+  const fixture = githubFixture();
+  const worker = await runtime(fixture.env, request => fixture.fetch(request));
+  try {
+    const { owner, daemon } = await pair(worker);
+    await connect(owner, fixture, "github");
+    fixture.tokenStatus = 422;
+    const denied = await daemon.api(`/api/integrations/${device}/github/token`, {}, hostHeaders);
+    assert.equal(denied.status, 502);
+    assert.equal(denied.data.token, undefined);
+    assert.doesNotMatch(JSON.stringify(denied.data), /private-provider-diagnostic|must-not-leak-token/);
+    assert.equal((await owner.api("/api/integrations")).data.github.repository_id, fixture.repository.repository_id);
+    fixture.tokenStatus = undefined;
+    const restored = await daemon.api(`/api/integrations/${device}/github/token`, {}, hostHeaders);
+    assert.equal(restored.status, 200);
+    assert.equal(restored.data.repository.repository_id, fixture.repository.repository_id);
+    assert.equal(restored.data.token, "limited-installation-token");
   } finally { await worker.dispose(); }
 });

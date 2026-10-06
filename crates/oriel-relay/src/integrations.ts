@@ -417,12 +417,14 @@ export class Integrations {
     if (!connection?.active || !connection.target) this.auth.fail(409, "No GitHub repository is connected");
     const repository = JSON.parse(connection.target) as Repository;
     const guard = () => { this.current(connection, "active", check); };
+    let step = "access";
     try {
       // App JWT alone must not bypass a revoked user grant or lost repository access.
       const credential = await this.credential(connection, "active", check);
       const accessible = await this.installationRepositories(credential.access_token, repository.installation_id, guard);
       if (!accessible.some(candidate => candidate.repository_id === repository.repository_id)) this.auth.fail(403, "GitHub repository is no longer accessible");
       guard();
+      step = "private_key";
       const pem = this.env.GITHUB_APP_PRIVATE_KEY!.replaceAll("\\n", "\n");
       let der = Uint8Array.from(atob(pem.replace(/-----[A-Z ]+-----/g, "").replace(/\s/g, "")), character => character.charCodeAt(0));
       if (pem.includes("BEGIN RSA PRIVATE KEY")) {
@@ -434,18 +436,32 @@ export class Integrations {
       const signingInput = `${base64url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })))}.${base64url(encoder.encode(JSON.stringify({ iat: now() - 60, exp: now() + 540, iss: this.env.GITHUB_APP_ID })))}`;
       const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(signingInput));
       guard();
+      step = "request";
       const response = await fetch(`https://api.github.com/app/installations/${repository.installation_id}/access_tokens`, {
         method: "POST", headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${signingInput}.${base64url(new Uint8Array(signature))}`, "Content-Type": "application/json", "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" },
         body: JSON.stringify({ repository_ids: [repository.repository_id], permissions: PERMISSIONS }), redirect: "manual",
       });
-      if (!response.ok) throw new Error("GitHub token failed");
+      if (!response.ok) {
+        const hint = response.status === 401
+          ? "Check GITHUB_APP_ID and the matching GitHub App private key."
+          : response.status === 422
+            ? "Check Contents, Issues and Pull requests write permissions and approval of those permissions on the installation."
+            : "Check the GitHub App installation status and granted permissions.";
+        this.auth.fail(502, `GitHub installation token request rejected (HTTP ${response.status}). ${hint}`);
+      }
+      step = "response";
       const token = await response.json() as { token?: string; expires_at?: string };
       if (typeof token.token !== "string" || !token.token || typeof token.expires_at !== "string" || !Number.isFinite(Date.parse(token.expires_at))) throw new Error("GitHub token failed");
       guard();
       return { token: token.token, expires_at: token.expires_at, repository };
     } catch (error) {
       if (error instanceof Error && "status" in error) throw error;
-      this.auth.fail(502, "GitHub installation token could not be issued");
+      if (step === "private_key") this.auth.fail(502, "GITHUB_APP_PRIVATE_KEY could not be imported or used. Supply the complete RSA PEM private key for this GitHub App, including BEGIN/END lines.");
+      if (step === "access") {
+        const code = error instanceof Error && "providerCode" in error ? ` (${error.providerCode})` : "";
+        this.auth.fail(502, `GitHub repository access verification failed${code}. Reconnect GitHub if its user authorization was revoked.`);
+      }
+      this.auth.fail(502, step === "request" ? "GitHub installation token request could not reach GitHub." : "GitHub returned an invalid installation token response.");
     }
   }
 

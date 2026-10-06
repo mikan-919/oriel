@@ -57,6 +57,10 @@ import {
 // Failures expose only the processing step and allowlisted provider error codes;
 // provider response text, OAuth state, authorization codes and tokens stay private.
 // Web shows these outcomes after reload; target=null alone is not an auth result.
+// Issue retrieval reports private-key import failures separately from GitHub token
+// request HTTP errors: 401 points to App ID/key matching; 422 to requested grants.
+// Correct the key/installation permissions, then Refresh recent issues; keep the
+// existing repository connection. Provider error bodies and tokens are not echoed.
 
 export default defineConfig({
   worker: {
