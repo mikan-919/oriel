@@ -9,6 +9,7 @@ anyhow.workspace = true
 futures-util.workspace = true
 getrandom = { version = "0.3", features = ["std"] }
 portable-pty.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

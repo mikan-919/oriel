@@ -1,11 +1,12 @@
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -24,12 +25,12 @@ use tokio_tungstenite::{
 use tracing::{error, info, warn};
 use url::Url;
 
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+mod integrations;
+
+#[derive(Serialize, PartialEq, Eq)]
 struct DeviceIdentity {
     device_id: String,
     host_token: String,
-    client_token: String,
 }
 
 fn random_hex<const N: usize>() -> Result<String> {
@@ -51,110 +52,188 @@ fn identity_path() -> Result<PathBuf> {
     }
     let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()) {
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
-            .join(".config"),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
     };
     Ok(config.join("oriel/device.json"))
 }
 
 fn is_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
-        && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn read_identity(path: &Path) -> Result<DeviceIdentity> {
+fn read_identity(path: &Path) -> Result<(DeviceIdentity, bool)> {
+    fn legacy_token<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<String>, D::Error> {
+        String::deserialize(deserializer).map(Some)
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoredIdentity {
+        device_id: String,
+        host_token: String,
+        #[serde(default, deserialize_with = "legacy_token")]
+        client_token: Option<String>,
+    }
+
     let metadata = fs::symlink_metadata(path).context("failed to inspect device identity")?;
-    ensure!(metadata.is_file(), "device identity must be a regular file, not a symlink");
+    ensure!(
+        metadata.is_file(),
+        "device identity must be a regular file, not a symlink"
+    );
     ensure!(
         metadata.permissions().mode() & 0o7777 == 0o600,
         "device identity must have mode 0600"
     );
-    let identity: DeviceIdentity = serde_json::from_reader(
-        File::open(path).context("failed to open device identity")?,
-    )
-    .map_err(|_| anyhow!("invalid device identity JSON; refusing to replace it"))?;
+    let stored: StoredIdentity =
+        serde_json::from_reader(File::open(path).context("failed to open device identity")?)
+            .map_err(|_| anyhow!("invalid device identity JSON; refusing to replace it"))?;
     ensure!(
-        is_lower_hex(&identity.device_id, 32)
-            && is_lower_hex(&identity.host_token, 64)
-            && is_lower_hex(&identity.client_token, 64)
-            && identity.host_token != identity.client_token,
+        is_lower_hex(&stored.device_id, 32)
+            && is_lower_hex(&stored.host_token, 64)
+            && stored
+                .client_token
+                .as_ref()
+                .is_none_or(|token| is_lower_hex(token, 64) && token != &stored.host_token),
         "invalid device identity credentials; refusing to replace them"
     );
-    Ok(identity)
+    Ok((
+        DeviceIdentity {
+            device_id: stored.device_id,
+            host_token: stored.host_token,
+        },
+        stored.client_token.is_some(),
+    ))
+}
+
+fn persist_identity(path: &Path, identity: &DeviceIdentity, replace: bool) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = parent.join(format!(".device-{}.tmp", random_hex::<16>()?));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .context("failed to create private identity file")?;
+    let publish = (|| -> Result<()> {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        serde_json::to_writer(&mut file, identity)?;
+        file.write_all(b"\n")?;
+        file.sync_all()
+            .context("failed to persist device identity")?;
+        if replace {
+            fs::rename(&temporary, path).context("failed to migrate device identity")?;
+        } else {
+            match fs::hard_link(&temporary, path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error).context("failed to publish device identity"),
+            }
+        }
+        Ok(())
+    })();
+    let cleanup = match fs::remove_file(&temporary) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("failed to remove temporary identity file"),
+    };
+    publish?;
+    cleanup?;
+    File::open(parent)?
+        .sync_all()
+        .context("failed to persist identity directory")?;
+    Ok(())
 }
 
 fn load_identity(path: &Path) -> Result<DeviceIdentity> {
     match fs::symlink_metadata(path) {
-        Ok(_) => return read_identity(path),
+        Ok(_) => {
+            let (identity, legacy) = read_identity(path)?;
+            if legacy {
+                persist_identity(path, &identity, true)?;
+            }
+            return Ok(identity);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("failed to inspect device identity"),
     }
 
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    DirBuilder::new().recursive(true).mode(0o700).create(parent)
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
         .context("failed to create private identity directory")?;
     let identity = DeviceIdentity {
         device_id: random_hex::<16>()?,
         host_token: random_hex::<32>()?,
-        client_token: random_hex::<32>()?,
     };
-    let temporary = parent.join(format!(".device-{}.tmp", random_hex::<16>()?));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .open(&temporary).context("failed to create private identity file")?;
-    let publish = (|| -> Result<()> {
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        serde_json::to_writer(&mut file, &identity)?;
-        file.write_all(b"\n")?;
-        file.sync_all().context("failed to persist device identity")?;
-        match fs::hard_link(&temporary, path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error).context("failed to publish device identity"),
-        }
-        Ok(())
-    })();
-    let cleanup = fs::remove_file(&temporary).context("failed to remove temporary identity file");
-    publish?;
-    cleanup?;
-    File::open(parent)?.sync_all().context("failed to persist identity directory")?;
-    read_identity(path)
+    persist_identity(path, &identity, false)?;
+    load_identity(path)
 }
 
 fn relay_origin(value: &str) -> Result<Url> {
     ensure!(
         !value.contains('\\')
-            && !value.bytes().any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+            && !value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
         "ORIEL_RELAY_URL must not contain whitespace, control characters or backslashes"
     );
-    let authority = value.strip_prefix("ws://").or_else(|| value.strip_prefix("wss://"))
-        .context("ORIEL_RELAY_URL must start with ws:// or wss://")?;
+    let authority = ["https://", "http://", "wss://", "ws://"]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(*prefix))
+        .context("ORIEL_RELAY_URL must start with https://, http://, wss:// or ws://")?;
     let authority = authority.strip_suffix('/').unwrap_or(authority);
     ensure!(
         !authority.is_empty() && !authority.contains(['/', '@', '?', '#']),
         "ORIEL_RELAY_URL must be an origin without credentials, path, query or fragment"
     );
-    let url = Url::parse(value).context("ORIEL_RELAY_URL must be a WebSocket base origin")?;
+    let mut url = Url::parse(value).context("ORIEL_RELAY_URL must be a relay base origin")?;
     ensure!(
-        matches!(url.scheme(), "ws" | "wss")
+        matches!(url.scheme(), "http" | "https" | "ws" | "wss")
             && url.host_str().is_some()
             && url.username().is_empty()
             && url.password().is_none()
             && url.path() == "/"
             && url.query().is_none()
             && url.fragment().is_none(),
-        "ORIEL_RELAY_URL must be a ws/wss origin without credentials, path, query or fragment"
+        "ORIEL_RELAY_URL must be an HTTP/WebSocket origin without credentials, path, query or fragment"
     );
     ensure!(
-        url.scheme() == "wss"
+        matches!(url.scheme(), "https" | "wss")
             || matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
-        "plaintext WebSocket relay URLs are allowed only on loopback"
+        "plaintext relay URLs are allowed only on loopback"
     );
+    let scheme = match url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        scheme => scheme,
+    }
+    .to_string();
+    url.set_scheme(&scheme)
+        .map_err(|_| anyhow!("invalid relay scheme"))?;
     Ok(url)
 }
 
 fn host_request(origin: &Url, identity: &DeviceIdentity) -> Result<Request<()>> {
     let mut url = origin.clone();
+    url.set_scheme(if origin.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    })
+    .map_err(|_| anyhow!("invalid relay scheme"))?;
     url.set_path(&format!("/device/{}/host", identity.device_id));
     let mut request = url.as_str().into_client_request()?;
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", identity.host_token))?;
@@ -163,21 +242,235 @@ fn host_request(origin: &Url, identity: &DeviceIdentity) -> Result<Request<()>> 
     Ok(request)
 }
 
-fn relay_config(identity: &DeviceIdentity) -> serde_json::Value {
-    serde_json::json!({
-        (identity.device_id.as_str()): {
-            "host_token": identity.host_token,
-            "client_token": identity.client_token,
-        }
-    })
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PairStart {
+    Paired,
+    Pending { url: String, expires_at: u64 },
 }
 
-fn client_config(identity: &DeviceIdentity, origin: &Url) -> serde_json::Value {
-    serde_json::json!({
-        "device_id": identity.device_id,
-        "client_token": identity.client_token,
-        "relay_url": origin.as_str().trim_end_matches('/'),
+#[derive(Deserialize)]
+struct PairAccount {
+    id: String,
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PairStatus {
+    Waiting,
+    Confirmation { user: PairAccount },
+    Paired,
+    Expired,
+}
+
+fn pairing_url(value: &str) -> Result<Url> {
+    let (origin, fragment) = value
+        .split_once('#')
+        .context("invalid browser pairing URL")?;
+    ensure!(
+        origin.starts_with("https://") || origin.starts_with("http://"),
+        "browser pairing requires an HTTP origin"
+    );
+    let mut url = relay_origin(origin)?;
+    ensure!(
+        fragment
+            .strip_prefix("pair=")
+            .is_some_and(|token| is_lower_hex(token, 64)),
+        "invalid browser pairing URL"
+    );
+    url.set_fragment(Some(fragment));
+    Ok(url)
+}
+
+fn device_name(identity: &DeviceIdentity) -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| {
+            name.trim()
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(128)
+                .collect()
+        })
+        .unwrap_or_else(|| format!("Oriel-{}", &identity.device_id[..8]))
+}
+
+fn unix_seconds() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs())
+}
+
+async fn open_browser(url: &Url) -> Result<bool> {
+    let browser_url = url.to_string();
+    tokio::task::spawn_blocking(move || {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        Command::new(opener)
+            .arg(browser_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     })
+    .await
+    .context("browser opener task failed")
+}
+
+fn confirm_account(tty: &mut File, account: &PairAccount) -> Result<bool> {
+    ensure!(is_lower_hex(&account.id, 32), "invalid pairing account ID");
+    writeln!(tty, "\nAuthorize this device for the following account?")?;
+    writeln!(tty, "Account name: {:?}", account.display_name)?;
+    writeln!(tty, "Account ID:   {}", account.id)?;
+    write!(
+        tty,
+        "Check both against your browser. Type yes to authorize; anything else cancels: "
+    )?;
+    tty.flush()?;
+    let mut answer = Vec::with_capacity(4);
+    let mut byte = [0];
+    loop {
+        if tty.read(&mut byte)? == 0 {
+            return Ok(false);
+        }
+        if byte[0] == b'\n' {
+            return Ok(answer == b"yes");
+        }
+        if answer.len() == 16 {
+            return Ok(false);
+        }
+        answer.push(byte[0]);
+    }
+}
+
+async fn pair_device(
+    client: &reqwest::Client,
+    origin: &Url,
+    identity: &DeviceIdentity,
+    url: &str,
+    expires_at: u64,
+) -> Result<()> {
+    let url = pairing_url(url)?;
+    ensure!(unix_seconds()? < expires_at, "pairing URL has expired");
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .context("pairing requires a controlling terminal for local account confirmation")?;
+    ensure!(
+        tty.is_terminal(),
+        "pairing requires an interactive controlling terminal"
+    );
+    writeln!(
+        tty,
+        "Pair device {} in your browser:\n{url}",
+        identity.device_id
+    )?;
+    writeln!(
+        tty,
+        "This link expires in {} seconds. Browser approval still requires local confirmation.",
+        expires_at.saturating_sub(unix_seconds()?)
+    )?;
+    tty.flush()?;
+    let opened = open_browser(&url).await?;
+    if !opened {
+        writeln!(
+            tty,
+            "Could not open a browser automatically; open the pairing URL above."
+        )?;
+        tty.flush()?;
+    }
+
+    let status_url = origin.join(&format!("/api/pair/{}/status", identity.device_id))?;
+    loop {
+        ensure!(unix_seconds()? < expires_at, "pairing URL has expired");
+        let status: PairStatus = client
+            .get(status_url.clone())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("invalid pairing status response")?;
+        match status {
+            PairStatus::Waiting => tokio::time::sleep(Duration::from_secs(1)).await,
+            PairStatus::Expired => bail!("pairing URL has expired"),
+            PairStatus::Paired => return Ok(()),
+            PairStatus::Confirmation { user } => {
+                let user_id = user.id.clone();
+                let approved =
+                    tokio::task::spawn_blocking(move || confirm_account(&mut tty, &user))
+                        .await
+                        .context("local account confirmation task failed")??;
+                ensure!(
+                    approved,
+                    "pairing cancelled; local account confirmation was not granted"
+                );
+                let confirmed: PairStatus = client
+                    .post(origin.join(&format!("/api/pair/{}/confirm", identity.device_id))?)
+                    .json(&serde_json::json!({ "user_id": user_id }))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await
+                    .context("invalid pairing confirmation response")?;
+                ensure!(
+                    matches!(confirmed, PairStatus::Paired),
+                    "pairing was not confirmed"
+                );
+                return Ok(());
+            }
+        }
+    }
+}
+
+async fn ensure_paired(origin: &Url, identity: &DeviceIdentity) -> Result<()> {
+    let mut authorization =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", identity.host_token))?;
+    authorization.set_sensitive(true);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, authorization);
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("failed to initialize pairing HTTP client")?;
+    let start: PairStart = client
+        .post(origin.join("/api/pair/start")?)
+        .json(
+            &serde_json::json!({ "device_id": identity.device_id, "name": device_name(identity) }),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("invalid pairing start response")?;
+    let PairStart::Pending { url, expires_at } = start else {
+        return Ok(());
+    };
+    let result = pair_device(&client, origin, identity, &url, expires_at).await;
+    if result.is_err() {
+        let cancelled = client
+            .post(origin.join(&format!("/api/pair/{}/cancel", identity.device_id))?)
+            .json(&serde_json::json!({}))
+            .send()
+            .await;
+        if !matches!(cancelled, Ok(response) if response.status().is_success()) {
+            warn!("could not cancel pending pairing; its URL will expire");
+        }
+    }
+    result
 }
 
 struct Terminal {
@@ -191,54 +484,56 @@ type TerminalHandle = Arc<Terminal>;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let mode = args.next();
-    if args.next().is_some()
-        || mode.as_ref().is_some_and(|arg|
-            arg != "--print-relay-config" && arg != "--print-client-config"
-                && arg != "--help" && arg != "-h")
-    {
-        bail!("usage: orield [--print-relay-config | --print-client-config | --help]");
-    }
-    if mode.as_ref().is_some_and(|arg| arg == "--help" || arg == "-h") {
-        println!("{}", concat!(
-            "Usage: orield [--print-relay-config | --print-client-config | --help]\n\n",
-            "Without a flag, run Codex in a PTY and reconnect to the authenticated relay.\n",
-            "--print-relay-config  Print SECRET JSON for the Relay's ORIEL_DEVICE_CREDENTIALS.\n",
-            "--print-client-config Print SECRET {device_id,client_token,relay_url} JSON for Browser setup.\n",
-            "Both config flags initialize/load the identity and exit without launching Codex.\n",
-            "Manually provision the Relay's Cloudflare secret; there is no automatic enrollment.\n",
-            "Do not commit, log or share config output or the identity file.\n\n",
-            "Identity: $XDG_CONFIG_HOME/oriel/device.json, falling back to\n",
-            "$HOME/.config/oriel/device.json; ORIEL_IDENTITY_FILE overrides the path.\n",
-            "Created files are mode 0600 and new directories private. Invalid identities are never reset.\n",
-            "ORIEL_RELAY_URL: ws/wss base origin, default ws://127.0.0.1:8787.\n",
-            "Paths, credentials, queries and fragments are forbidden; plaintext ws is allowed\n",
-            "only for localhost, 127.0.0.1 and [::1]. The daemon appends /device/<device_id>/host."
-        ));
-        return Ok(());
-    }
+    let first = args.next();
+    let second = args.next();
+    ensure!(args.next().is_none(), "usage: orield [--help | integrations]");
+    let mode = match (first.as_deref(), second.as_deref()) {
+        (None, None) => false,
+        (Some(arg), None) if arg == "--help" || arg == "-h" => {
+            println!(
+                "{}",
+                concat!(
+                    "Usage: orield [--help | integrations]\n\n",
+                    "Pair this device with a Passkey account, then run Codex in a PTY.\n",
+                    "First start opens a browser and requires explicit local account confirmation.\n",
+                    "Already paired devices reconnect automatically without a pairing prompt.\n",
+                    "Keep the identity file private; it contains the persistent host secret.\n\n",
+                    "Connect GitHub and Linear in Oriel Web; connections are shared by your devices.\n",
+                    "integrations: fetch the connected repository/team's recent 20 issues through relay.\n",
+                    "Provider credentials stay encrypted in relay; no local credential store is needed.\n\n",
+                    "Identity: $XDG_CONFIG_HOME/oriel/device.json, falling back to\n",
+                    "$HOME/.config/oriel/device.json; ORIEL_IDENTITY_FILE overrides the path.\n",
+                    "Created files are mode 0600 and new directories private. Invalid identities are never reset.\n",
+                    "ORIEL_RELAY_URL: https/http or wss/ws base origin, default\n",
+                    "https://oriel-relay.mikan-919.workers.dev.\n",
+                    "Paths, credentials, queries and fragments are forbidden; plaintext is allowed\n",
+                    "only for localhost, 127.0.0.1 and [::1]."
+                )
+            );
+            return Ok(());
+        }
+        (Some(arg), None) if arg == "integrations" => true,
+        _ => bail!("usage: orield [--help | integrations]"),
+    };
     let identity = load_identity(&identity_path()?)?;
     let relay_value = match std::env::var("ORIEL_RELAY_URL") {
         Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => "ws://127.0.0.1:8787".to_string(),
+        Err(std::env::VarError::NotPresent) => {
+            "https://oriel-relay.mikan-919.workers.dev".to_string()
+        }
         Err(_) => bail!("ORIEL_RELAY_URL must be valid UTF-8"),
     };
     let relay_url = relay_origin(&relay_value)?;
-    if let Some(mode) = mode {
-        let config = if mode == "--print-relay-config" {
-            relay_config(&identity)
-        } else {
-            client_config(&identity, &relay_url)
-        };
-        println!("{}", serde_json::to_string(&config)?);
-        return Ok(());
-    }
 
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
 
     tracing_subscriber::fmt::init();
+    ensure_paired(&relay_url, &identity).await?;
+    if mode {
+        return integrations::run(&relay_url, &identity).await;
+    }
 
     let terminal = spawn_terminal("codex")?;
 
@@ -463,8 +758,10 @@ mod tests {
 
     impl TestDirectory {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("orield-identity-test-{}", random_hex::<16>().unwrap()));
+            let path = std::env::temp_dir().join(format!(
+                "orield-identity-test-{}",
+                random_hex::<16>().unwrap()
+            ));
             DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
@@ -485,12 +782,50 @@ mod tests {
         let second = load_identity(&directory.0.join("second/device.json")).unwrap();
         assert!(first.device_id != second.device_id);
         assert!(first.host_token != second.host_token);
-        assert!(first.client_token != second.client_token);
-        assert!(first.host_token != first.client_token);
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(
-            fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o700
+        );
+    }
+
+    #[test]
+    fn legacy_identity_migrates_without_rotating_host_credentials() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("device.json");
+        let device_id = "a".repeat(32);
+        let host_token = "1".repeat(64);
+        let legacy = serde_json::json!({
+            "device_id": device_id,
+            "host_token": host_token,
+            "client_token": "2".repeat(64),
+        });
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut file, &legacy).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let migrated = load_identity(&path).unwrap();
+        assert_eq!(migrated.device_id, device_id);
+        assert_eq!(migrated.host_token, host_token);
+        let stored: serde_json::Value =
+            serde_json::from_reader(File::open(&path).unwrap()).unwrap();
+        assert!(stored.get("client_token").is_none());
+        assert!(migrated == load_identity(&path).unwrap());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o600
         );
     }
 
@@ -498,18 +833,36 @@ mod tests {
     fn invalid_existing_identity_is_never_replaced_or_logged() {
         let directory = TestDirectory::new();
         let path = directory.0.join("device.json");
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
-            .open(&path).unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
         for invalid in [
             "{}".to_string(),
             "{\"device_id\":".to_string(),
             format!(
                 "{{\"device_id\":\"{}\",\"host_token\":\"{}\",\"client_token\":\"{}\"}}",
-                "A".repeat(32), "1".repeat(64), "2".repeat(64)
+                "A".repeat(32),
+                "1".repeat(64),
+                "2".repeat(64)
             ),
             format!(
                 "{{\"device_id\":\"{}\",\"host_token\":\"{}\",\"client_token\":\"{}\"}}",
-                "a".repeat(32), "1".repeat(64), "1".repeat(64)
+                "a".repeat(32),
+                "1".repeat(64),
+                "1".repeat(64)
+            ),
+            format!(
+                "{{\"device_id\":\"{}\",\"host_token\":\"{}\",\"client_token\":null}}",
+                "a".repeat(32),
+                "1".repeat(64)
+            ),
+            format!(
+                "{{\"device_id\":\"{}\",\"host_token\":\"{}\"}}",
+                "a".repeat(32),
+                "short-secret"
             ),
             format!("{{\"unexpected-secret-{}\":0}}", "a".repeat(64)),
         ] {
@@ -544,15 +897,20 @@ mod tests {
         let directory = TestDirectory::new();
         let path = directory.0.join("oriel/device.json");
         let barrier = Arc::new(Barrier::new(8));
-        let threads: Vec<_> = (0..8).map(|_| {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            thread::spawn(move || {
-                barrier.wait();
-                load_identity(&path).unwrap()
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    load_identity(&path).unwrap()
+                })
             })
-        }).collect();
-        let identities: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+            .collect();
+        let identities: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
         assert!(identities.iter().all(|identity| identity == &identities[0]));
         assert!(load_identity(&path).unwrap() == identities[0]);
     }
@@ -560,27 +918,49 @@ mod tests {
     #[test]
     fn relay_origins_enforce_transport_and_secret_boundaries() {
         for allowed in [
-            "ws://localhost:8787", "ws://127.0.0.1:8787", "ws://[::1]:8787",
+            "ws://localhost:8787",
+            "ws://127.0.0.1:8787",
+            "ws://[::1]:8787",
             "wss://relay.example.com",
+            "https://relay.example.com",
+            "http://localhost:8787",
+            "http://127.0.0.1:8787",
+            "http://[::1]:8787",
         ] {
             assert!(relay_origin(allowed).is_ok(), "{allowed}");
         }
         for forbidden in [
-            "ws://relay.example.com", "ws://192.168.1.1", "ws://127.0.0.2",
-            "ws://localhost.example.com", "ws://[::2]", "https://relay.example.com",
-            "wss://user:secret@relay.example.com", "wss://relay.example.com/host",
-            "wss://relay.example.com?token=secret", "wss://relay.example.com#secret",
-            " wss://relay.example.com", "wss://relay.exa\nmple.com",
+            "ws://relay.example.com",
+            "ws://192.168.1.1",
+            "ws://127.0.0.2",
+            "ws://localhost.example.com",
+            "ws://[::2]",
+            "http://relay.example.com",
+            "http://192.168.1.1",
+            "http://127.0.0.2",
+            "http://localhost.example.com",
+            "https://user:secret@relay.example.com",
+            "https://relay.example.com/api",
+            "https://relay.example.com?token=secret",
+            "https://relay.example.com#secret",
+            "wss://user:secret@relay.example.com",
+            "wss://relay.example.com/host",
+            "wss://relay.example.com?token=secret",
+            "wss://relay.example.com#secret",
+            " wss://relay.example.com",
+            "wss://relay.exa\nmple.com",
             "wss:\\\\relay.example.com",
-            "wss:relay.example.com", "wss:///relay.example.com",
-            "wss://relay.example.com/.", "wss://relay.example.com/foo/..",
+            "wss:relay.example.com",
+            "wss:///relay.example.com",
+            "wss://relay.example.com/.",
+            "wss://relay.example.com/foo/..",
         ] {
             assert!(relay_origin(forbidden).is_err(), "{forbidden}");
         }
     }
 
     #[test]
-    fn host_auth_and_client_config_keep_role_tokens_separate() {
+    fn host_auth_keeps_credentials_out_of_urls_and_debug_output() {
         let directory = TestDirectory::new();
         let identity = load_identity(&directory.0.join("device.json")).unwrap();
         let origin = relay_origin("wss://relay.example.com").unwrap();
@@ -597,9 +977,31 @@ mod tests {
         assert!(request.headers()[AUTHORIZATION].is_sensitive());
         let debug = format!("{request:?}");
         assert!(!debug.contains(&identity.host_token));
-        assert!(!debug.contains(&identity.client_token));
-        let config = client_config(&identity, &origin);
-        assert!(!config.to_string().contains(&identity.host_token));
-        assert!(config.get("host_token").is_none());
+    }
+
+    #[test]
+    fn browser_pairing_urls_reject_insecure_or_ambiguous_destinations() {
+        let token = "a".repeat(64);
+        for origin in ["https://web.example.com/", "http://localhost:8788/"] {
+            assert!(pairing_url(&format!("{origin}#pair={token}")).is_ok());
+        }
+        for origin in [
+            "http://web.example.com/",
+            "http://127.0.0.2/",
+            "ws://localhost/",
+            "https://user:secret@web.example.com/",
+            "https://web.example.com/.",
+            "https://web.example.com/claim",
+            "https://web.example.com/?secret=x",
+            "https:///web.example.com/",
+        ] {
+            assert!(
+                pairing_url(&format!("{origin}#pair={token}")).is_err(),
+                "{origin}"
+            );
+        }
+        for fragment in ["pair=short", "pair=", "token=secret", "pair=../secret"] {
+            assert!(pairing_url(&format!("https://web.example.com/#{fragment}")).is_err());
+        }
     }
 }

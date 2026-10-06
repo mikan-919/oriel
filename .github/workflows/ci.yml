@@ -14,26 +14,18 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - app: oriel-relay
-            target: wasm32-unknown-unknown
-          - app: oriel-web
-
     defaults:
       run:
-        working-directory: crates/${{ matrix.app }}
+        working-directory: crates/oriel-relay
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: wasm32-unknown-unknown
 
       - name: Install native dependencies
-        if: matrix.app == 'oriel-relay'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
@@ -42,16 +34,33 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install worker-build
-        if: matrix.app == 'oriel-relay'
         run: cargo install --locked worker-build --version "^0.8"
 
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Build
+      - name: Build Relay
         run: npm run build
 
-      - name: Deploy
+      - name: Verify authentication boundaries
+        run: npm test
+
+      - name: Deploy Relay before its Browser client
+        run: npx cf deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Install Browser dependencies
+        working-directory: crates/oriel-web
+        run: npm ci
+
+      - name: Build Browser
+        working-directory: crates/oriel-web
+        run: npm run build
+
+      - name: Deploy Browser
+        working-directory: crates/oriel-web
         run: npx cf deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
