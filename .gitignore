@@ -1,2 +1,7 @@
 /target
 .direnv
+node_modules
+build
+.dev.vars*
+.cloudflare
+.wrangler

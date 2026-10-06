@@ -18,6 +18,9 @@
             rust-analyzer
             rustfmt
             clippy
+
+            nodejs
+            openssl
         ];
 
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";

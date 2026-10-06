@@ -1,0 +1,9 @@
+[package]
+name = "oriel-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+topcoat.workspace = true
+tokio.workspace = true

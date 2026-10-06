@@ -2,18 +2,48 @@
 resolver = "3"
 members = [
     "crates/orield",
+    "crates/oriel-web",
+    "crates/oriel-relay",
 ]
 
 [workspace.package]
-edition = "2024"
 version = "0.1.0"
+edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
 portable-pty = "0.9"
+
+rustls = {
+    version = "0.23",
+    default-features = false,
+    features = ["ring"]
+}
+
 tokio = { version = "1", features = ["full"] }
+
+tokio-tungstenite = {
+    version = "0.30",
+    default-features = false,
+    features = [
+        "connect",
+        "rustls-tls-webpki-roots",
+    ]
+}
+
+topcoat = { version = "0.9", default-features = false, features = ["view"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+tracing-subscriber = "0.3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[profile.release.package.oriel-relay]
+# wasm-bindgen catch wrappers need the Wasm externref table name.
+strip = false

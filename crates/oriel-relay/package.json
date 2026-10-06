@@ -5,11 +5,14 @@
   "scripts": {
     "dev": "cf dev",
     "build": "cf build",
+    "test": "node --test test/*.test.mjs",
     "check": "cf deploy --dry-run",
     "deploy": "cf deploy"
   },
   "devDependencies": {
+    "@mizchi/vlmkit": "^0.23.0",
     "cf": "1.0.0-beta.5",
+    "miniflare": "5.20261001.0-alpha",
     "wrangler": "^4.136.0"
   }
 }

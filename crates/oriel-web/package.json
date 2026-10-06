@@ -1,0 +1,15 @@
+{
+  "name": "oriel-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cargo run --release -p oriel-web && cf dev",
+    "build": "cargo run --release -p oriel-web && cf build",
+    "check": "npm run build && cf deploy --dry-run",
+    "deploy": "npm run build && cf deploy"
+  },
+  "devDependencies": {
+    "cf": "1.0.0-beta.5",
+    "wrangler": "^4.136.0"
+  }
+}
