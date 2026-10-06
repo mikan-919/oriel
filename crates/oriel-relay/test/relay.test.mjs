@@ -242,6 +242,8 @@ function githubFixture({ paginated = false } = {}) {
     revokeFailed: false,
     apiFailed: false,
     githubAuthorizationRevoked: false,
+    oauthError: undefined,
+    noInstallations: false,
     githubToken: "private-github-access",
     linearToken: "private-linear-access",
     refreshCount: 0,
@@ -276,6 +278,7 @@ function githubFixture({ paginated = false } = {}) {
           assert.equal(fields.has("client_secret"), false);
         } else assert.equal(fields.get("client_secret"), "github-secret");
         if (fixture.exchange) await fixture.exchange();
+        if (fixture.oauthError) return Response.json({ error: fixture.oauthError, error_description: "private-provider-diagnostic", access_token: "must-not-leak" });
         return Response.json({ access_token: linear ? fixture.linearToken : fixture.githubToken,
           refresh_token: linear ? "private-linear-refresh" : "private-github-refresh", expires_in: fixture.expiresIn ?? 86400 });
       }
@@ -321,6 +324,7 @@ function githubFixture({ paginated = false } = {}) {
       assert.equal(request.headers.get("Authorization"), `Bearer ${fixture.githubToken}`);
       if (fixture.githubAuthorizationRevoked) return new Response(null, { status: 401 });
       if (url.pathname === "/user/installations") {
+        if (fixture.noInstallations) return Response.json({ installations: [] });
         const account = { id: 7, login: "octocat", type: fixture.organization ? "Organization" : "User" };
         if (paginated && url.searchParams.get("page") === "1") {
           return Response.json({ installations: Array.from({ length: 100 }, (_, index) => ({ id: index + 1, app_id: 999, account })) });
@@ -389,14 +393,17 @@ test("Account connections serve both owned devices, keep credentials encrypted a
     const expected = { github: fixture.repository, linear: fixture.team };
     assert.deepEqual((await daemon.api(`/api/integrations/${device}`, undefined, hostHeaders)).data, expected);
     assert.deepEqual((await daemon.api(`/api/integrations/${other}`, undefined, hostHeaders)).data, expected);
-    assert.deepEqual((await stranger.api("/api/integrations")).data, { github: null, linear: null, choices: { github: [], linear: [] } });
+    assert.deepEqual((await stranger.api("/api/integrations")).data, {
+      github: null, linear: null, choices: { github: [], linear: [] },
+      authorization: { github: null, linear: null },
+    });
     assert.equal((await stranger.api("/api/integrations/github/select", { installation_id: 101, repository_id: 501 })).status, 409);
     assert.equal((await stranger.api(`/api/integrations/${device}`, undefined, { Authorization: `Bearer ${"e".repeat(64)}` })).status, 403);
     assert.equal((await client(worker).api(`/api/integrations/${device}`)).status, 401);
     assert.equal((await owner.api("/api/integrations/github/start", {}, { Origin: "https://evil.example" })).status, 403);
     assert.equal((await daemon.api(`/api/integrations/${device}/github/start`, {}, hostHeaders)).status, 404);
     const browser = (await owner.api("/api/integrations")).data;
-    assert.deepEqual(browser, { ...expected, choices: { github: [], linear: [] } });
+    assert.deepEqual(browser, { ...expected, choices: { github: [], linear: [] }, authorization: { github: null, linear: null } });
     const issued = await daemon.api(`/api/integrations/${other}/github/token`, {}, hostHeaders);
     assert.deepEqual(issued.data.repository, fixture.repository);
     assert.equal(issued.data.token, "limited-installation-token");
@@ -493,7 +500,10 @@ test("OAuth binds the exact live session and rejects expired, superseded and log
     release();
     assert.equal((await revoked).headers.get("Location"), `${origin}/#connection-error=authorization-failed`);
     assert.equal((await worker.dispatchFetch(`${origin}/api/integrations/callback/github?state=${newest}&code=secret`, { headers: { Cookie: oldCookies } })).status, 401);
-    assert.deepEqual((await secondSession.api("/api/integrations")).data, { github: null, linear: null, choices: { github: [], linear: [] } });
+    const afterLogout = (await secondSession.api("/api/integrations")).data;
+    assert.equal(afterLogout.github, null);
+    assert.deepEqual(afterLogout.choices.github, []);
+    assert.equal(afterLogout.authorization.github.status, "failed");
   } finally { release?.(); await worker.dispose(); }
 });
 
@@ -603,7 +613,10 @@ test("Missing provider encryption configuration leaves pairing and empty connect
       assert.equal(result.status, 503);
       assert.match(result.data.error, /INTEGRATION_ENCRYPTION_KEY/);
     }
-    assert.deepEqual((await owner.api("/api/integrations")).data, { github: null, linear: null, choices: { github: [], linear: [] } });
+    assert.deepEqual((await owner.api("/api/integrations")).data, {
+      github: null, linear: null, choices: { github: [], linear: [] },
+      authorization: { github: null, linear: null },
+    });
     assert.deepEqual((await daemon.api(`/api/integrations/${device}`, undefined, hostHeaders)).data, { github: null, linear: null });
     assert.deepEqual((await daemon.api(`/api/pair/${device}/status`, undefined, hostHeaders)).data, { status: "paired" });
   } finally { await worker.dispose(); }
@@ -639,5 +652,43 @@ test("Revoked GitHub user authorization blocks new installation tokens", { timeo
     const denied = await daemon.api(`/api/integrations/${device}/github/token`, {}, hostHeaders);
     assert.equal(denied.status, 502);
     assert.equal(denied.data.token, undefined);
+  } finally { await worker.dispose(); }
+});
+
+test("Authorization outcomes distinguish rejected credentials, failed target access and empty repository choices", { timeout: 30000 }, async () => {
+  const fixture = githubFixture();
+  const worker = await runtime(fixture.env, request => fixture.fetch(request));
+  try {
+    const owner = client(worker);
+    await owner.enroll(authenticator());
+    const snapshot = async () => (await owner.api("/api/integrations")).data;
+    fixture.oauthError = "incorrect_client_credentials";
+    await owner.callback("github", await authorize(owner, fixture, "github"));
+    assert.deepEqual((await snapshot()).authorization.github, { status: "failed", step: "exchange", error: "incorrect_client_credentials" });
+    await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.equal((await snapshot()).authorization.github.error, "incorrect_client_credentials");
+    fixture.oauthError = "secret-untrusted-provider-error";
+    await owner.callback("github", await authorize(owner, fixture, "github"));
+    assert.deepEqual((await snapshot()).authorization.github, { status: "failed", step: "exchange", error: "invalid_token_response" });
+    assert.doesNotMatch(JSON.stringify(await snapshot()), /private-provider|must-not-leak|secret-untrusted/);
+    fixture.oauthError = undefined;
+    fixture.githubAuthorizationRevoked = true;
+    await owner.callback("github", await authorize(owner, fixture, "github"));
+    assert.deepEqual((await snapshot()).authorization.github, { status: "failed", step: "targets", error: "http_401" });
+    fixture.githubAuthorizationRevoked = false;
+    fixture.noInstallations = true;
+    await owner.callback("github", await authorize(owner, fixture, "github"));
+    const empty = await snapshot();
+    assert.deepEqual(empty.authorization.github, { status: "ready" });
+    assert.deepEqual(empty.choices.github, []);
+    assert.equal(empty.github, null);
+    fixture.noInstallations = false;
+    await connect(owner, fixture, "github");
+    const connected = await snapshot();
+    assert.equal(connected.authorization.github, null);
+    assert.equal(connected.github.repository_id, fixture.repository.repository_id);
+    const stranger = client(worker);
+    await stranger.enroll(authenticator());
+    assert.equal((await stranger.api("/api/integrations")).data.authorization.github, null);
   } finally { await worker.dispose(); }
 });

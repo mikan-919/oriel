@@ -110,6 +110,7 @@ const providers = ["github", "linear"];
 const providerNames = {github: "GitHub", linear: "Linear"};
 const providerControls = Object.fromEntries(providers.map((provider) => [provider, {
     details: document.getElementById(`${provider}-details`),
+    authorization: document.getElementById(`${provider}-authorization`),
     connect: document.getElementById(`${provider}-connect`),
     disconnect: document.getElementById(`${provider}-disconnect`),
     selection: document.getElementById(`${provider}-selection`),
@@ -160,6 +161,30 @@ function render() {
         const controls = providerControls[provider];
         const target = integrations?.[provider];
         const choices = integrations?.choices?.[provider] ?? [];
+        const attempt = integrations?.authorization?.[provider];
+        let explanation = "";
+        if (attempt?.status === "failed") {
+            const code = attempt.error;
+            if (code === "incorrect_client_credentials" || code === "invalid_client") {
+                explanation = `${providerNames[provider]} rejected the app credentials. Check the Client ID and its matching Client secret in Relay.`;
+            } else if (attempt.step === "targets") {
+                explanation = `${providerNames[provider]} authorization succeeded, but reading available targets failed (${code || "details unavailable"}).`;
+            } else {
+                explanation = `${providerNames[provider]} authorization failed${attempt.step ? ` during ${attempt.step}` : ""}${code ? ` (${code})` : ""}.`;
+            }
+        } else if (attempt?.status === "ready" && !target) {
+            explanation = choices.length
+                ? `Authorization succeeded. Choose a ${provider === "github" ? "repository" : "team"} below and save the target.`
+                : provider === "github"
+                    ? "Authorization succeeded, but no repository is available to this GitHub account for the configured App. Check that account's access to the installed App."
+                    : "Authorization succeeded, but no team is available to this Linear account.";
+        } else if (attempt?.status === "interrupted") {
+            explanation = "Authorization was interrupted. Connect again to restart it.";
+        } else if (attempt && !target) {
+            explanation = "Authorization has not completed. Connect again to restart it.";
+        }
+        controls.authorization.textContent = explanation;
+        controls.authorization.hidden = !explanation;
         controls.details.textContent = target
             ? provider === "github"
                 ? `Connected to ${target.owner}/${target.name} (repository ${target.repository_id}, installation ${target.installation_id}).`
@@ -729,6 +754,7 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                             <section aria-labelledby="github-heading">
                                 <h3 id="github-heading">"GitHub"</h3>
                                 <p id="github-details"></p>
+                                <p id="github-authorization" role="status" hidden=""></p>
                                 <button id="github-connect" type="button">"Connect GitHub"</button>
                                 <button id="github-disconnect" type="button">"Disconnect GitHub"</button>
                                 <p>"Disconnect blocks new access. Previously issued GitHub installation tokens may remain valid until expiry (up to 1 hour)."</p>
@@ -742,6 +768,7 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                             <section aria-labelledby="linear-heading">
                                 <h3 id="linear-heading">"Linear"</h3>
                                 <p id="linear-details"></p>
+                                <p id="linear-authorization" role="status" hidden=""></p>
                                 <button id="linear-connect" type="button">"Connect Linear"</button>
                                 <button id="linear-disconnect" type="button">"Disconnect Linear"</button>
                                 <div id="linear-selection" hidden="">

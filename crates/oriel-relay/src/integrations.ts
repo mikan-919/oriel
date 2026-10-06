@@ -30,6 +30,7 @@ type Auth = {
 };
 const SECRET = /^[a-f0-9]{64}$/;
 const PERMISSIONS = { contents: "write", issues: "write", pull_requests: "write", metadata: "read" };
+const TOKEN_ERRORS = ["incorrect_client_credentials", "bad_verification_code", "redirect_uri_mismatch", "access_denied", "invalid_grant", "invalid_client"];
 const now = () => Math.floor(Date.now() / 1000);
 const encoder = new TextEncoder();
 const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -102,6 +103,13 @@ export class Integrations {
     return { github: JSON.parse(this.row(user, "github")?.target ?? "null"), linear: JSON.parse(this.row(user, "linear")?.target ?? "null") };
   }
 
+  private authorization(user: string, provider: Provider): { status: string; step?: string; error?: string } | null {
+    const flow = this.sql.exec<{ phase: string }>("SELECT phase FROM account_oauth WHERE user_id = ? AND provider = ?", user, provider).toArray()[0];
+    if (!flow) return null;
+    const [status, step, error] = flow.phase.split(":");
+    return { status, ...(step ? { step } : {}), ...(error ? { error } : {}) };
+  }
+
   private liveDevice(device: Device): void {
     const current = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device.device_id).toArray()[0];
     if (!current || current.user_id !== device.user_id || current.host_hash !== device.host_hash) this.auth.fail(403, "Device ownership changed");
@@ -155,6 +163,9 @@ export class Integrations {
       return this.auth.json({ ...this.connections(session.user.id), choices: {
         github: JSON.parse(this.row(session.user.id, "github")?.choices ?? "[]"),
         linear: JSON.parse(this.row(session.user.id, "linear")?.choices ?? "[]"),
+      }, authorization: {
+        github: this.authorization(session.user.id, "github"),
+        linear: this.authorization(session.user.id, "linear"),
       } });
     }
     const body = await this.auth.body(request);
@@ -194,9 +205,11 @@ export class Integrations {
     this.config(provider);
     this.sql.exec("UPDATE account_oauth SET phase = 'processing' WHERE state = ?", flow.state);
     const check = () => { this.flow(flow.state, provider, session, "processing"); };
+    let step = "authorization";
     try {
       const code = url.searchParams.get("code");
       if (url.searchParams.has("error") || !code || code.length > 4096 || /[\x00-\x1f\x7f]/.test(code)) throw new Error("Authorization declined");
+      step = "exchange";
       let credential: Credential;
       if (provider === "linear") {
         const verifier = await this.decrypt<string>(flow.user_id, provider, "pkce", flow.verifier!);
@@ -204,17 +217,22 @@ export class Integrations {
         credential = await this.exchange(provider, { client_id: this.env.LINEAR_CLIENT_ID!, grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: this.redirectUri(provider) });
       } else credential = await this.exchange(provider, { client_id: this.env.GITHUB_CLIENT_ID!, client_secret: this.env.GITHUB_CLIENT_SECRET!, code, redirect_uri: this.redirectUri(provider) });
       check();
+      step = "storage";
       // Persist the exchanged credential before enumeration, so an eviction never loses a rotated token.
       const ciphertext = await this.encrypt(flow.user_id, provider, "credentials", credential);
       check();
       this.sql.exec("UPDATE account_integrations SET pending = ?, choices = NULL, pending_status = 'ready' WHERE user_id = ? AND provider = ?", ciphertext, flow.user_id, provider);
+      step = "targets";
       const choices = provider === "github" ? await this.repositories(credential.access_token, check) : await this.teams(credential.access_token, check);
+      step = "completion";
       check();
       this.sql.exec("UPDATE account_integrations SET choices = ? WHERE user_id = ? AND provider = ?", JSON.stringify(choices), flow.user_id, provider);
       this.sql.exec("UPDATE account_oauth SET phase = 'ready', verifier = NULL WHERE state = ?", flow.state);
       return this.redirect(`#connected=${provider}`);
-    } catch {
-      this.sql.exec("UPDATE account_oauth SET phase = 'failed', verifier = NULL WHERE state = ? AND phase = 'processing'", flow.state);
+    } catch (error) {
+      // Persist only our stage and allowlisted provider codes, never response text or credentials.
+      const code = error instanceof Error && "providerCode" in error ? String(error.providerCode) : "request_failed";
+      this.sql.exec("UPDATE account_oauth SET phase = ?, verifier = NULL WHERE state = ? AND phase = 'processing'", `failed:${step}:${code}`, flow.state);
       return this.redirect("#connection-error=authorization-failed");
     }
   }
@@ -223,10 +241,12 @@ export class Integrations {
     const response = await fetch(provider === "github" ? "https://github.com/login/oauth/access_token" : "https://api.linear.app/oauth/token", {
       method: "POST", headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Oriel" }, body: new URLSearchParams(fields), redirect: "manual",
     });
-    if (!response.ok) throw new Error("Provider exchange failed");
-    const result = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number; error?: string };
-    if (result.error || typeof result.access_token !== "string" || !result.access_token) throw new Error("Provider exchange failed");
-    if (result.refresh_token !== undefined && (typeof result.refresh_token !== "string" || !result.refresh_token)) throw new Error("Provider refresh credential invalid");
+    const result = await response.json().catch(() => null) as { access_token?: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number; error?: string } | null;
+    if (!response.ok || !result || result.error || typeof result.access_token !== "string" || !result.access_token ||
+        result.refresh_token !== undefined && (typeof result.refresh_token !== "string" || !result.refresh_token)) {
+      const code = result?.error && TOKEN_ERRORS.includes(result.error) ? result.error : !response.ok ? `http_${response.status}` : "invalid_token_response";
+      throw Object.assign(new Error("Provider exchange failed"), { providerCode: code });
+    }
     return { access_token: result.access_token, refresh_token: result.refresh_token,
       expires_at: typeof result.expires_in === "number" && result.expires_in > 0 ? now() + result.expires_in : provider === "linear" ? now() + 86400 : undefined,
       refresh_expires_at: typeof result.refresh_token_expires_in === "number" && result.refresh_token_expires_in > 0 ? now() + result.refresh_token_expires_in : undefined };
@@ -280,7 +300,7 @@ export class Integrations {
     const response = await fetch(`https://api.github.com${path}`, {
       headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" }, redirect: "manual",
     });
-    if (!response.ok) throw new Error("GitHub authorization unavailable");
+    if (!response.ok) throw Object.assign(new Error("GitHub authorization unavailable"), { providerCode: `http_${response.status}` });
     return await response.json() as T;
   }
 
@@ -312,9 +332,9 @@ export class Integrations {
 
   private async linear<T>(token: string, query: string, variables: Record<string, unknown> = {}): Promise<T> {
     const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }), redirect: "manual" });
-    if (!response.ok) throw new Error("Linear authorization unavailable");
+    if (!response.ok) throw Object.assign(new Error("Linear authorization unavailable"), { providerCode: `http_${response.status}` });
     const result = await response.json() as { data?: T; errors?: unknown[] };
-    if (!result.data || result.errors?.length) throw new Error("Linear request failed");
+    if (!result.data || result.errors?.length) throw Object.assign(new Error("Linear request failed"), { providerCode: "graphql_error" });
     return result.data;
   }
 

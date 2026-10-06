@@ -53,6 +53,10 @@ import {
 // issued only to account-owned devices after checking the user's current access.
 // Browser session cookies are Lax for top-level OAuth callbacks; all browser
 // mutations require exact Origin and callbacks require the approved live session.
+// GET /api/integrations includes each provider's durable authorization outcome.
+// Failures expose only the processing step and allowlisted provider error codes;
+// provider response text, OAuth state, authorization codes and tokens stay private.
+// Web shows these outcomes after reload; target=null alone is not an auth result.
 
 export default defineConfig({
   worker: {
