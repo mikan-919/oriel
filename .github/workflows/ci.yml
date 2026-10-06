@@ -10,6 +10,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
+      - "scripts/deploy-worker.mjs"
 
 jobs:
   deploy:
@@ -46,7 +47,7 @@ jobs:
         run: npm test
 
       - name: Deploy Relay before its Browser client
-        run: npx cf deploy
+        run: npm run deploy:prebuilt
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -61,7 +62,7 @@ jobs:
 
       - name: Deploy Browser
         working-directory: crates/oriel-web
-        run: npx cf deploy
+        run: npm run deploy:prebuilt
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

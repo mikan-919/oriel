@@ -5,10 +5,13 @@
   "scripts": {
     "dev": "cargo run --release -p oriel-web && cf dev",
     "build": "cargo run --release -p oriel-web && cf build",
-    "check": "npm run build && cf deploy --dry-run",
-    "deploy": "npm run build && cf deploy"
+    "check": "npm run build && node ../../scripts/deploy-worker.mjs --dry-run",
+    "deploy": "npm run build && node ../../scripts/deploy-worker.mjs",
+    "deploy:prebuilt": "node ../../scripts/deploy-worker.mjs"
   },
   "devDependencies": {
+    "@cloudflare/build-output-utils": "0.8.2",
+    "@cloudflare/config": "0.20.0",
     "cf": "1.0.0-beta.5",
     "wrangler": "^4.136.0"
   }

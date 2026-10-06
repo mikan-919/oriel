@@ -18,6 +18,11 @@ import {
 // with `npm run dev`, then ORIEL_RELAY_URL=http://localhost:8787 orield.
 // Check `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 // and `npm run build && npm test`. Deploy Relay before web for the service binding.
+// Deploy with `npm run deploy`; CI uses `npm run deploy:prebuilt` after building.
+// Both adapt this config's build output into Wrangler config and publish it.
+// This file is authoritative for text vars and bindings; deployments preserve
+// Worker secrets but replace dashboard text vars. cf beta.5's direct deploy
+// hardcodes strict uploads and rejects intentional dashboard-to-config migrations.
 //
 // Integrations: sign in to Oriel Web, connect GitHub/Linear, choose and save the
 // repository/team there. Connections belong to the Passkey account and are shared
