@@ -72,9 +72,9 @@ export default defineConfig({
     env: {
       PUBLIC_ORIGIN: bindings.text("https://oriel-web.mikan-919.workers.dev"),
       // Set IDs in this config (or .dev.vars locally); never commit app secrets.
-      GITHUB_CLIENT_ID: bindings.text(""),
-      GITHUB_APP_ID: bindings.text(""),
-      LINEAR_CLIENT_ID: bindings.text(""),
+      GITHUB_CLIENT_ID: bindings.text("Iv23liLe7gluNc45KCEI"),
+      GITHUB_APP_ID: bindings.text("4632357"),
+      LINEAR_CLIENT_ID: bindings.text("40f52e9ba7f8a44e3e29fba5c5d08f60"),
       GITHUB_CLIENT_SECRET: bindings.secret(),
       GITHUB_APP_PRIVATE_KEY: bindings.secret(),
       INTEGRATION_ENCRYPTION_KEY: bindings.secret(),
