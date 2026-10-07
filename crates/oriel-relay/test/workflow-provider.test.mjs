@@ -55,6 +55,25 @@ test("HOW planning waits for native Triage and resumes when the team enables it"
   } finally { await s.close(); }
 });
 
+test("native missing-HOW errors permit creation but authorization and mixed failures do not", async () => {
+  const s = await setup();
+  try {
+    const lease = await s.claim("plan");
+    const missing = { message: "Entity not found: Issue", path: ["issue"], extensions: { code: "INPUT_ERROR" } };
+    const forbidden = { message: "Entity not found: Issue", path: ["issue"], extensions: { code: "FORBIDDEN" } };
+    for (const errors of [[forbidden], [missing, forbidden]]) {
+      s.fixture.missingHowErrors = errors;
+      assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation." })).status, 502);
+      assert.deepEqual(s.fixture.linears, []);
+    }
+    s.fixture.missingHowErrors = [missing];
+    const proposal = await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation." });
+    assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
+    assert.equal(proposal.data.linear.state.type, "triage");
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).linear.id, proposal.data.linear.id);
+  } finally { await s.close(); }
+});
+
 test("WHAT browser creation and deterministic HOW recover unknown sends without granting Todo", { timeout: 60000 }, async () => {
   const s = await setup();
   try {

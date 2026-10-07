@@ -34,6 +34,9 @@ import {
 // Development workflow creates GitHub WHATs and shows WHAT/HOW/PR/current blockers.
 // `orield workflow` explicitly starts read-only Codex HOW planning; `--once` scans
 // once. HOW is created in native Linear Triage with the exact GitHub Issue attachment.
+// Linear create IDs are deterministic UUID-v4-format IDs for issues, links and
+// comments. Native INPUT_ERROR / "Entity not found: Issue" maps to an absent HOW
+// only for issue lookup; authorization, mixed errors and uncertain reads still block.
 // Review/edit HOW, then move it to native Todo to approve code. Oriel never sets Todo
 // or merges. @oriel comments in Triage request HOW refinement; PR reviews/comments
 // and failed checks drive verified fixes on the same canonical branch. Human merge
@@ -97,6 +100,7 @@ import {
 // repositories with executable .codex/.mcp authority are refused, not silently used.
 // Authority checks stop at the Git project root; ignored home-level Codex config
 // is not project authority. Codex is pinned to the same .git root marker.
+// Run one workflow daemon per device: a new control socket replaces the old one.
 // Live socket grants fence repository/WHAT and canonical branch across devices.
 // Loss/uncertainty stops children before new writes. Approval edits return HOW to
 // Triage and require human reapproval; ambiguous prior seals need manual resolution.

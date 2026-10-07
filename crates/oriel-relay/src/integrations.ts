@@ -159,8 +159,15 @@ export class Integrations {
   }
 
   private async workflowHow(context: WorkflowContext, id: string): Promise<WorkflowHow | null> {
-    const result = await this.workflowLinear<{ issue: (LinearHow & { team: { id: string }; attachments: Page<{ url: string }> }) | null }>(context,
-      "query($id:String!){issue(id:$id){id identifier title description url state{id name type} team{id} attachments(first:100,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}}}", { id });
+    let result: { issue: (LinearHow & { team: { id: string }; attachments: Page<{ url: string }> }) | null };
+    try {
+      result = await this.workflowLinear<typeof result>(context,
+        "query($id:String!){issue(id:$id){id identifier title description url state{id name type} team{id} attachments(first:100,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}}}", { id });
+    } catch (error) {
+      context.check();
+      if (error instanceof Error && "missingIssue" in error && error.missingIssue === true) return null;
+      throw error;
+    }
     if (!result.issue) return null;
     const { attachments, ...issue } = result.issue;
     const all = [...attachments.nodes];
@@ -652,7 +659,7 @@ export class Integrations {
     try {
       if (githubPr === null) {
         const hash = await digest(["oriel/comment/v1", context.repository.repository_id, grant.linear_id, kind, key]);
-        const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+        const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
         await this.workflowCurrent(context, grant, undefined, changed);
         await this.workflowLinear(context, "mutation($input:CommentCreateInput!){commentCreate(input:$input){success}}", { input: { id, issueId: grant.linear_id, body: content } });
       } else await this.workflowGithub(context, `${context.path}/issues/${githubPr}/comments`, "POST", { body: content });
@@ -688,7 +695,7 @@ export class Integrations {
         return { linear };
       }
       const hash = await digest(["oriel/how/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, context.team.team_id]);
-      const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
       const triage = this.workflowState(initial.facts.states, "Triage", "triage");
       let how = await this.workflowHow(context, id);
       if (!how) {
@@ -704,7 +711,7 @@ export class Integrations {
       if (!how.attachments.some(attachment => attachment.url === url)) {
         await this.workflowCurrent(context, grant, ["needs-how"]);
         const attachmentHash = await digest(["oriel/how-attachment/v1", id, url]);
-        const attachmentId = `${attachmentHash.slice(0, 8)}-${attachmentHash.slice(8, 12)}-5${attachmentHash.slice(13, 16)}-a${attachmentHash.slice(17, 20)}-${attachmentHash.slice(20, 32)}`;
+        const attachmentId = `${attachmentHash.slice(0, 8)}-${attachmentHash.slice(8, 12)}-4${attachmentHash.slice(13, 16)}-a${attachmentHash.slice(17, 20)}-${attachmentHash.slice(20, 32)}`;
         try { await this.workflowLinear(context, "mutation($input:AttachmentCreateInput!){attachmentCreate(input:$input){success}}", { input: { id: attachmentId, issueId: id, url, title: initial.row.issue.title } }); }
         catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
         how = await this.workflowHow(context, id);
@@ -1120,7 +1127,16 @@ export class Integrations {
     const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }), redirect: "manual" });
     if (!response.ok) throw Object.assign(new Error("Linear authorization unavailable"), { providerCode: `http_${response.status}` });
     const result = await response.json() as { data?: T; errors?: unknown[] };
-    if (!result.data || result.errors?.length) throw Object.assign(new Error("Linear request failed"), { providerCode: "graphql_error" });
+    if (!result.data || result.errors?.length) {
+      const data = result.data;
+      const errors = result.errors;
+      const missingIssue = (data == null || typeof data === "object" && "issue" in data && data.issue === null) &&
+        Array.isArray(errors) && errors.length > 0 && errors.every(error =>
+          error !== null && typeof error === "object" && "message" in error && typeof error.message === "string" &&
+          /^Entity not found:\s*Issue\b/i.test(error.message) && "extensions" in error &&
+          error.extensions !== null && typeof error.extensions === "object" && "code" in error.extensions && error.extensions.code === "INPUT_ERROR");
+      throw Object.assign(new Error("Linear request failed"), { providerCode: "graphql_error", missingIssue });
+    }
     return result.data;
   }
 

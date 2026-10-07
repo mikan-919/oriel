@@ -87,6 +87,9 @@ export function workflowFixture() {
       const operation = query.includes("issueCreate(") ? "how-create" : query.includes("issueUpdate(") ? "how-update" : query.includes("attachmentCreate(") ? "how-link" : query.includes("commentCreate(") ? "how-comment" : query.includes("states(") ? "states" : query.includes("issue(id:") ? "how" : "hows";
       const failure = await record("linear", operation, request, payload); if (failure) return failure;
       const input = variables.input;
+      if (["how-create", "how-link", "how-comment"].includes(operation) && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(input.id)) {
+        return Response.json({ errors: [{ message: "id must be a UUID v4", extensions: { code: "INPUT_ERROR" } }] });
+      }
       if (operation === "how-create") {
         assert.equal(fixture.states.find(state => state.id === input.stateId)?.name, "Triage");
         let how = fixture.linears.find(how => how.id === input.id);
@@ -123,7 +126,7 @@ export function workflowFixture() {
       if (operation === "states") return Response.json({ data: { team: { states: page(fixture.states, variables.after, fixture.issuePageSize) } } });
       if (operation === "how") {
         const how = fixture.linears.find(how => how.id === variables.id);
-        if (!how) return Response.json({ data: { issue: null } });
+        if (!how) return Response.json(fixture.missingHowErrors ? { data: { issue: null }, errors: fixture.missingHowErrors } : { data: { issue: null } });
         const node = howNode(how);
         if (query.includes("comments(")) node.comments = page(how.comments ?? [], variables.after, fixture.issuePageSize);
         if (query.includes("attachments(")) node.attachments = page(how.attachments, variables.after, fixture.attachmentPageSize);
