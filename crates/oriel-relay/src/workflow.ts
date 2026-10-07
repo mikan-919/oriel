@@ -21,8 +21,10 @@ export type LinearState = { id: string; name: string; type: string };
 export type LinearHow = { id: string; identifier: string; title: string; description: string | null; url: string; state: LinearState };
 export type PullRequest = { number: number; url: string; branch: string; head_oid: string; base_branch: string; state: "open" | "closed"; merged: boolean; draft: boolean };
 export type Feedback = { key: string; kind: "review" | "comment" | "check_failure"; body: string; comments: { path: string | null; line: number | null; body: string }[] };
+export type DiscussionComment = { id: string; body: string; author: string | null; created_at: string };
 export type WorkflowRow = {
   issue: GithubWhat; linear: LinearHow | null; version: string; fingerprint: string | null;
+  what_comments: DiscussionComment[]; how_comments: DiscussionComment[];
   branch: string | null; canonical_oid: string | null; pull_request: PullRequest | null;
   phase: "needs-how" | "triage" | "approved" | "running" | "review" | "merged" | "done" | "closed" | "blocked";
   blocked_reason: string | null; feedback: Feedback | null; how_feedback: { key: string; body: string } | null;

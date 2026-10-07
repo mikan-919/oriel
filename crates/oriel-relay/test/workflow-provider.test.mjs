@@ -55,6 +55,36 @@ test("HOW planning waits for native Triage and resumes when the team enables it"
   } finally { await s.close(); }
 });
 
+test("Todo implementation context includes complete chronological WHAT and HOW discussions", async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow("Todo");
+    const github = Array.from({ length: 101 }, (_, index) => ({
+      id: index + 1, body: `WHAT decision ${index}: preserve existing sessions`,
+      user: { login: index === 100 ? "oriel[bot]" : "requester", type: index === 100 ? "Bot" : "User" },
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    }));
+    const linear = Array.from({ length: 101 }, (_, index) => ({
+      id: `discussion-${index}`, body: `HOW decision ${index}: do not delete pairing credentials`,
+      user: index === 100 ? null : { name: "Reviewer" },
+      createdAt: new Date(Date.UTC(2026, 0, 2, 0, index)).toISOString(),
+    }));
+    s.fixture.comments.set(42, github);
+    how.comments = [...linear].reverse();
+    const row = (await s.snapshot()).workflows.find(row => row.issue.number === 42);
+    assert.equal(row.phase, "approved");
+    assert.deepEqual(row.what_comments, github.map(comment => ({
+      id: String(comment.id), body: comment.body, author: comment.user.login, created_at: comment.created_at,
+    })));
+    assert.deepEqual(row.how_comments, linear.map(comment => ({
+      id: comment.id, body: comment.body, author: comment.user?.name ?? null, created_at: comment.createdAt,
+    })));
+    s.fixture.failures.set("pr-comments", 503);
+    const unavailable = await s.daemon.api(`/api/workflows/${device}`, undefined, hostHeaders);
+    assert.equal(unavailable.status, 502, "Unreadable history must not become an empty discussion");
+  } finally { await s.close(); }
+});
+
 test("native missing-HOW errors permit creation but authorization and mixed failures do not", async () => {
   const s = await setup();
   try {

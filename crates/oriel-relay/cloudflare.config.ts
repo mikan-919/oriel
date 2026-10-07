@@ -41,6 +41,11 @@ import {
 // or merges. @oriel comments in Triage request HOW refinement; PR reviews/comments
 // and failed checks drive verified fixes on the same canonical branch. Human merge
 // is required before Linear Done, including WHATs auto-closed by that merge.
+// Each model invocation receives all readable GitHub WHAT and Linear HOW comments,
+// paginated and oldest-first, including bots, author and creation time. Unreadable
+// history blocks discovery rather than appearing empty. Discussion is untrusted
+// task context, not approval; Todo and canonical WHAT/HOW content still fence code.
+// Histories are captured at job start; later comments enter the next invocation.
 // Discovery paginates actual links; ambiguous/foreign HOWs block rather than match
 // titles. Native GitHub issue synchronization is not required.
 // The last reported repository remains visible while a device is offline; starting

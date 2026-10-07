@@ -51,6 +51,7 @@ type GithubPull = {
   head: { ref: string; sha: string; repo: { id: number } | null }; base: { ref: string; repo: { id: number } };
 };
 type GithubComment = { id: number; body: string; user: { type: string; login: string }; created_at: string };
+type LinearComment = { id: string; body: string; createdAt: string; user: { name: string } | null };
 type WorkflowFacts = { snapshot: WorkflowSnapshot; states: LinearState[]; hows: WorkflowHow[]; pulls: GithubPull[]; refs: Map<string, string>; recoveries: Map<number, string> };
 
 /** Only authenticated target metadata is plaintext; credentials and PKCE are AES-GCM ciphertext. */
@@ -252,7 +253,8 @@ export class Integrations {
         return !!match && match[1].toLowerCase() === context.repository.owner.toLowerCase() && match[2].toLowerCase() === context.repository.name.toLowerCase() && Number(match[3]) === issue.number;
       }));
       const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
-        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : "needs-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null };
+        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : "needs-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null,
+        what_comments: [], how_comments: [] };
       if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
         row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
       }
@@ -307,9 +309,19 @@ export class Integrations {
                 row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted);
                 if (exhausted.length) row.blocked_reason = `Check retry limit reached (3 verified attempts): ${exhausted.join(", ")}`;
               }
-              if (row.phase === "triage") row.how_feedback = await this.workflowHowFeedback(context, how.id);
             }
           }
+        }
+      }
+      if (["needs-how", "triage", "approved", "running", "review"].includes(row.phase)) {
+        const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
+        row.what_comments = comments.map(comment => ({ id: String(comment.id), body: comment.body, author: comment.user?.login ?? null, created_at: comment.created_at }))
+          .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+        if (row.linear) {
+          const comments = await this.workflowLinearComments(context, row.linear.id);
+          row.how_comments = comments.map(comment => ({ id: comment.id, body: comment.body, author: comment.user?.name ?? null, created_at: comment.createdAt }))
+            .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+          if (row.phase === "triage") row.how_feedback = await this.workflowHowFeedback(context, row.linear.id, comments);
         }
       }
       snapshot.workflows.push(row);
@@ -329,13 +341,13 @@ export class Integrations {
     return `<!-- oriel:${kind}:${base64url(encoder.encode(key))}:${base64url(new Uint8Array(signature))} -->`;
   }
 
-  private async workflowLinearComments(context: WorkflowContext, id: string): Promise<{ id: string; body: string; createdAt: string }[]> {
-    const comments: { id: string; body: string; createdAt: string }[] = [];
+  private async workflowLinearComments(context: WorkflowContext, id: string): Promise<LinearComment[]> {
+    const comments: LinearComment[] = [];
     const seen = new Set<string>();
     let after: string | null = null;
     do {
-      const result: { issue: { comments: Page<{ id: string; body: string; createdAt: string }> } | null } = await this.workflowLinear(context,
-        "query($id:String!,$after:String){issue(id:$id){comments(first:100,after:$after,includeArchived:true){nodes{id body createdAt} pageInfo{hasNextPage endCursor}}}}", { id, after });
+      const result: { issue: { comments: Page<LinearComment> } | null } = await this.workflowLinear(context,
+        "query($id:String!,$after:String){issue(id:$id){comments(first:100,after:$after,includeArchived:true){nodes{id body createdAt user{name}} pageInfo{hasNextPage endCursor}}}}", { id, after });
       if (!result.issue) this.auth.fail(502, "HOW comments are unavailable");
       comments.push(...result.issue.comments.nodes);
       after = result.issue.comments.pageInfo.hasNextPage ? result.issue.comments.pageInfo.endCursor : null;
@@ -345,8 +357,7 @@ export class Integrations {
     return comments;
   }
 
-  private async workflowHowFeedback(context: WorkflowContext, id: string): Promise<{ key: string; body: string } | null> {
-    const comments = await this.workflowLinearComments(context, id);
+  private async workflowHowFeedback(context: WorkflowContext, id: string, comments: LinearComment[]): Promise<{ key: string; body: string } | null> {
     for (const comment of [...comments].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
       if (!/@oriel\b/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
       const key = `how:${await digest([id, comment.id, comment.body])}`;

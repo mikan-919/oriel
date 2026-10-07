@@ -68,10 +68,19 @@ struct HowFeedback {
     key: String,
     body: String,
 }
+#[derive(Clone, Deserialize, serde::Serialize)]
+struct DiscussionComment {
+    id: String,
+    body: String,
+    author: Option<String>,
+    created_at: String,
+}
 #[derive(Clone, Deserialize)]
 struct Row {
     issue: What,
     linear: Option<How>,
+    what_comments: Vec<DiscussionComment>,
+    how_comments: Vec<DiscussionComment>,
     version: String,
     fingerprint: Option<String>,
     branch: Option<String>,
@@ -740,8 +749,8 @@ fn agent_schema() -> Value {
 
 fn agent_prompt(row: &Row, plan: bool) -> String {
     let task = json!({
-        "what":{"number":row.issue.number,"title":row.issue.title,"body":row.issue.body},
-        "how":row.linear.as_ref().map(|how| json!({"title":how.title,"description":how.description})),
+        "what":{"number":row.issue.number,"title":row.issue.title,"body":row.issue.body,"comments":row.what_comments},
+        "how":row.linear.as_ref().map(|how| json!({"title":how.title,"description":how.description,"comments":row.how_comments})),
         "how_feedback":row.how_feedback.as_ref().map(|feedback| json!({"body":feedback.body})),
         "review_feedback":row.feedback.as_ref().map(|feedback| json!({"kind":feedback.kind,"body":feedback.body,"comments":feedback.comments}))
     });
@@ -1739,6 +1748,7 @@ mod tests {
             "workflows":[{
                 "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
                 "linear":{"identifier":"ENG-1","title":"HOW","description":"Steps","url":"https://linear.app/issue/ENG-1"},
+                "what_comments":[],"how_comments":[],
                 "version":"approved","fingerprint":"approved","branch":"oriel/approved",
                 "canonical_oid":"2222222222222222222222222222222222222222",
                 "pull_request":{"number":7,"url":"https://github.com/octocat/connected/pull/7","branch":"oriel/approved","head_oid":"2222222222222222222222222222222222222222","base_branch":"main","state":"open","merged":false,"draft":false},
