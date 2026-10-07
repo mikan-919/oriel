@@ -1,3 +1,5 @@
+import { digest, githubIssueLink, OID, parseConfiguration, UUID, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowAdmission, type WorkflowAuthority, type WorkflowBinding, type WorkflowClaim, type WorkflowGrant, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
+
 export interface IntegrationEnv {
   PUBLIC_ORIGIN: string;
   INTEGRATION_ENCRYPTION_KEY?: string;
@@ -42,9 +44,19 @@ const encoder = new TextEncoder();
 const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 const random = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, "0")).join("");
 
+type WorkflowContext = { binding: WorkflowBinding; github: string; linear: string; repository: Repository; team: Team; path: string; check: () => void };
+type WorkflowHow = LinearHow & { team: { id: string }; attachments: { url: string }[] };
+type GithubPull = {
+  number: number; html_url: string; body: string | null; state: "open" | "closed"; merged_at: string | null; draft: boolean;
+  head: { ref: string; sha: string; repo: { id: number } | null }; base: { ref: string; repo: { id: number } };
+};
+type GithubComment = { id: number; body: string; user: { type: string; login: string }; created_at: string };
+type WorkflowFacts = { snapshot: WorkflowSnapshot; states: LinearState[]; hows: WorkflowHow[]; pulls: GithubPull[]; refs: Map<string, string>; recoveries: Map<number, string> };
+
 /** Only authenticated target metadata is plaintext; credentials and PKCE are AES-GCM ciphertext. */
 export class Integrations {
   private readonly refreshes = new Map<string, Promise<{ credential: Credential; ciphertext: string }>>();
+  private readonly whatCreations = new Map<string, Promise<GithubWhat>>();
 
   constructor(private readonly sql: SqlStorage, private readonly env: IntegrationEnv, private readonly auth: Auth) {
     // Device-local credentials cannot be attributed unambiguously to an account. Reconnect in Web.
@@ -71,9 +83,742 @@ export class Integrations {
 
   static daemonRoute(request: Request): boolean {
     const path = new URL(request.url).pathname;
-    return request.method === "GET" && (/^\/api\/integrations\/[a-f0-9]{32}(?:\/issues)?$/.test(path) ||
+    return request.headers.has("Authorization") && (
+      request.method === "GET" && /^\/api\/workflows\/[a-f0-9]{32}(?:\/connect)?$/.test(path) ||
+      request.method === "POST" && /^\/api\/workflows\/[a-f0-9]{32}\/(?:actions|git-token)$/.test(path)) ||
+      request.method === "GET" && (/^\/api\/integrations\/[a-f0-9]{32}(?:\/issues)?$/.test(path) ||
       request.headers.has("Authorization") && /^\/api\/integrations\/[a-f0-9]{32}\/linear\/issues$/.test(path)) ||
-      request.method === "POST" && /^\/api\/integrations\/[a-f0-9]{32}\/(?:github\/token|repository)$/.test(path);
+      request.method === "POST" && /^\/api\/integrations\/[a-f0-9]{32}\/repository$/.test(path);
+  }
+
+  workflowBinding(device: Device): WorkflowBinding {
+    this.liveDevice(device);
+    const current = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device.device_id).toArray()[0];
+    const github = this.row(device.user_id, "github");
+    const linear = this.row(device.user_id, "linear");
+    if (!github?.active || !github.target || !linear?.active || !linear.target) this.auth.fail(409, "Connect GitHub repository and Linear team in Web");
+    if (github.active_status === "uncertain" || linear.active_status === "uncertain") this.auth.fail(409, "Provider refresh interrupted; reconnect in Web");
+    const repository = JSON.parse(github.target) as Repository;
+    const reported = JSON.parse(current.repository ?? "null") as WorkingRepository | null;
+    const team = JSON.parse(linear.target) as Team;
+    if (!reported || reported.owner !== repository.owner.toLowerCase() || reported.name !== repository.name.toLowerCase()) this.auth.fail(409, "Selected GitHub repository must match the daemon repository");
+    return { user_id: device.user_id, device_id: device.device_id, host_hash: device.host_hash,
+      repository_generation: current.repository_generation, github_generation: github.generation, linear_generation: linear.generation,
+      repository_id: repository.repository_id, team_id: team.team_id, repository: { owner: repository.owner, name: repository.name } };
+  }
+
+  private async workflowContext(device: Device, check: () => void, write = false): Promise<WorkflowContext> {
+    const binding = this.workflowBinding(device);
+    const github = this.row(device.user_id, "github")!;
+    const linear = this.row(device.user_id, "linear")!;
+    const guard = () => {
+      check();
+      if (JSON.stringify(this.workflowBinding(device)) !== JSON.stringify(binding)) this.auth.fail(409, "Workflow binding changed");
+    };
+    const token = await this.installationToken(device.user_id, guard, write ? { ...PERMISSIONS, checks: "read", statuses: "read" } : { contents: "read", issues: "read", pull_requests: "read", metadata: "read", checks: "read", statuses: "read" });
+    const credential = await this.credential(linear, "active", guard);
+    const live = () => {
+      guard();
+      if (this.row(device.user_id, "github")?.generation !== github.generation) this.auth.fail(409, "GitHub connection changed");
+      this.current(linear, "active", guard);
+    };
+    live();
+    const repository = token.repository;
+    return { binding, github: token.token, linear: credential.access_token, repository, team: JSON.parse(linear.target!), path: `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`, check: live };
+  }
+
+  private async workflowGithub<T>(context: WorkflowContext, path: string, method = "GET", body?: unknown, missing = false): Promise<T | null> {
+    context.check();
+    const response = await fetch(`https://api.github.com${path}`, { method, headers: {
+      Accept: "application/vnd.github+json", Authorization: `Bearer ${context.github}`, "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "manual" });
+    context.check();
+    if (missing && response.status === 404) return null;
+    if (!response.ok) this.auth.fail(502, "GitHub workflow operation could not be confirmed");
+    const result = await response.json() as T;
+    context.check();
+    return result;
+  }
+
+  private async workflowList<T>(context: WorkflowContext, path: string): Promise<T[]> {
+    const nodes: T[] = [];
+    for (let page = 1; ; page++) {
+      const rows = await this.workflowGithub<T[]>(context, `${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`);
+      if (!Array.isArray(rows)) this.auth.fail(502, "GitHub workflow collection is unavailable");
+      nodes.push(...rows);
+      if (rows.length < 100) return nodes;
+    }
+  }
+
+  private async workflowLinear<T>(context: WorkflowContext, query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    context.check();
+    const result = await this.linear<T>(context.linear, query, variables);
+    context.check();
+    return result;
+  }
+
+  private async workflowHow(context: WorkflowContext, id: string): Promise<WorkflowHow | null> {
+    const result = await this.workflowLinear<{ issue: (LinearHow & { team: { id: string }; attachments: Page<{ url: string }> }) | null }>(context,
+      "query($id:String!){issue(id:$id){id identifier title description url state{id name type} team{id} attachments(first:100,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}}}", { id });
+    if (!result.issue) return null;
+    const { attachments, ...issue } = result.issue;
+    const all = [...attachments.nodes];
+    let page = attachments;
+    const seen = new Set<string>();
+    while (page.pageInfo.hasNextPage) {
+      const after = page.pageInfo.endCursor;
+      if (!after || seen.has(after)) this.auth.fail(502, "Linear attachment pagination is unavailable");
+      seen.add(after);
+      const next = await this.workflowLinear<{ issue: { attachments: Page<{ url: string }> } | null }>(context,
+        "query($id:String!,$after:String!){issue(id:$id){attachments(first:100,after:$after,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}}}", { id, after });
+      if (!next.issue) this.auth.fail(502, "Linear issue disappeared");
+      page = next.issue.attachments;
+      all.push(...page.nodes);
+    }
+    return { ...issue, attachments: all };
+  }
+
+  private async workflowStates(context: WorkflowContext): Promise<LinearState[]> {
+    const nodes: LinearState[] = [];
+    let after: string | null = null;
+    const seen = new Set<string>();
+    do {
+      const data: { team: { states: Page<LinearState> } | null } = await this.workflowLinear(context,
+        "query($id:String!,$after:String){team(id:$id){states(first:100,after:$after){nodes{id name type} pageInfo{hasNextPage endCursor}}}}", { id: context.team.team_id, after });
+      if (!data.team) this.auth.fail(409, "Selected Linear team is unavailable");
+      nodes.push(...data.team.states.nodes);
+      after = data.team.states.pageInfo.hasNextPage ? data.team.states.pageInfo.endCursor : null;
+      if (data.team.states.pageInfo.hasNextPage && (!after || seen.has(after))) this.auth.fail(502, "Linear state pagination is unavailable");
+      if (after) seen.add(after);
+    } while (after);
+    return nodes;
+  }
+
+  private async workflowFacts(context: WorkflowContext): Promise<WorkflowFacts> {
+    const repository = await this.workflowGithub<{ id: number; node_id: string; default_branch: string }>(context, context.path);
+    if (!repository || repository.id !== context.repository.repository_id || !validBranch(repository.default_branch)) this.auth.fail(409, "Selected repository identity is unavailable");
+    const base = await this.workflowGithub<{ object: { sha: string } }>(context, `${context.path}/git/ref/heads/${encodeURIComponent(repository.default_branch)}`);
+    if (!base || !OID.test(base.object.sha)) this.auth.fail(502, "Target commit is unavailable");
+    const configuration = await this.workflowGithub<{ type: string; encoding: string; content: string; sha: string }>(context,
+      `${context.path}/contents/.oriel.yaml?ref=${base.object.sha}`, "GET", undefined, true);
+    let source: string | null = null;
+    if (configuration) {
+      if (configuration.type !== "file" || configuration.encoding !== "base64" || configuration.content.length > 131072) this.auth.fail(409, "Target .oriel.yaml must be a bounded regular file");
+      try { source = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(configuration.content.replace(/\s/g, "")), char => char.charCodeAt(0))); }
+      catch { this.auth.fail(409, "Target .oriel.yaml is not UTF-8"); }
+    }
+    const issues = await this.workflowList<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues?state=all&sort=created&direction=asc`);
+    const pulls = await this.workflowList<GithubPull>(context, `${context.path}/pulls?state=all`);
+    // This native endpoint returns the complete matching collection and has no page argument.
+    const references = await this.workflowGithub<{ ref: string; object: { sha: string } }[]>(context, `${context.path}/git/matching-refs/heads/oriel/`);
+    if (!Array.isArray(references) || references.some(ref => !ref.ref.startsWith("refs/heads/oriel/") || !validBranch(ref.ref.slice("refs/heads/".length)) || !OID.test(ref.object.sha))) this.auth.fail(502, "Canonical reference facts are unavailable");
+    const refs = new Map(references.map(ref => [ref.ref.replace(/^refs\/heads\//, ""), ref.object.sha]));
+    const hows: WorkflowHow[] = [];
+    let after: string | null = null;
+    const cursors = new Set<string>();
+    do {
+      // Do not filter the team: a foreign-team formal link must block, not look unlinked.
+      const data: { issues: Page<{ id: string }> } = await this.workflowLinear(context,
+        "query($prefix:String!,$after:String){issues(first:100,after:$after,includeArchived:true,orderBy:createdAt,filter:{attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id} pageInfo{hasNextPage endCursor}}}",
+        { prefix: `https://github.com/${context.repository.owner}/${context.repository.name}/issues/`, after });
+      for (const candidate of data.issues.nodes) {
+        if (hows.some(how => how.id === candidate.id)) continue;
+        const how = await this.workflowHow(context, candidate.id);
+        if (!how) this.auth.fail(502, "Linked HOW is unavailable");
+        hows.push(how);
+      }
+      after = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
+      if (data.issues.pageInfo.hasNextPage && (!after || cursors.has(after))) this.auth.fail(502, "Linear issue pagination is unavailable");
+      if (after) cursors.add(after);
+    } while (after);
+    const states = await this.workflowStates(context);
+    const snapshot: WorkflowSnapshot = { repository: context.binding.repository, repository_id: repository.id, repository_node_id: repository.node_id,
+      base_branch: repository.default_branch, target_oid: base.object.sha, team: context.team, configuration: parseConfiguration(source), workflows: [] };
+    const recoveries = new Map<number, string>();
+    for (const raw of issues) {
+      if (raw.pull_request) continue;
+      const issue: GithubWhat = { number: raw.number, node_id: raw.node_id, title: raw.title, body: raw.body ?? null, url: raw.html_url, state: raw.state };
+      if (!Number.isSafeInteger(issue.number) || !issue.node_id || !["open", "closed"].includes(issue.state)) this.auth.fail(502, "GitHub WHAT identity is unavailable");
+      const linked = hows.filter(how => how.attachments.some(attachment => {
+        const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/0*([0-9]+)(?:[/?#].*)?$/i.exec(attachment.url);
+        return !!match && match[1].toLowerCase() === context.repository.owner.toLowerCase() && match[2].toLowerCase() === context.repository.name.toLowerCase() && Number(match[3]) === issue.number;
+      }));
+      const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
+        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : "needs-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null };
+      if (linked.length > 1) { row.phase = "blocked"; row.blocked_reason = "Multiple Linear issues formally link this WHAT"; }
+      if (linked.length === 1) {
+        const how = linked[0];
+        const allLinks = how.attachments.filter(attachment => /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\//i.test(attachment.url)).map(attachment => githubIssueLink(attachment.url));
+        const distinct = new Set(allLinks.filter(link => link !== null).map(link => `${link!.owner}/${link!.name}#${link!.number}`));
+        const validLink = distinct.size === 1 && !allLinks.includes(null) && distinct.has(`${context.repository.owner.toLowerCase()}/${context.repository.name.toLowerCase()}#${issue.number}`);
+        const { team: _team, attachments: _attachments, ...linear } = how;
+        row.linear = linear;
+        row.version = await digest(["oriel/approval-fingerprint/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? "", how.id, how.title, how.description ?? ""]);
+        if (how.team.id !== context.team.team_id || !validLink) {
+          row.phase = "blocked"; row.blocked_reason = "HOW link is foreign, aliased or not one-to-one";
+        } else {
+          row.fingerprint = row.version;
+          row.branch = `oriel/${how.identifier}-gh-${issue.number}-${row.fingerprint}`;
+          if (!validBranch(row.branch)) { row.phase = "blocked"; row.blocked_reason = "Canonical branch is not a valid Git reference"; }
+          else {
+            row.canonical_oid = refs.get(row.branch) ?? null;
+            const matching = pulls.filter(pr => pr.head.ref === row.branch && pr.head.repo?.id === repository.id && pr.base.repo.id === repository.id && pr.base.ref === snapshot.base_branch);
+            const managed = matching.filter(pr => pr.body?.trim() === `Closes #${issue.number}` && !pr.draft);
+            if (matching.length !== managed.length || managed.length > 1) { row.phase = "blocked"; row.blocked_reason = "Canonical PR natural key is ambiguous or not Oriel-managed"; }
+            else {
+              const pr = managed[0];
+              if (pr) row.pull_request = this.workflowPull(pr);
+              const native = states.some(state => state.id === how.state.id && state.name === how.state.name && state.type === how.state.type);
+              const exact = (name: string, type: string) => native && how.state.name === name && how.state.type === type && states.filter(state => state.name === name && state.type === type).length === 1;
+              if (!native) { row.phase = "blocked"; row.blocked_reason = "Unknown Linear native state"; }
+              else if (pr?.merged_at) row.phase = exact("Done", "completed") ? "done" : "merged";
+              else if (exact("Done", "completed")) { row.phase = "blocked"; row.blocked_reason = "Done is not backed by an actual merged PR"; }
+              else if (issue.state === "closed" || how.state.type === "canceled") row.phase = "closed";
+              else if (exact("Triage", "triage")) row.phase = "triage";
+              else if (exact("Todo", "unstarted") && !pr) row.phase = "approved";
+              else if (row.canonical_oid && (exact("In Progress", "started") || how.state.type === "started" && /review/i.test(how.state.name) && states.filter(state => state.type === "started" && /review/i.test(state.name)).length === 1)) row.phase = pr?.state === "open" ? "review" : pr ? "blocked" : "running";
+              else { row.phase = "blocked"; row.blocked_reason = pr?.state === "closed" ? "PR closed without merge" : "Human Todo or a matching sealed In Progress branch is required"; }
+              const priorPrefix = `oriel/${how.identifier}-gh-${issue.number}-`;
+              const prior = new Set([...refs.keys(), ...pulls.filter(candidate => candidate.head.repo?.id === repository.id && candidate.base.repo.id === repository.id &&
+                candidate.base.ref === snapshot.base_branch && !candidate.draft && candidate.body?.trim() === `Closes #${issue.number}`).map(candidate => candidate.head.ref)]
+                .filter(branch => branch !== row.branch && branch.startsWith(priorPrefix) && SECRET.test(branch.slice(priorPrefix.length)) && validBranch(branch)));
+              const obsoleteOpen = pulls.some(candidate => prior.has(candidate.head.ref) && candidate.state === "open" && !candidate.merged_at &&
+                candidate.head.repo?.id === repository.id && candidate.base.repo.id === repository.id && candidate.base.ref === snapshot.base_branch && !candidate.draft && candidate.body?.trim() === `Closes #${issue.number}`);
+              if (row.phase === "approved" && obsoleteOpen) { row.phase = "blocked"; row.blocked_reason = "Obsolete managed PR must be reconciled before a new approval can execute"; }
+              const activeNative = exact("Todo", "unstarted") || exact("In Progress", "started") || native && how.state.type === "started" && /review/i.test(how.state.name) && states.filter(state => state.type === "started" && /review/i.test(state.name)).length === 1;
+              if (row.phase === "blocked" && !row.canonical_oid && !row.pull_request && activeNative && prior.size) {
+                if (prior.size === 1) { row.recovery = "invalidate"; recoveries.set(issue.number, [...prior][0]); row.blocked_reason = "Approval content changed; prior canonical work can only be returned to Triage"; }
+                else row.blocked_reason = "Prior canonical evidence is ambiguous; move this HOW to Triage manually";
+              }
+              if (["approved", "running", "review"].includes(row.phase) && !snapshot.configuration.autonomous) { row.phase = "blocked"; row.blocked_reason = snapshot.configuration.error; }
+              if (row.phase === "review") {
+                const exhausted: string[] = [];
+                row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted);
+                if (exhausted.length) row.blocked_reason = `Check retry limit reached (3 verified attempts): ${exhausted.join(", ")}`;
+              }
+              if (row.phase === "triage") row.how_feedback = await this.workflowHowFeedback(context, how.id);
+            }
+          }
+        }
+      }
+      snapshot.workflows.push(row);
+    }
+    context.check();
+    return { snapshot, states, hows, pulls, refs, recoveries };
+  }
+
+  private workflowPull(pr: GithubPull): PullRequest {
+    return { number: pr.number, url: pr.html_url, branch: pr.head.ref, head_oid: pr.head.sha, base_branch: pr.base.ref, state: pr.state, merged: !!pr.merged_at, draft: pr.draft };
+  }
+
+  private async workflowMarker(context: WorkflowContext, kind: string, key: string): Promise<string> {
+    const secret = Uint8Array.from(this.env.INTEGRATION_ENCRYPTION_KEY!.match(/../g)!, byte => parseInt(byte, 16));
+    const hmac = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const signature = await crypto.subtle.sign("HMAC", hmac, encoder.encode(JSON.stringify(["oriel/workflow-cursor/v1", context.repository.repository_id, kind === "what" ? null : context.team.team_id, kind, key])));
+    return `<!-- oriel:${kind}:${base64url(encoder.encode(key))}:${base64url(new Uint8Array(signature))} -->`;
+  }
+
+  private async workflowLinearComments(context: WorkflowContext, id: string): Promise<{ id: string; body: string; createdAt: string }[]> {
+    const comments: { id: string; body: string; createdAt: string }[] = [];
+    const seen = new Set<string>();
+    let after: string | null = null;
+    do {
+      const result: { issue: { comments: Page<{ id: string; body: string; createdAt: string }> } | null } = await this.workflowLinear(context,
+        "query($id:String!,$after:String){issue(id:$id){comments(first:100,after:$after,includeArchived:true){nodes{id body createdAt} pageInfo{hasNextPage endCursor}}}}", { id, after });
+      if (!result.issue) this.auth.fail(502, "HOW comments are unavailable");
+      comments.push(...result.issue.comments.nodes);
+      after = result.issue.comments.pageInfo.hasNextPage ? result.issue.comments.pageInfo.endCursor : null;
+      if (result.issue.comments.pageInfo.hasNextPage && (!after || seen.has(after))) this.auth.fail(502, "HOW comments pagination is unavailable");
+      if (after) seen.add(after);
+    } while (after);
+    return comments;
+  }
+
+  private async workflowHowFeedback(context: WorkflowContext, id: string): Promise<{ key: string; body: string } | null> {
+    const comments = await this.workflowLinearComments(context, id);
+    for (const comment of [...comments].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+      if (!/@oriel\b/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
+      const key = `how:${await digest([id, comment.id, comment.body])}`;
+      const marker = await this.workflowMarker(context, "how", key);
+      if (!comments.some(response => response.body.includes(marker))) return { key, body: comment.body };
+    }
+    return null;
+  }
+
+  private async workflowCursors(context: WorkflowContext, comments: GithubComment[], kind: "response" | "response-head"): Promise<Map<string, string>> {
+    const cursors = new Map<string, string>();
+    const pattern = new RegExp(`<!-- oriel:${kind}:([A-Za-z0-9_-]+):[A-Za-z0-9_-]+ -->`, "g");
+    for (const comment of comments) for (const marker of comment.body.matchAll(pattern)) {
+      try {
+        const key = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(marker[1].replaceAll("-", "+").replaceAll("_", "/")), char => char.charCodeAt(0)));
+        if (marker[0] === await this.workflowMarker(context, kind, key) && (!cursors.has(key) || comment.created_at < cursors.get(key)!)) cursors.set(key, comment.created_at);
+      } catch { /* Unsigned public comments are never Oriel response cursors. */ }
+    }
+    return cursors;
+  }
+
+  private async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[]): Promise<Feedback | null> {
+    const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`);
+    const cursors = await this.workflowCursors(context, comments, "response");
+    const reviews = await this.workflowList<{ id: number; state: string; body: string; submitted_at: string; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`);
+    const inline = await this.workflowList<{ id: number; pull_request_review_id: number; path: string; line: number | null; body: string; commit_id: string }>(context, `${context.path}/pulls/${pr.number}/comments`);
+    const latest = new Map<string, typeof reviews[number]>();
+    for (const review of [...reviews].sort((a, b) => a.submitted_at.localeCompare(b.submitted_at))) {
+      if (review.state !== "PENDING") latest.set(review.user.login, review);
+    }
+    for (const review of [...latest.values()].sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))) {
+      if (review.state !== "CHANGES_REQUESTED") continue;
+      const notes = inline.filter(comment => comment.pull_request_review_id === review.id);
+      const key = `review:${await digest([pr.number, review.id, review.body, notes.map(note => [note.id, note.path, note.body])])}`;
+      if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body, comments: notes.filter(note => note.line !== null || note.commit_id === pr.head_oid).map(note => ({ path: note.path, line: note.line, body: note.body })) };
+    }
+    for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at))) {
+      if (comment.user.type === "Bot" || !/@oriel\b/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
+      const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
+      if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
+    }
+    type Check = { id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; output: { title: string | null; summary: string | null; text: string | null } };
+    const checks: Check[] = [];
+    for (let page = 1; ; page++) {
+      const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${pr.head_oid}/check-runs?filter=all&per_page=100&page=${page}`);
+      if (!result) this.auth.fail(502, "PR checks are unavailable");
+      checks.push(...result.check_runs);
+      if (result.check_runs.length < 100) break;
+    }
+    const responseHeads = await this.workflowCursors(context, comments, "response-head");
+    const heads = new Set([pr.head_oid]);
+    for (const key of responseHeads.keys()) {
+      const head = key.slice(key.lastIndexOf(":") + 1);
+      if (OID.test(head)) heads.add(head);
+    }
+    const history = [...checks];
+    const statusHistory: { id: number; context: string; state: string; description: string | null; created_at: string; head: string }[] = [];
+    for (const head of heads) {
+      if (head !== pr.head_oid) for (let page = 1; ; page++) {
+        const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${head}/check-runs?filter=all&per_page=100&page=${page}`);
+        if (!result) this.auth.fail(502, "Check recovery facts are unavailable");
+        history.push(...result.check_runs);
+        if (result.check_runs.length < 100) break;
+      }
+      const statuses = await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string }>(context, `${context.path}/commits/${head}/statuses`);
+      statusHistory.push(...statuses.map(status => ({ ...status, head })));
+    }
+    const byName = new Map<string, Check>();
+    for (const check of checks.sort((a, b) => a.id - b.id)) byName.set(check.name, check);
+    for (const check of byName.values()) {
+      if (check.head_sha !== pr.head_oid || check.status !== "completed" || !["failure", "timed_out", "action_required", "cancelled", "startup_failure", "stale"].includes(check.conclusion ?? "")) continue;
+      const name = await digest(check.name);
+      const key = `check:${name}:${check.id}:${pr.head_oid}`;
+      if (cursors.has(key)) continue;
+      // Count unique signed response attempts since the latest actual successful run,
+      // including prior response heads. No local history or repeated-comment echoes.
+      const successful = history.filter(run => run.name === check.name && ["success", "neutral", "skipped"].includes(run.conclusion ?? "") && run.completed_at)
+        .map(run => run.completed_at!).sort().at(-1) ?? "";
+      const attempts = [...cursors].filter(([key, time]) => key.startsWith(`check:${name}:`) && time > successful).length;
+      if (attempts >= 3) { exhausted?.push(check.name); continue; }
+      if (requestedKey !== undefined && requestedKey !== key) continue;
+      return { key, kind: "check_failure", body: `${check.name}: ${check.conclusion}\n${[check.output.title, check.output.summary, check.output.text].filter(Boolean).join("\n").slice(0, 16000)}`, comments: [] };
+    }
+    const latestStatus = new Map<string, typeof statusHistory[number]>();
+    for (const status of statusHistory.filter(status => status.head === pr.head_oid).sort((a, b) => a.id - b.id)) latestStatus.set(status.context, status);
+    for (const status of latestStatus.values()) {
+      if (!["error", "failure"].includes(status.state)) continue;
+      const key = `check:${await digest(status.context)}:status-${status.id}:${pr.head_oid}`;
+      if (cursors.has(key)) continue;
+      const prefix = `check:${await digest(status.context)}:`;
+      const successful = statusHistory.filter(run => run.context === status.context && run.state === "success").map(run => run.created_at).sort().at(-1) ?? "";
+      const attempts = [...cursors].filter(([key, time]) => key.startsWith(prefix) && time > successful).length;
+      if (attempts >= 3) exhausted?.push(status.context);
+      if (attempts < 3 && (requestedKey === undefined || requestedKey === key)) return { key, kind: "check_failure", body: `${status.context}: ${status.state}\n${status.description ?? ""}`, comments: [] };
+    }
+    return null;
+  }
+
+  async workflowAdmission(device: Device, claim: WorkflowClaim, check: () => void): Promise<WorkflowAdmission> {
+    if (!["plan", "implement", "respond", "reconcile"].includes(claim.kind) || !Number.isSafeInteger(claim.issue_number) || claim.issue_number <= 0 || !SECRET.test(claim.version) || claim.branch !== null && typeof claim.branch !== "string") this.auth.fail(400, "Invalid workflow claim");
+    const context = await this.workflowContext(device, check);
+    const { snapshot, recoveries } = await this.workflowFacts(context);
+    const row = snapshot.workflows.find(row => row.issue.number === claim.issue_number);
+    if (!row || row.version !== claim.version || row.branch !== claim.branch) this.auth.fail(409, "Workflow content or canonical branch changed");
+    const allowed = claim.kind === "plan" ? ["needs-how", "triage"].includes(row.phase) :
+      claim.kind === "implement" ? ["approved", "running"].includes(row.phase) :
+      claim.kind === "respond" ? row.phase === "review" && !!row.feedback :
+      row.phase === "merged" || row.phase === "done" || row.phase === "blocked" && row.recovery === "invalidate";
+    if (!allowed) this.auth.fail(409, row.blocked_reason ?? "Workflow phase does not admit this operation");
+    context.check();
+    return { ...claim, linear_id: row.linear?.id ?? null,
+      ...(claim.kind === "respond" && row.feedback && row.pull_request ? { feedback: { key: row.feedback.key, head_oid: row.pull_request.head_oid, pr_number: row.pull_request.number } } : {}),
+      ...(["implement", "respond"].includes(claim.kind) ? { execution: { target_oid: snapshot.target_oid, base_branch: snapshot.base_branch, verification: snapshot.configuration.verification } } : {}),
+      ...(claim.kind === "reconcile" && row.recovery === "invalidate" ? { recovery: { branch: recoveries.get(row.issue.number)! } } : {}) };
+  }
+
+  async workflow(request: Request, authority: WorkflowAuthority): Promise<Response> {
+    const url = new URL(request.url);
+    const route = /^\/api\/workflows\/([a-f0-9]{32})(?:\/(issues|actions|git-token))?$/.exec(url.pathname);
+    if (!route || url.search || request.method !== (route[2] ? "POST" : "GET")) this.auth.fail(404, "Not found");
+    let session: Session | undefined;
+    let device: Device;
+    if (route[2] === "issues") {
+      if (request.headers.has("Authorization")) this.auth.fail(403, "WHAT creation requires an owning browser session");
+      if (request.headers.get("Origin") !== this.env.PUBLIC_ORIGIN) this.auth.fail(403, "Invalid browser Origin");
+      session = await this.auth.session(request);
+      const owned = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", route[1]).toArray()[0];
+      if (!owned || owned.user_id !== session.user.id) this.auth.fail(403, "Device belongs to another account");
+      device = owned;
+    } else if (request.headers.has("Authorization") || route[2]) device = await this.auth.host(request, route[1]);
+    else {
+      session = await this.auth.session(request);
+      const owned = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", route[1]).toArray()[0];
+      if (!owned || owned.user_id !== session.user.id) this.auth.fail(403, "Device belongs to another account");
+      device = owned;
+    }
+    const check = () => { if (session) this.auth.liveSession(session); this.liveDevice(device); };
+    check();
+    try {
+      if (!route[2]) return this.auth.json((await this.workflowFacts(await this.workflowContext(device, check))).snapshot);
+      const body = await this.auth.body(request);
+      check();
+      if (route[2] === "issues") return this.auth.json({ issue: await this.workflowCreateWhat(await this.workflowContext(device, check, true), body) });
+      if (typeof body.lease_id !== "string" || !body.lease_id) this.auth.fail(400, "A live workflow lease is required");
+      const grant = authority.verify(device, body.lease_id);
+      const leased = () => { check(); authority.verify(device, grant.lease_id); };
+      const context = await this.workflowContext(device, leased, route[2] === "actions");
+      if (route[2] === "git-token") {
+        if (!["plan", "implement", "respond"].includes(grant.kind)) this.auth.fail(409, "Reconciliation does not need Git credentials");
+        if (grant.kind === "plan") await this.workflowAdmission(device, grant, leased);
+        else {
+          const current = await this.workflowCurrent(context, grant, grant.kind === "implement" ? ["running"] : ["review"]);
+          if (!current.row.canonical_oid) this.auth.fail(409, "Code Git credentials require a current matching sealed branch");
+          if (grant.kind === "respond") {
+            if (!grant.feedback || current.row.pull_request?.number !== grant.feedback.pr_number ||
+              !(await this.workflowFeedback(context, { ...current.row.pull_request, head_oid: grant.feedback.head_oid }, grant.feedback.key))) this.auth.fail(409, "Admitted response feedback is no longer current");
+          }
+        }
+        leased();
+        return this.auth.json(await this.installationToken(device.user_id, leased, { contents: grant.kind === "plan" ? "read" : "write", metadata: "read" }));
+      }
+      return this.auth.json(await this.workflowAction(context, grant, body));
+    } catch (error) {
+      if (error instanceof Error && "status" in error) throw error;
+      this.auth.fail(502, "Workflow provider state could not be confirmed; no approval was inferred");
+    }
+  }
+
+  private async workflowCreateWhat(context: WorkflowContext, body: Record<string, unknown>): Promise<GithubWhat> {
+    if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 256 || typeof body.body !== "string" || body.body.length > 60000 || typeof body.request_id !== "string" || !UUID.test(body.request_id)) this.auth.fail(400, "Invalid WHAT creation request");
+    const identity = `${context.repository.repository_id}:${body.request_id.toLowerCase()}`;
+    const pending = this.whatCreations.get(identity);
+    const operation = (async () => {
+      if (pending) try { await pending; } catch { /* Re-read stable external identity, never repeat an unknown payload blindly. */ }
+      const marker = await this.workflowMarker(context, "what", (body.request_id as string).toLowerCase());
+      const content = `${body.body}\n\n${marker}`;
+      const read = async () => {
+        const issues = await this.workflowList<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues?state=all`);
+        const matching = issues.filter(issue => !issue.pull_request && issue.body?.includes(marker));
+        if (matching.length > 1) this.auth.fail(409, "WHAT creation identity is ambiguous");
+        if (matching[0] && (matching[0].title !== body.title || matching[0].body !== content)) this.auth.fail(409, "WHAT creation request ID was already used or edited");
+        return matching[0] ?? null;
+      };
+      let issue = await read();
+      if (!issue) {
+        context.check();
+        try { await this.workflowGithub(context, `${context.path}/issues`, "POST", { title: body.title, body: content }); }
+        catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+        issue = await read();
+        if (!issue) this.auth.fail(502, "WHAT creation is unconfirmed; retry the same request_id");
+      }
+      return { number: issue.number, node_id: issue.node_id, title: issue.title, body: issue.body, url: issue.html_url, state: issue.state };
+    })();
+    this.whatCreations.set(identity, operation);
+    try { return await operation; }
+    finally { if (this.whatCreations.get(identity) === operation) this.whatCreations.delete(identity); }
+  }
+
+  private async workflowCurrent(context: WorkflowContext, grant: WorkflowGrant, phases?: WorkflowRow["phase"][], changed = false): Promise<{ facts: WorkflowFacts; row: WorkflowRow }> {
+    const facts = await this.workflowFacts(context);
+    const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
+    if (!row || (row.linear?.id ?? null) !== grant.linear_id && !(grant.kind === "plan" && grant.linear_id === null && row.phase === "triage")) this.auth.fail(409, "Formal workflow identity changed");
+    const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === grant.version;
+    if (!changed && !recoveredPlan && (row.version !== grant.version || row.branch !== grant.branch)) this.auth.fail(409, "Workflow approval content changed");
+    if (phases && !phases.includes(row.phase)) this.auth.fail(409, row.blocked_reason ?? "Workflow native state no longer admits this operation");
+    if (grant.execution && phases?.some(phase => ["approved", "running", "review"].includes(phase)) &&
+      (facts.snapshot.target_oid !== grant.execution.target_oid || facts.snapshot.base_branch !== grant.execution.base_branch || !facts.snapshot.configuration.autonomous ||
+       JSON.stringify(facts.snapshot.configuration.verification) !== JSON.stringify(grant.execution.verification))) this.auth.fail(409, "Commit-pinned execution target or verification configuration changed");
+    context.check();
+    return { facts, row };
+  }
+
+  private async workflowUpdateHow(context: WorkflowContext, grant: WorkflowGrant, input: { stateId?: string; title?: string; description?: string }, phases: WorkflowRow["phase"][], changed = false, expectedHead?: string): Promise<LinearHow> {
+    let current = await this.workflowCurrent(context, grant, phases, changed);
+    if (!current.row.linear) this.auth.fail(409, "A unique HOW is required");
+    const id = current.row.linear.id;
+    const before = current.row.linear;
+    const matches = (how: LinearHow) => (input.stateId === undefined || how.state.id === input.stateId) &&
+      (input.title === undefined || how.title === input.title) && (input.description === undefined || how.description === input.description);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (input.stateId) {
+        const state = current.row.linear!.state;
+        const target = current.facts.states.find(candidate => candidate.id === input.stateId);
+        const review = current.facts.states.filter(candidate => candidate.type === "started" && /review/i.test(candidate.name));
+        const targetAllowed = target && (target.name === "Triage" && target.type === "triage" || target.name === "In Progress" && target.type === "started" || target.name === "Done" && target.type === "completed" || review.length === 1 && target.id === review[0].id);
+        if (!target || !targetAllowed || current.facts.states.filter(candidate => candidate.name === target.name && candidate.type === target.type).length !== 1 ||
+          !current.row.fingerprint || !current.facts.states.some(candidate => candidate.id === state.id && candidate.name === state.name && candidate.type === state.type)) this.auth.fail(409, "Native HOW transition identity changed");
+        if (matches(current.row.linear!)) return current.row.linear!;
+        if (state.type === "completed" || state.type === "canceled") this.auth.fail(409, "Completed or canceled HOW is not overwritten");
+        if (target.name === "Triage" && !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || review.length === 1 && state.id === review[0].id)) this.auth.fail(409, "Native HOW state cannot be safely returned to Triage");
+      } else if (matches(current.row.linear!)) return current.row.linear!;
+      if (expectedHead && (current.row.canonical_oid !== expectedHead || current.row.pull_request?.head_oid !== expectedHead)) this.auth.fail(409, "Verified PR head changed before progress reflection");
+      if (expectedHead) {
+        const pr = current.row.pull_request;
+        if (!pr || !current.row.branch) this.auth.fail(409, "Verified PR identity is unavailable");
+        const native = await this.workflowGithub<GithubPull>(context, `${context.path}/pulls/${pr.number}`);
+        const ref = await this.workflowGithub<{ object: { sha: string } }>(context, `${context.path}/git/ref/heads/${encodeURIComponent(current.row.branch)}`, "GET", undefined, true);
+        if (!native || native.state !== "open" || native.merged_at || native.draft || native.head.ref !== current.row.branch ||
+          native.head.sha !== expectedHead || ref?.object.sha !== expectedHead) this.auth.fail(409, "Verified PR changed before progress reflection");
+      }
+      // Facts scans perform more reads after collecting HOWs. Do not write from
+      // that older copy: preserve human edits and terminal-state transitions.
+      const baseline = current.facts.hows.find(how => how.id === id);
+      const fresh = await this.workflowHow(context, id);
+      if (!baseline || !fresh || fresh.team.id !== context.team.team_id || fresh.identifier !== baseline.identifier ||
+        fresh.title !== baseline.title || fresh.description !== baseline.description || fresh.state.id !== baseline.state.id ||
+        fresh.state.name !== baseline.state.name || fresh.state.type !== baseline.state.type ||
+        fresh.attachments.length !== baseline.attachments.length ||
+        fresh.attachments.some((attachment, index) => attachment.url !== baseline.attachments[index].url)) {
+        this.auth.fail(409, "Human changes prevented the HOW update");
+      }
+      context.check();
+      try { await this.workflowLinear(context, "mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}", { id, input }); }
+      catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+      const how = await this.workflowHow(context, id);
+      if (!how || how.team.id !== context.team.team_id) this.auth.fail(409, "HOW update identity is unavailable");
+      if (matches(how)) { const { team: _team, attachments: _attachments, ...linear } = how; return linear; }
+      if (how.title !== before.title || how.description !== before.description || how.state.id !== before.state.id) this.auth.fail(409, "Human changes prevented the HOW update");
+      current = await this.workflowCurrent(context, grant, phases, changed);
+    }
+    this.auth.fail(502, "HOW update could not be confirmed");
+  }
+
+  private workflowState(states: LinearState[], name: string, type: string): LinearState {
+    const matching = states.filter(state => state.name === name && state.type === type);
+    if (matching.length !== 1) this.auth.fail(409, `Selected Linear team needs one native ${name} state`);
+    return matching[0];
+  }
+
+  private async workflowSourceChange(context: WorkflowContext, base: string, head: string, files: { filename: string }[]): Promise<boolean> {
+    const source = (path: string) => !/(^|\/)(HANDOFF\.md|\.oriel\.yaml)$/.test(path) && !/\.md$/i.test(path);
+    if (files.some(file => source(file.filename))) return true;
+    if (files.length < 300) return false;
+    // GitHub caps compare's changed-file summary at 300. Walk only differing native
+    // trees rather than treating documentation-heavy summaries as a proof of no code.
+    const before = await this.workflowGithub<{ tree: { sha: string } }>(context, `${context.path}/git/commits/${base}`);
+    const after = await this.workflowGithub<{ tree: { sha: string } }>(context, `${context.path}/git/commits/${head}`);
+    if (!before || !after) this.auth.fail(502, "Source-change commit facts are unavailable");
+    type Tree = { tree: { path: string; type: string; sha: string }[]; truncated: boolean };
+    const pending: { path: string; before: string | null; after: string | null }[] = [{ path: "", before: before.tree.sha, after: after.tree.sha }];
+    while (pending.length) {
+      const item = pending.pop()!;
+      if (item.before === item.after) continue;
+      const left = item.before ? await this.workflowGithub<Tree>(context, `${context.path}/git/trees/${item.before}`) : { tree: [], truncated: false };
+      const right = item.after ? await this.workflowGithub<Tree>(context, `${context.path}/git/trees/${item.after}`) : { tree: [], truncated: false };
+      if (!left || !right || left.truncated || right.truncated) this.auth.fail(409, "Source tree is incomplete; no PR may be inferred from uncertain output");
+      const old = new Map(left.tree.map(entry => [entry.path, entry]));
+      const next = new Map(right.tree.map(entry => [entry.path, entry]));
+      for (const name of new Set([...old.keys(), ...next.keys()])) {
+        const a = old.get(name); const b = next.get(name);
+        if (a?.sha === b?.sha && a?.type === b?.type) continue;
+        const path = `${item.path}${name}`;
+        if ((a && a.type !== "tree" || b && b.type !== "tree") && source(path)) return true;
+        if (a?.type === "tree" || b?.type === "tree") pending.push({ path: `${path}/`, before: a?.type === "tree" ? a.sha : null, after: b?.type === "tree" ? b.sha : null });
+      }
+    }
+    return false;
+  }
+
+  private async workflowComment(context: WorkflowContext, grant: WorkflowGrant, kind: string, key: string, text: string, githubPr: number | null = null, changed = false, expectedHead?: string): Promise<void> {
+    const marker = await this.workflowMarker(context, kind, key);
+    const content = `${text}\n\n${marker}`;
+    const read = async () => githubPr === null ? (await this.workflowLinearComments(context, grant.linear_id!)).map(comment => comment.body) :
+      (await this.workflowList<GithubComment>(context, `${context.path}/issues/${githubPr}/comments`)).map(comment => comment.body);
+    if ((await read()).some(body => body.includes(marker))) return;
+    const current = await this.workflowCurrent(context, grant, githubPr === null ? undefined : ["review"], changed);
+    if (githubPr !== null && current.row.pull_request?.number !== githubPr) this.auth.fail(409, "Response PR identity changed");
+    if (expectedHead && (current.row.canonical_oid !== expectedHead || current.row.pull_request?.head_oid !== expectedHead)) this.auth.fail(409, "Verified response head changed before publication");
+    context.check();
+    try {
+      if (githubPr === null) {
+        const hash = await digest(["oriel/comment/v1", context.repository.repository_id, grant.linear_id, kind, key]);
+        const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+        await this.workflowCurrent(context, grant, undefined, changed);
+        await this.workflowLinear(context, "mutation($input:CommentCreateInput!){commentCreate(input:$input){success}}", { input: { id, issueId: grant.linear_id, body: content } });
+      } else await this.workflowGithub(context, `${context.path}/issues/${githubPr}/comments`, "POST", { body: content });
+    } catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+    if (!(await read()).some(body => body.includes(marker))) this.auth.fail(502, "Workflow response is unconfirmed; retry with the same content identity");
+  }
+
+  private async workflowAction(context: WorkflowContext, grant: WorkflowGrant, body: Record<string, unknown>): Promise<unknown> {
+    const action = body.action;
+    const kind = action === "proposal" ? "plan" : action === "begin" || action === "publish" ? "implement" :
+      action === "responded" ? "respond" : action === "done" ? "reconcile" : action === "invalidate" || action === "fail" ? grant.kind : null;
+    if (!kind || kind !== grant.kind) this.auth.fail(403, "Workflow action is not allowed by this lease");
+    if (action === "proposal") {
+      if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 256 || typeof body.description !== "string" || !body.description.trim() || body.description.length > 60000) this.auth.fail(400, "A bounded HOW title and description are required");
+      let initial: { facts: WorkflowFacts; row: WorkflowRow };
+      try { initial = await this.workflowCurrent(context, grant, ["needs-how", "triage"]); }
+      catch (error) {
+        if (!(error instanceof Error) || !("status" in error) || error.status !== 409 || grant.linear_id === null) throw error;
+        const facts = await this.workflowFacts(context);
+        const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
+        if (row?.phase !== "triage" || row.linear?.id !== grant.linear_id || row.linear.title !== body.title || row.linear.description !== body.description) throw error;
+        if (row.how_feedback) await this.workflowComment(context, { ...grant, version: row.version, branch: row.branch }, "how", row.how_feedback.key, "Oriel updated the HOW proposal in response to this request.");
+        return { linear: row.linear };
+      }
+      if (initial.row.linear) {
+        if (grant.linear_id === null) return { linear: initial.row.linear };
+        const feedback = initial.row.how_feedback;
+        const linear = await this.workflowUpdateHow(context, grant, { title: body.title, description: body.description }, ["triage"]);
+        if (feedback) {
+          const version = await digest(["oriel/approval-fingerprint/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, initial.row.issue.title, initial.row.issue.body ?? "", linear.id, linear.title, linear.description ?? ""]);
+          await this.workflowComment(context, { ...grant, linear_id: linear.id, version, branch: `oriel/${linear.identifier}-gh-${grant.issue_number}-${version}` }, "how", feedback.key, "Oriel updated the HOW proposal in response to this request.");
+        }
+        return { linear };
+      }
+      const hash = await digest(["oriel/how/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, context.team.team_id]);
+      const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      const triage = this.workflowState(initial.facts.states, "Triage", "triage");
+      let how = await this.workflowHow(context, id);
+      if (!how) {
+        await this.workflowCurrent(context, grant, ["needs-how"]);
+        try { await this.workflowLinear(context, "mutation($input:IssueCreateInput!){issueCreate(input:$input){success issue{id}}}", { input: { id, teamId: context.team.team_id, stateId: triage.id, title: body.title, description: body.description } }); }
+        catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+        how = await this.workflowHow(context, id);
+        if (!how) this.auth.fail(502, "HOW creation is unconfirmed; retry the same workflow");
+      }
+      if (how.team.id !== context.team.team_id || how.state.id !== triage.id) this.auth.fail(409, "Recovered HOW was changed by a human; no overwrite or approval is inferred");
+      const url = initial.row.issue.url;
+      if (how.attachments.some(attachment => attachment.url !== url && /github\.com\/.*\/issues\//i.test(attachment.url))) this.auth.fail(409, "Recovered HOW has a foreign formal link");
+      if (!how.attachments.some(attachment => attachment.url === url)) {
+        await this.workflowCurrent(context, grant, ["needs-how"]);
+        const attachmentHash = await digest(["oriel/how-attachment/v1", id, url]);
+        const attachmentId = `${attachmentHash.slice(0, 8)}-${attachmentHash.slice(8, 12)}-5${attachmentHash.slice(13, 16)}-a${attachmentHash.slice(17, 20)}-${attachmentHash.slice(20, 32)}`;
+        try { await this.workflowLinear(context, "mutation($input:AttachmentCreateInput!){attachmentCreate(input:$input){success}}", { input: { id: attachmentId, issueId: id, url, title: initial.row.issue.title } }); }
+        catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+        how = await this.workflowHow(context, id);
+        if (!how?.attachments.some(attachment => attachment.url === url)) this.auth.fail(502, "HOW formal link is unconfirmed; retry the same workflow");
+      }
+      const current = await this.workflowFacts(context);
+      const row = current.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
+      if (row?.phase !== "triage" || row.linear?.id !== id || row.issue.title !== initial.row.issue.title || row.issue.body !== initial.row.issue.body) this.auth.fail(409, "HOW formal identity changed during proposal");
+      return { linear: row.linear };
+    }
+    if (action === "begin") {
+      let { facts, row } = await this.workflowCurrent(context, grant, ["approved", "running"]);
+      if (!row.branch || !row.linear || !facts.snapshot.configuration.autonomous) this.auth.fail(409, "Current approval and target opt-in are required");
+      if (!row.canonical_oid) {
+        // Both comparisons are one provider transaction; never degrade to sequential ref creation.
+        await this.workflowCurrent(context, grant, ["approved"]);
+        context.check();
+        try {
+          await fetch("https://api.github.com/graphql", { method: "POST", headers: { Authorization: `Bearer ${context.github}`, "Content-Type": "application/json", "User-Agent": "Oriel" },
+            body: JSON.stringify({ query: "mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}", variables: { input: {
+              repositoryId: facts.snapshot.repository_node_id, refUpdates: [
+                { name: `refs/heads/${facts.snapshot.base_branch}`, beforeOid: facts.snapshot.target_oid, afterOid: facts.snapshot.target_oid, force: false },
+                { name: `refs/heads/${row.branch}`, beforeOid: "0".repeat(40), afterOid: facts.snapshot.target_oid, force: false },
+              ],
+            } } }), redirect: "manual" });
+        } catch { /* Read the exact ref after an uncertain atomic send. */ }
+        context.check();
+        const after = await this.workflowCurrent(context, grant, ["approved", "running"]);
+        if (!after.row.canonical_oid) this.auth.fail(409, "Atomic updateRefs sealing was rejected or unavailable; no weaker fallback is permitted");
+        if (after.row.canonical_oid !== facts.snapshot.target_oid) this.auth.fail(409, "Canonical ref changed during sealing");
+        facts = after.facts; row = after.row;
+      }
+      // Existing same-fingerprint refs are adopted without reset.
+      if (row.linear!.state.name === "Todo") await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(facts.states, "In Progress", "started").id }, ["approved"]);
+      const current = await this.workflowCurrent(context, grant, ["running"]);
+      return { branch: current.row.branch, canonical_oid: current.row.canonical_oid, target_oid: current.facts.snapshot.target_oid,
+        base_branch: current.facts.snapshot.base_branch, verification: current.facts.snapshot.configuration.verification };
+    }
+    if (action === "publish") {
+      if (body.verified !== true || typeof body.head_oid !== "string" || !OID.test(body.head_oid) || typeof body.summary !== "string" || body.summary.length > 12000) this.auth.fail(400, "Publication requires a verified commit and bounded summary");
+      let { facts, row } = await this.workflowCurrent(context, grant, ["running", "review"]);
+      if (!row.branch || row.canonical_oid !== body.head_oid) this.auth.fail(409, "Verified commit does not match the current canonical remote head");
+      const compare = await this.workflowGithub<{ status: string; total_commits: number; files: { filename: string; status: string }[] }>(context, `${context.path}/compare/${facts.snapshot.target_oid}...${body.head_oid}`);
+      if (!compare || compare.status !== "ahead" || compare.total_commits < 1 || !await this.workflowSourceChange(context, facts.snapshot.target_oid, body.head_oid, compare.files)) this.auth.fail(409, "PR requires actual source changes on a verified non-diverged head");
+      if (!row.pull_request) {
+        const before = await this.workflowCurrent(context, grant, ["running"]);
+        if (before.row.canonical_oid !== body.head_oid) this.auth.fail(409, "Verified canonical head changed before PR creation");
+        const ref = await this.workflowGithub<{ object: { sha: string } }>(context, `${context.path}/git/ref/heads/${encodeURIComponent(row.branch)}`, "GET", undefined, true);
+        if (ref?.object.sha !== body.head_oid) this.auth.fail(409, "Verified canonical head changed before PR creation");
+        try { await this.workflowGithub(context, `${context.path}/pulls`, "POST", { head: row.branch, base: facts.snapshot.base_branch, title: row.issue.title, body: `Closes #${row.issue.number}`, draft: false }); }
+        catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+        ({ facts, row } = await this.workflowCurrent(context, grant, ["review"]));
+      }
+      if (!row.pull_request || row.pull_request.state !== "open" || row.pull_request.merged || row.pull_request.draft || row.pull_request.head_oid !== body.head_oid) this.auth.fail(409, "Ready PR creation could not be confirmed by its natural key");
+      const reviews = facts.states.filter(state => state.type === "started" && /review/i.test(state.name));
+      if (row.linear?.state.name === "In Progress" && reviews.length === 1) await this.workflowUpdateHow(context, grant, { stateId: reviews[0].id }, ["review"], false, body.head_oid);
+      const confirmed = await this.workflowCurrent(context, grant, ["review"]);
+      if (confirmed.row.pull_request?.head_oid !== body.head_oid || confirmed.row.canonical_oid !== body.head_oid) this.auth.fail(409, "Verified PR head changed before publication confirmation");
+      return { pull_request: confirmed.row.pull_request };
+    }
+    if (action === "responded") {
+      if (body.verified !== true || typeof body.head_oid !== "string" || !OID.test(body.head_oid) || typeof body.feedback_key !== "string" || typeof body.summary !== "string" || !body.summary.trim() || body.summary.length > 12000) this.auth.fail(400, "Response requires verified head, current feedback identity and bounded summary");
+      const current = await this.workflowCurrent(context, grant, ["review"]);
+      const pr = current.row.pull_request!;
+      if (pr.head_oid !== body.head_oid || current.row.canonical_oid !== body.head_oid) this.auth.fail(409, "Response commit does not match the current PR and canonical heads");
+      if (!grant.feedback || grant.feedback.key !== body.feedback_key || grant.feedback.pr_number !== pr.number) this.auth.fail(409, "Response does not match the lease's admitted feedback");
+      const original = await this.workflowFeedback(context, { ...pr, head_oid: grant.feedback.head_oid }, body.feedback_key);
+      const valid = original?.key === body.feedback_key;
+      const marker = await this.workflowMarker(context, "response", body.feedback_key);
+      const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`);
+      if (!valid && !comments.some(comment => comment.body.includes(marker))) this.auth.fail(409, "Feedback identity is no longer actionable");
+      const headMarker = body.feedback_key.startsWith("check:") ? `\n\n${await this.workflowMarker(context, "response-head", `${body.feedback_key}:${body.head_oid}`)}` : "";
+      await this.workflowComment(context, grant, "response", body.feedback_key, `Oriel verified review fixes at ${body.head_oid}.\n\n${body.summary}${headMarker}`, pr.number, false, body.head_oid);
+      return { pull_request: (await this.workflowCurrent(context, grant, ["review"])).row.pull_request };
+    }
+    if (action === "done") {
+      const current = await this.workflowCurrent(context, grant, ["merged", "done"]);
+      if (!current.row.pull_request?.merged) this.auth.fail(409, "Only an actual merged managed PR can complete the HOW");
+      if (current.row.linear?.state.type === "canceled") this.auth.fail(409, "Canceled HOW is not overwritten");
+      const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Done", "completed").id }, ["merged", "done"]);
+      return { linear };
+    }
+    if (action === "invalidate" || action === "fail") {
+      if (grant.kind === "plan" || grant.kind === "reconcile" && (action !== "invalidate" || !grant.recovery)) this.auth.fail(403, "Only owned code work or admitted stale-approval reconciliation can be returned to Triage");
+      const current = await this.workflowCurrent(context, grant, undefined, action === "invalidate");
+      if (!current.row.linear || current.row.phase === "blocked" && current.row.fingerprint === null) this.auth.fail(409, "Unknown or ambiguous approval is not overwritten");
+      if (grant.recovery && current.row.phase !== "triage" && (current.row.recovery !== "invalidate" || current.facts.recoveries.get(grant.issue_number) !== grant.recovery.branch)) this.auth.fail(409, "Prior canonical recovery evidence changed");
+      if (action === "invalidate" && !grant.recovery && current.row.version === grant.version) this.auth.fail(409, "Approval content has not changed");
+      const state = current.row.linear.state;
+      if (state.type === "completed" || state.type === "canceled") return { linear: current.row.linear };
+      if (current.row.phase === "triage") return { linear: current.row.linear };
+      const known = current.facts.states.some(candidate => candidate.id === state.id && candidate.name === state.name && candidate.type === state.type);
+      if (!known || !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || state.type === "started" && /review/i.test(state.name))) this.auth.fail(409, "Native HOW state cannot be safely returned to Triage");
+      if (action === "fail") {
+        if (typeof body.reason !== "string" || !body.reason.trim()) this.auth.fail(400, "A failure reason is required");
+        let reason = body.reason.slice(0, 4000);
+        for (const secret of [context.github, context.linear, this.env.GITHUB_CLIENT_SECRET, this.env.INTEGRATION_ENCRYPTION_KEY, grant.binding.host_hash].filter((value): value is string => !!value)) reason = reason.replaceAll(secret, "[redacted]");
+        reason = reason.replace(/Bearer\s+\S+|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+/gi, "[redacted]");
+        await this.workflowComment(context, grant, "failure", `${grant.version}:${await digest(reason)}`, `Oriel stopped without publishing: ${reason}`);
+      }
+      const obsoleteBranch = grant.recovery?.branch ?? grant.branch;
+      if (action === "invalidate" && obsoleteBranch) {
+        const obsolete = current.facts.pulls.filter(pr => pr.head.ref === obsoleteBranch && pr.head.repo?.id === context.repository.repository_id && pr.base.repo.id === context.repository.repository_id &&
+          pr.state === "open" && !pr.merged_at && !pr.draft && pr.body?.trim() === `Closes #${grant.issue_number}`);
+        if (obsolete.length > 1) this.auth.fail(409, "Obsolete PR identity is ambiguous");
+        if (obsolete[0]) {
+          await this.workflowCurrent(context, grant, undefined, true);
+          try { await this.workflowGithub(context, `${context.path}/pulls/${obsolete[0].number}`, "PATCH", { state: "closed" }); }
+          catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
+          const readback = await this.workflowGithub<GithubPull>(context, `${context.path}/pulls/${obsolete[0].number}`);
+          if (!readback || readback.state !== "closed" || readback.merged_at) this.auth.fail(409, "Obsolete PR closure was not confirmed");
+        }
+      }
+      const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Triage", "triage").id }, ["approved", "running", "review", "blocked"], action === "invalidate");
+      return { linear };
+    }
+    this.auth.fail(400, "Unsupported workflow action");
   }
 
   private config(provider: Provider): void {
@@ -177,21 +922,19 @@ export class Integrations {
         if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(repository.owner) ||
             !/^[a-z0-9._-]{1,100}$/.test(repository.name) || repository.name === "." || repository.name === "..") this.auth.fail(400, "Invalid GitHub repository");
       }
-      this.sql.exec("UPDATE devices SET repository = ?, repository_generation = ? WHERE device_id = ?", repository ? JSON.stringify(repository) : null, random(), device.device_id);
+      const normalized = repository ? JSON.stringify(repository) : null;
+      if (normalized !== device.repository) this.sql.exec("UPDATE devices SET repository = ?, repository_generation = ? WHERE device_id = ?", normalized, random(), device.device_id);
       return this.auth.json({ ok: true });
     }
     const callback = /^\/api\/integrations\/callback\/(github|linear)$/.exec(url.pathname);
     if (callback && request.method === "GET") return this.callback(request, callback[1] as Provider, url);
     if (Integrations.daemonRoute(request)) {
-      const [, id, action] = /^\/api\/integrations\/([a-f0-9]{32})(?:\/(issues|github\/token))?$/.exec(url.pathname)!;
+      const [, id, action] = /^\/api\/integrations\/([a-f0-9]{32})(?:\/(issues))?$/.exec(url.pathname)!;
       const device = await this.auth.host(request, id);
       const check = () => this.liveDevice(device);
       check();
       if (!action) return this.auth.json(this.connections(device.user_id));
       if (action === "issues") return this.auth.json(await this.issues(device.user_id, check));
-      await this.auth.body(request);
-      check();
-      return this.auth.json(await this.installationToken(device.user_id, check));
     }
     const browser = /^(?:\/api\/integrations(?:\/issues)?|\/api\/integrations\/(github|linear)\/(start|select|disconnect))$/.exec(url.pathname);
     if (!browser || (browser[2] ? request.method !== "POST" : request.method !== "GET")) this.auth.fail(404, "Not found");
@@ -451,7 +1194,7 @@ export class Integrations {
     return this.auth.json({ ok: true, revoked });
   }
 
-  private async installationToken(user: string, check: () => void): Promise<{ token: string; expires_at: string; repository: Repository }> {
+  private async installationToken(user: string, check: () => void, permissions: Record<string, string> = PERMISSIONS): Promise<{ token: string; expires_at: string; repository: Repository }> {
     this.config("github");
     const connection = this.row(user, "github");
     if (!connection?.active || !connection.target) this.auth.fail(409, "No GitHub repository is connected");
@@ -479,13 +1222,13 @@ export class Integrations {
       step = "request";
       const response = await fetch(`https://api.github.com/app/installations/${repository.installation_id}/access_tokens`, {
         method: "POST", headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${signingInput}.${base64url(new Uint8Array(signature))}`, "Content-Type": "application/json", "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" },
-        body: JSON.stringify({ repository_ids: [repository.repository_id], permissions: PERMISSIONS }), redirect: "manual",
+        body: JSON.stringify({ repository_ids: [repository.repository_id], permissions }), redirect: "manual",
       });
       if (!response.ok) {
         const hint = response.status === 401
           ? "Check GITHUB_APP_ID and the matching GitHub App private key."
           : response.status === 422
-            ? "Check Contents, Issues and Pull requests write permissions and approval of those permissions on the installation."
+            ? `Check the GitHub App permissions requested (${Object.entries(permissions).map(([permission, access]) => `${permission}=${access}`).join(", ")}), then approve updated permissions on this installation.`
             : "Check the GitHub App installation status and granted permissions.";
         this.auth.fail(502, `GitHub installation token request rejected (HTTP ${response.status}). ${hint}`);
       }

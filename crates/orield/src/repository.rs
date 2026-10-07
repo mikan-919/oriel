@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::DeviceIdentity;
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct Repository {
     pub owner: String,
     pub name: String,

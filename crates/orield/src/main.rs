@@ -27,6 +27,8 @@ use url::Url;
 
 mod integrations;
 mod repository;
+mod workflow;
+mod workflow_git;
 
 #[derive(Serialize, PartialEq, Eq)]
 struct DeviceIdentity {
@@ -484,20 +486,24 @@ type TerminalHandle = Arc<Terminal>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
-    let first = args.next();
-    let second = args.next();
-    ensure!(
-        args.next().is_none(),
-        "usage: orield [--help | integrations]"
-    );
-    let mode = match (first.as_deref(), second.as_deref()) {
-        (None, None) => false,
-        (Some(arg), None) if arg == "--help" || arg == "-h" => {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [command, socket, operation] = args.as_slice()
+        && command == "__workflow-credential"
+    {
+        return workflow_git::credential_helper(
+            Path::new(socket),
+            operation
+                .to_str()
+                .context("invalid Git credential operation")?,
+        );
+    }
+    let mode = match args.as_slice() {
+        [] => "terminal",
+        [arg] if arg == "--help" || arg == "-h" => {
             println!(
                 "{}",
                 concat!(
-                    "Usage: orield [--help | integrations]\n\n",
+                    "Usage: orield [--help | integrations | workflow [--once]]\n\n",
                     "Pair this device with a Passkey account, then run Codex in a PTY.\n",
                     "First start opens a browser and requires explicit local account confirmation.\n",
                     "Already paired devices reconnect automatically without a pairing prompt.\n",
@@ -507,6 +513,15 @@ async fn main() -> Result<()> {
                     "GitHub Issues in the working directory's GitHub origin repository.\n",
                     "Only normalized repository names are reported; no jobs are started or approved.\n",
                     "Provider credentials stay encrypted in relay; no local credential store is needed.\n\n",
+                    "workflow: explicitly start GitHub WHAT → read-only Linear HOW planning;\n",
+                    "human Todo plus immutable target .oriel.yaml autonomous worktree opt-in\n",
+                    "and configured verification are required before code executes.\n",
+                    "Verified canonical branches are pushed with CAS; PR review fixes resume\n",
+                    "the same branch. Only an observed human merge moves Linear to Done.\n",
+                    "--once scans once; continuous mode scans immediately, then every 15s.\n",
+                    "Interrupted/unpushed work is preserved under $XDG_STATE_HOME/oriel/workflow\n",
+                    "(fallback $HOME/.local/state/oriel/workflow); transcripts remain private.\n",
+                    "Codex must support exec structured output and config/rules isolation.\n\n",
                     "Identity: $XDG_CONFIG_HOME/oriel/device.json, falling back to\n",
                     "$HOME/.config/oriel/device.json; ORIEL_IDENTITY_FILE overrides the path.\n",
                     "Created files are mode 0600 and new directories private. Invalid identities are never reset.\n",
@@ -518,8 +533,10 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
-        (Some(arg), None) if arg == "integrations" => true,
-        _ => bail!("usage: orield [--help | integrations]"),
+        [arg] if arg == "integrations" => "integrations",
+        [arg] if arg == "workflow" => "workflow",
+        [arg, once] if arg == "workflow" && once == "--once" => "once",
+        _ => bail!("usage: orield [--help | integrations | workflow [--once]]"),
     };
     let identity = load_identity(&identity_path()?)?;
     let relay_value = match std::env::var("ORIEL_RELAY_URL") {
@@ -537,8 +554,11 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt::init();
     ensure_paired(&relay_url, &identity).await?;
-    if mode {
+    if mode == "integrations" {
         return integrations::run(&relay_url, &identity).await;
+    }
+    if mode == "workflow" || mode == "once" {
+        return workflow::run(&relay_url, &identity, mode == "once").await;
     }
     repository::report_current(&relay_url, &identity).await?;
 

@@ -9,6 +9,7 @@ import {
 } from "@simplewebauthn/server";
 import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
 import { Integrations, type Device, type IntegrationEnv } from "./integrations";
+import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 
 export interface AccountEnv extends IntegrationEnv {}
 
@@ -202,6 +203,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private readonly sessionCookie: string;
   private readonly challengeCookie: string;
   private readonly integrations: Integrations;
+  private readonly workflows: WorkflowLeases;
 
   constructor(ctx: DurableObjectState, env: AccountEnv) {
     super(ctx, env);
@@ -284,6 +286,8 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       liveSession: (session) => this.requireLiveSession(session),
       body: readBody, fail, json,
     });
+    this.workflows = new WorkflowLeases(this.ctx, this.integrations, id =>
+      this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0]);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -301,6 +305,17 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         }
         return await this.authorizeSocket(request, websocket[1], websocket[2]);
       }
+      const workflowSocket = /^\/api\/workflows\/([a-f0-9]{32})\/connect$/.exec(url.pathname);
+      if (workflowSocket) {
+        if (request.method !== "GET" || url.search || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+          fail(400, "Expected a WebSocket upgrade without query parameters");
+        }
+        const supplied = await this.hostHash(request);
+        const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", workflowSocket[1]).toArray()[0];
+        if (!device) fail(403, "Device is not paired");
+        this.checkHost(device.host_hash, supplied);
+        return this.workflows.connect(device);
+      }
       const route = `${request.method} ${url.pathname}`;
       const daemon = route === "POST /api/pair/start" ||
         /^GET \/api\/pair\/[a-f0-9]{32}\/status$/.test(route) ||
@@ -309,11 +324,14 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       if (!daemon && url.pathname.startsWith("/api/")) {
         if (request.method === "POST" || request.headers.has("Origin")) this.requireOrigin(request);
       }
-      if (url.pathname === "/api/integrations" || url.pathname.startsWith("/api/integrations/")) {
+      const workflowRoute = url.pathname === "/api/workflows" || url.pathname.startsWith("/api/workflows/");
+      if (workflowRoute || url.pathname === "/api/integrations" || url.pathname.startsWith("/api/integrations/")) {
         try {
-          response = await this.integrations.handle(request);
+          response = await (workflowRoute
+            ? this.integrations.workflow(request, this.workflows)
+            : this.integrations.handle(request));
         } catch (error) {
-          if (!(error instanceof HttpError)) throw error;
+          if (!(error instanceof HttpError) && !(error instanceof WorkflowLeaseError)) throw error;
           response = json({ error: error.message }, error.status);
         }
         response.headers.set("Referrer-Policy", "no-referrer");
@@ -376,7 +394,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         }
       }
     } catch (error) {
-      if (error instanceof HttpError) {
+      if (error instanceof HttpError || error instanceof WorkflowLeaseError) {
         response = json({ error: error.message }, error.status);
       } else {
         console.error("AccountRegistry request failed");
@@ -385,6 +403,22 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     }
     if (clearChallenge) response.headers.append("Set-Cookie", this.setCookie(this.challengeCookie, "", 0));
     return response;
+  }
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    return this.workflows.message(ws, message);
+  }
+
+  webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): void {
+    this.workflows.close(ws);
+  }
+
+  webSocketError(ws: WebSocket, _error: unknown): void {
+    this.workflows.close(ws);
+  }
+
+  alarm(): Promise<void> {
+    return this.workflows.alarm();
   }
 
   private requireOrigin(request: Request): void {

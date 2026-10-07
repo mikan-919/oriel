@@ -30,19 +30,24 @@ import {
 // Run `orield` from a GitHub checkout: it reports only origin's owner/repository,
 // never the local path, remote credentials, or provider secrets. HTTPS and standard
 // SSH GitHub remotes are recognized through `git remote get-url origin`.
-// `orield integrations` reads the selected team's Linear issues with GitHub Issue
-// link attachments for this working repository; it never starts Codex. Web's device
-// view shows the same links, HOW description, and current Linear state. Discovery
-// includes older/archived matches and all pages; unrelated team tasks and PR links
-// are excluded. Add GitHub Issue URLs as link attachments in Linear; native issue
-// synchronization is not required and no text is copied between WHAT and HOW.
+// `orield integrations` remains read-only linked-HOW discovery. Web's per-device
+// Development workflow creates GitHub WHATs and shows WHAT/HOW/PR/current blockers.
+// `orield workflow` explicitly starts read-only Codex HOW planning; `--once` scans
+// once. HOW is created in native Linear Triage with the exact GitHub Issue attachment.
+// Review/edit HOW, then move it to native Todo to approve code. Oriel never sets Todo
+// or merges. @oriel comments in Triage request HOW refinement; PR reviews/comments
+// and failed checks drive verified fixes on the same canonical branch. Human merge
+// is required before Linear Done, including WHATs auto-closed by that merge.
+// Discovery paginates actual links; ambiguous/foreign HOWs block rather than match
+// titles. Native GitHub issue synchronization is not required.
 // The last reported repository remains visible while a device is offline; starting
 // outside a recognized GitHub checkout clears it. Browser ownership and the device
 // bearer protect discovery/reporting. No local OAuth or Secret Service is required.
 // GitHub: register a GitHub App, enable user OAuth, and install it on the chosen
 // repository. Repository permissions: Contents, Issues, Pull requests = read/write;
-// Metadata = read. Organization installations also need Members = read to verify
-// that the consenting GitHub user is an active organization admin.
+// Checks, Commit statuses, Metadata = read. Approve new installation permissions
+// after changing the App. Organization installations also need Members = read to
+// verify that the consenting GitHub user is an active organization admin.
 // Callback: PUBLIC_ORIGIN + /api/integrations/callback/github.
 // Set GITHUB_CLIENT_ID and GITHUB_APP_ID below; provision GITHUB_CLIENT_SECRET
 // and GITHUB_APP_PRIVATE_KEY as Worker secrets, never committed text bindings.
@@ -59,8 +64,8 @@ import {
 // require the original live browser session. Legacy device-scoped integrations are
 // discarded at cutover: reconnect in Web. Historical .old credential guidance no
 // longer applies. Disconnect blocks new access; issued GitHub installation tokens
-// can remain valid until expiry (up to 1 hour). New tokens are repository-scoped,
-// issued only to account-owned devices after checking the user's current access.
+// can remain valid until expiry (up to 1 hour). Git tokens are contents-only,
+// repository-scoped and require a current account-owned device's live workflow lease.
 // Browser session cookies are Lax for top-level OAuth callbacks; all browser
 // mutations require exact Origin and callbacks require the approved live session.
 // GET /api/integrations includes each provider's durable authorization outcome.
@@ -69,8 +74,32 @@ import {
 // Web shows these outcomes after reload; target=null alone is not an auth result.
 // Issue retrieval reports private-key import failures separately from GitHub token
 // request HTTP errors: 401 points to App ID/key matching; 422 to requested grants.
-// Correct the key/installation permissions, then Refresh recent issues; keep the
-// existing repository connection. Provider error bodies and tokens are not echoed.
+// Correct the key/installation permissions, then Refresh workflow or Refresh recent
+// issues; keep the existing repository connection. Provider errors/tokens stay private.
+//
+// Code opt-in: commit .oriel.yaml on the repository's default target branch:
+//   schemaVersion: 1
+//   execution:
+//     backend: worktree
+//     autonomous: true
+//     verification:
+//       - ["cargo", "test", "--workspace"]
+//       - ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+// At least one nonempty argv verification is required. Verification must not
+// change tracked/staged source or introduce nonignored files. Missing/invalid
+// opt-in blocks code but not explicitly started read-only HOW planning.
+// modelCapabilities assertions are refused until Codex supplies verifiable metadata.
+// Install/authenticate `codex` locally (codex login or OPENAI_API_KEY), then run
+// `orield workflow` from the checkout. User config/rules/MCP/hooks are not imported;
+// repositories with executable .codex/.mcp authority are refused, not silently used.
+// Live socket grants fence repository/WHAT and canonical branch across devices.
+// Loss/uncertainty stops children before new writes. Approval edits return HOW to
+// Triage and require human reapproval; ambiguous prior seals need manual resolution.
+// Private worktrees under XDG_STATE_HOME (or ~/.local/state/oriel) retain dirty or
+// unpushed WIP on failure. Worktrees isolate Git work, not same-UID filesystem secrets.
+// Target integration is non-destructive; conflict/divergence requires human resolution.
+// Completed Git checkpoints can be reverified/published after interruption without
+// rerunning the model. Push uses expected remote SHA, never unconditional force.
 
 export default defineConfig({
   worker: {

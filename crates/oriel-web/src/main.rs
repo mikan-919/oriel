@@ -36,11 +36,24 @@ button:disabled {
     cursor: not-allowed;
 }
 
-select {
+select,
+input,
+textarea {
     box-sizing: border-box;
     max-width: 100%;
     font: inherit;
     padding: 0.5rem;
+}
+
+input,
+textarea {
+    display: block;
+    width: 100%;
+}
+
+fieldset {
+    min-width: 0;
+    margin-block: 1rem;
 }
 
 label {
@@ -126,6 +139,10 @@ const repositoryDetails = document.getElementById("repository-details");
 const repositoryStatus = document.getElementById("repository-status");
 const repositoryIssues = document.getElementById("repository-issues");
 const refreshRepositoryButton = document.getElementById("refresh-repository");
+const whatForm = document.getElementById("what-form");
+const whatFields = document.getElementById("what-fields");
+const whatTitle = document.getElementById("what-title");
+const whatBody = document.getElementById("what-body");
 const providers = ["github", "linear"];
 const providerNames = {github: "GitHub", linear: "Linear"};
 const providerControls = Object.fromEntries(providers.map((provider) => [provider, {
@@ -144,6 +161,9 @@ let integrationsRequest = 0;
 let issuesRequest = 0;
 let repositoryRequest = 0;
 let repositoryDeviceId = null;
+let workflowSnapshot = null;
+let pendingWhat = null;
+let workflowRefreshing = false;
 let integrationNotice = connectionRequest.returned
     ? `${providerNames[connectionRequest.returned]} authorization succeeded. Choose a repository or team below and save the target to finish connecting.`
     : connectionRequest.failed
@@ -222,6 +242,7 @@ function render() {
     refreshIssuesButton.disabled = busy || !user || (!integrations?.github && !integrations?.linear);
     repositoryWork.hidden = !user || !devices.length;
     refreshRepositoryButton.disabled = busy || !user || !repositoryDeviceId;
+    whatFields.disabled = busy || !user || !repositoryDeviceId || !workflowSnapshot;
 }
 
 function disconnect() {
@@ -241,6 +262,10 @@ function setUser(next) {
         issuesRequest++;
         repositoryRequest++;
         repositoryDeviceId = null;
+        workflowSnapshot = null;
+        pendingWhat = null;
+        whatTitle.value = "";
+        whatBody.value = "";
         integrations = null;
         for (const controls of Object.values(providerControls)) {
             controls.select.replaceChildren();
@@ -375,14 +400,15 @@ async function refreshDevices() {
     deviceList.replaceChildren();
     repositoryRequest++;
     repositoryIssues.replaceChildren();
+    workflowSnapshot = null;
     if (!devices.some((device) => device.device_id === repositoryDeviceId)) {
         repositoryDeviceId = devices.length === 1 ? devices[0].device_id : null;
     }
     const selected = devices.find((device) => device.device_id === repositoryDeviceId);
     repositoryDetails.textContent = selected ? `${selected.name} (${selected.device_id})` : "";
     repositoryStatus.textContent = selected
-        ? "Refresh linked issues to read this device's reported repository."
-        : "Choose a device to read its repository-linked Linear work.";
+        ? "Refresh the workflow to read this device's reported repository."
+        : "Choose a device to view its Issue → Linear → PR workflow.";
     deviceSummary.textContent = devices.length ? "Open an owned device:" : "No paired devices yet.";
     for (const device of devices) {
         const item = document.createElement("li");
@@ -400,11 +426,11 @@ async function refreshDevices() {
             : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
         const work = document.createElement("button");
         work.type = "button";
-        work.textContent = "Linked Linear issues";
+        work.textContent = "Open workflow";
         work.disabled = busy;
         work.addEventListener("click", () => perform(async () => {
             repositoryDeviceId = device.device_id;
-            await refreshRepositoryIssues();
+            await refreshWorkflow();
         }));
         item.append(label, repository, open, work);
         deviceList.append(item);
@@ -487,7 +513,7 @@ async function refreshAccountData() {
         })(),
     ]);
     const failure = results.find((result) => result.status === "rejected");
-    await refreshRepositoryIssues();
+    await refreshWorkflow();
     if (failure) throw failure.reason;
 }
 
@@ -501,6 +527,7 @@ async function refreshIntegrations() {
     issuesRequest++;
     repositoryRequest++;
     repositoryIssues.replaceChildren();
+    workflowSnapshot = null;
     for (const provider of providers) {
         const controls = providerControls[provider];
         controls.select.replaceChildren();
@@ -554,7 +581,7 @@ async function saveTarget(provider) {
     try {
         await refreshIntegrations();
     } finally {
-        if (currentAccount(epoch)) await refreshRepositoryIssues();
+        if (currentAccount(epoch)) await refreshWorkflow();
     }
 }
 
@@ -574,7 +601,7 @@ async function disconnectProvider(provider) {
     try {
         await refreshIntegrations();
     } finally {
-        if (currentAccount(epoch)) await refreshRepositoryIssues();
+        if (currentAccount(epoch)) await refreshWorkflow();
     }
 }
 
@@ -583,11 +610,10 @@ function clearProviderSelection(provider) {
     providerControls[provider].select.replaceChildren();
     providerControls[provider].issues.replaceChildren();
     issuesRequest++;
-    if (provider === "linear") {
-        repositoryRequest++;
-        repositoryIssues.replaceChildren();
-        repositoryStatus.textContent = "Refresh linked issues to read the current Linear team.";
-    }
+    repositoryRequest++;
+    workflowSnapshot = null;
+    repositoryIssues.replaceChildren();
+    repositoryStatus.textContent = "Refresh the workflow to read the current connected targets.";
     issuesStatus.textContent = "Refresh recent issues to load the current targets.";
     render();
 }
@@ -644,67 +670,117 @@ function issueLink(label, address, host) {
     return link;
 }
 
-async function refreshRepositoryIssues() {
+function appendDescription(item, label, text) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    const description = document.createElement("p");
+    description.className = "how-description";
+    description.textContent = text || "No description.";
+    details.append(summary, description);
+    item.append(details);
+}
+
+async function refreshWorkflow() {
     const device = devices.find((device) => device.device_id === repositoryDeviceId);
     if (!user || !device) return;
     const epoch = accountEpoch;
     const request = ++repositoryRequest;
     repositoryDetails.textContent = `${device.name} (${device.device_id})`;
-    repositoryIssues.replaceChildren();
-    repositoryStatus.textContent = "Loading repository-linked Linear issues…";
+    repositoryStatus.textContent = "Loading current Issue → Linear → PR state…";
     try {
-        const result = await integrationApi(`/api/integrations/${device.device_id}/linear/issues`);
+        const result = await integrationApi(`/api/workflows/${device.device_id}`);
         if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
+        workflowSnapshot = result;
         device.repository = result.repository;
-        const label = result.repository
-            ? `${result.repository.owner}/${result.repository.name}`
-            : null;
-        document.getElementById(`repository-${device.device_id}`).textContent = label
-            ? `Last reported repository: ${label}`
-            : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
-        if (!label) {
-            repositoryStatus.textContent = "No GitHub repository reported. Start the updated orield in a checkout with a GitHub origin, then refresh linked issues.";
-            return;
-        }
-        repositoryDetails.textContent += ` — ${label}`;
-        if (!result.linear) {
-            repositoryStatus.textContent = "Connect Linear and save a team above to read linked work.";
-            return;
-        }
+        const label = `${result.repository.owner}/${result.repository.name}`;
+        document.getElementById(`repository-${device.device_id}`).textContent = `Last reported repository: ${label}`;
+        repositoryDetails.textContent += ` — ${label} → ${result.team.team_name}`;
         const items = document.createDocumentFragment();
-        for (const issue of result.linear.issues) {
+        const phases = {
+            "needs-how": "Waiting for the daemon to propose HOW in Linear Triage.",
+            triage: "Review or edit HOW in Linear. Move it to Todo to approve execution.",
+            approved: "Human-approved; waiting for the daemon to begin implementation.",
+            running: "In Progress. The daemon resumes only the matching approved branch.",
+            review: "Review the PR on GitHub. Human merge is the final approval.",
+            merged: "PR merged; waiting for the daemon to reflect Linear Done.",
+            done: "PR merged and Linear Done confirmed.",
+            closed: "Closed without a confirmed managed merge; no autonomous execution.",
+            blocked: "Workflow blocked.",
+        };
+        for (const row of result.workflows) {
             const item = document.createElement("li");
             const title = document.createElement("p");
-            title.append(issueLink(issue.identifier, issue.url, "linear.app"), `: ${issue.title}`);
-            const state = document.createElement("p");
-            state.textContent = `Linear state: ${issue.state.name} (${issue.state.type})`;
-            const links = document.createElement("p");
-            links.append("GitHub WHAT: ");
-            for (const [index, reference] of issue.github_issues.entries()) {
-                if (index) links.append(", ");
-                links.append(issueLink(`#${reference.number}`, reference.url, "github.com"));
+            title.append(issueLink(`#${row.issue.number}`, row.issue.url, "github.com"), `: ${row.issue.title}`);
+            const phase = document.createElement("p");
+            phase.textContent = `${phases[row.phase]}${row.blocked_reason ? ` ${row.blocked_reason}` : ""}`;
+            item.append(title, phase);
+            appendDescription(item, "WHAT (GitHub issue description)", row.issue.body);
+            if (row.linear) {
+                const how = document.createElement("p");
+                how.append("Linear HOW: ", issueLink(row.linear.identifier, row.linear.url, "linear.app"),
+                    `: ${row.linear.title} — ${row.linear.state.name} (${row.linear.state.type})`);
+                item.append(how);
+                appendDescription(item, "HOW (Linear description)", row.linear.description);
             }
-            const how = document.createElement("details");
-            const summary = document.createElement("summary");
-            summary.textContent = "HOW (Linear description)";
-            const description = document.createElement("p");
-            description.className = "how-description";
-            description.textContent = issue.description || "No HOW description.";
-            how.append(summary, description);
-            item.append(title, state, links, how);
+            if (row.branch) {
+                const branch = document.createElement("p");
+                branch.textContent = `Canonical branch: ${row.branch}`;
+                item.append(branch);
+            }
+            if (row.pull_request) {
+                const pull = document.createElement("p");
+                pull.append(issueLink(`PR #${row.pull_request.number}`, row.pull_request.url, "github.com"),
+                    row.pull_request.merged ? " — merged" : ` — ${row.pull_request.state}${row.pull_request.draft ? " (draft)" : ""}`);
+                item.append(pull);
+            }
+            if (row.how_feedback) appendDescription(item, "HOW refinement request", row.how_feedback.body);
+            if (row.feedback) {
+                const feedback = [row.feedback.body, ...row.feedback.comments.map((comment) =>
+                    `${comment.path ? `${comment.path}${comment.line == null ? "" : `:${comment.line}`}: ` : ""}${comment.body}`)];
+                appendDescription(item, `PR feedback (${row.feedback.kind})`, feedback.join("\n\n"));
+            }
             items.append(item);
         }
         repositoryIssues.replaceChildren(items);
-        repositoryStatus.textContent = result.linear.issues.length
-            ? `${result.linear.team.team_name}: ${result.linear.issues.length} linked Linear issues for ${label}.`
-            : `No Linear issues in ${result.linear.team.team_name} are linked to GitHub Issues in ${label}. Add the corresponding GitHub Issue URL as a link attachment in Linear; matching titles alone are not links.`;
+        const configuration = result.configuration;
+        const gate = configuration.error
+            ? `Code execution blocked: ${configuration.error} Read-only HOW planning may still run.`
+            : configuration.autonomous
+                ? `Code execution requires human Todo and ${configuration.verification.length} configured verification commands.`
+                : "Code execution blocked: the target branch has not opted in with autonomous: true.";
+        repositoryStatus.textContent = `${result.workflows.length ? `${result.workflows.length} workflows.` : "No workflows yet. Create a GitHub WHAT below or open an issue on GitHub."} ${gate}`;
+        render();
     } catch (error) {
         if (error.sessionExpired) throw error;
         if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
+        workflowSnapshot = null;
         repositoryIssues.replaceChildren();
-        repositoryStatus.textContent = `Could not load linked Linear issues: ${errorText(error)}`;
+        repositoryStatus.textContent = `Could not load workflow: ${errorText(error)}`;
+        render();
         throw error;
     }
+}
+
+async function createWhat() {
+    if (!user || !repositoryDeviceId || !workflowSnapshot) return;
+    const epoch = accountEpoch;
+    const deviceId = repositoryDeviceId;
+    const title = whatTitle.value.trim();
+    const body = whatBody.value;
+    if (!title) throw new Error("A WHAT title is required.");
+    if (!pendingWhat || pendingWhat.deviceId !== deviceId || pendingWhat.title !== title || pendingWhat.body !== body) {
+        pendingWhat = {deviceId, title, body, requestId: crypto.randomUUID()};
+    }
+    const result = await integrationApi(`/api/workflows/${deviceId}/issues`, {
+        title, body, request_id: pendingWhat.requestId,
+    });
+    if (!currentAccount(epoch) || repositoryDeviceId !== deviceId) return;
+    pendingWhat = null;
+    whatTitle.value = "";
+    whatBody.value = "";
+    status.textContent = `Created GitHub WHAT #${result.issue.number}. Run orield workflow in this checkout to propose HOW.`;
+    await refreshWorkflow();
 }
 
 function sendResize() {
@@ -817,11 +893,27 @@ for (const provider of providers) {
     controls.select.addEventListener("change", render);
 }
 refreshIssuesButton.addEventListener("click", () => perform(refreshIssues));
-refreshRepositoryButton.addEventListener("click", () => perform(refreshRepositoryIssues));
+refreshRepositoryButton.addEventListener("click", () => perform(refreshWorkflow));
+whatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    perform(createWhat);
+});
 document.getElementById("close-terminal").addEventListener("click", () => {
     disconnect();
     status.textContent = "Terminal closed. The device remains paired.";
 });
+setInterval(async () => {
+    if (!user || busy || workflowRefreshing || !repositoryDeviceId || dashboard.hidden || document.hidden) return;
+    const epoch = accountEpoch;
+    workflowRefreshing = true;
+    try {
+        await refreshWorkflow();
+    } catch (error) {
+        if (currentAccount(epoch)) status.textContent = errorText(error);
+    } finally {
+        workflowRefreshing = false;
+    }
+}, 15000);
 
 render();
 perform(async () => {
@@ -933,12 +1025,23 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                         <ul id="devices"></ul>
                     </section>
                     <section id="repository-work" hidden="">
-                        <h2>"Repository-linked work"</h2>
-                        <p>"Only Linear issues with a GitHub Issue link attachment in this device's reported repository are shown. Titles and descriptions are not used to guess links. This view is read-only; execution approval stays in Linear."</p>
+                        <h2>"Development workflow"</h2>
+                        <p>"GitHub Issue = WHAT → Linear = HOW → pull request = DO. Run orield workflow in the checkout to propose HOW in Triage. Review HOW in Linear and move it to Todo to approve execution. Review and merge the PR on GitHub; only a confirmed merge is reflected as Linear Done."</p>
+                        <p>"Code execution also requires an explicit .oriel.yaml opt-in and verification commands on the repository's default target branch. Formal GitHub Issue link attachments identify HOW; matching titles do not. This page never approves Todo or merges a PR."</p>
                         <p id="repository-details"></p>
-                        <button id="refresh-repository" type="button">"Refresh linked issues"</button>
+                        <button id="refresh-repository" type="button">"Refresh workflow"</button>
                         <p id="repository-status" role="status"></p>
-                        <ul id="repository-issues" aria-label="Repository-linked Linear issues"></ul>
+                        <form id="what-form">
+                            <fieldset id="what-fields" disabled="">
+                                <legend>"Create GitHub WHAT"</legend>
+                                <label for="what-title">"WHAT title"</label>
+                                <input id="what-title" type="text" required="" />
+                                <label for="what-body">"WHAT description"</label>
+                                <textarea id="what-body" rows="6"></textarea>
+                                <button type="submit">"Create GitHub issue"</button>
+                            </fieldset>
+                        </form>
+                        <ul id="repository-issues" aria-label="Issue Linear PR workflows"></ul>
                     </section>
                 </main>
                 <section id="terminal-view" hidden="">
