@@ -246,6 +246,9 @@ export class Integrations {
       }));
       const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
         fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : "needs-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null };
+      if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
+        row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
+      }
       if (linked.length > 1) { row.phase = "blocked"; row.blocked_reason = "Multiple Linear issues formally link this WHAT"; }
       if (linked.length === 1) {
         const how = linked[0];

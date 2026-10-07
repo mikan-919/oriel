@@ -38,6 +38,23 @@ async function setup() {
   return { fixture, worker, owner, daemon, socket, message, snapshot, claim, action, close };
 }
 
+test("HOW planning waits for native Triage and resumes when the team enables it", async () => {
+  const s = await setup();
+  try {
+    const triage = s.fixture.states.shift();
+    const unavailable = (await s.snapshot()).workflows.find(row => row.issue.number === 42);
+    assert.equal(unavailable.phase, "blocked");
+    assert.equal((await s.message({ type: "claim", kind: "plan", issue_number: 42, version: unavailable.version, branch: unavailable.branch })).type, "rejected");
+    assert.deepEqual(s.fixture.linears, []);
+    s.fixture.states.unshift(triage);
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "needs-how");
+    const proposal = await s.action(await s.claim("plan"), "proposal", { title: "HOW", description: "Scope for human review." });
+    assert.equal(proposal.status, 200);
+    assert.equal(proposal.data.linear.state.id, triage.id);
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "triage");
+  } finally { await s.close(); }
+});
+
 test("WHAT browser creation and deterministic HOW recover unknown sends without granting Todo", { timeout: 60000 }, async () => {
   const s = await setup();
   try {

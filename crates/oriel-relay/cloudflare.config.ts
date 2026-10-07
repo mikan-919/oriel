@@ -55,6 +55,9 @@ import {
 // Linear: register an OAuth app with PUBLIC_ORIGIN +
 // /api/integrations/callback/linear as redirect URI and set LINEAR_CLIENT_ID.
 // PKCE requests read/write; no Linear client secret is required.
+// Enable the selected team's Team Settings > Triage before proposing HOWs.
+// Required native states: Triage (triage), Todo (unstarted), In Progress (started),
+// Done (completed). Oriel never substitutes Todo when Triage is unavailable.
 // Provision INTEGRATION_ENCRYPTION_KEY as a Worker secret: a stable 32-byte
 // AES-GCM key encoded as 64 hex characters (generate with `openssl rand -hex 32`).
 // Relay encrypts provider access/refresh tokens and PKCE verifiers, binding each
@@ -92,6 +95,8 @@ import {
 // Install/authenticate `codex` locally (codex login or OPENAI_API_KEY), then run
 // `orield workflow` from the checkout. User config/rules/MCP/hooks are not imported;
 // repositories with executable .codex/.mcp authority are refused, not silently used.
+// Authority checks stop at the Git project root; ignored home-level Codex config
+// is not project authority. Codex is pinned to the same .git root marker.
 // Live socket grants fence repository/WHAT and canonical branch across devices.
 // Loss/uncertainty stops children before new writes. Approval edits return HOW to
 // Triage and require human reapproval; ambiguous prior seals need manual resolution.

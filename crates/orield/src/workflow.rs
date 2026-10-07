@@ -806,8 +806,11 @@ fn reject_project_authority(path: &Path) -> Result<()> {
                 "unsafe project agent configuration {authority}; remove credential-bearing MCP/hooks before autonomous execution"
             );
         }
+        if ancestor.join(".git").exists() {
+            return Ok(());
+        }
     }
-    Ok(())
+    bail!("agent working directory has no Git project boundary")
 }
 
 async fn agent(
@@ -875,6 +878,8 @@ async fn agent(
         .args([
             "-c",
             "approval_policy=\"never\"",
+            "-c",
+            "project_root_markers=[\".git\"]",
             "-c",
             "shell_environment_policy.inherit=\"none\"",
             "-c",
@@ -1647,6 +1652,37 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn project_authority_is_bounded_by_the_git_project() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-authority-{}", random_hex::<12>().unwrap()));
+        let user = root.join("user");
+        let project = user.join("state/worktree");
+        git::private_directory(&project).unwrap();
+        git::private_directory(&user.join(".codex")).unwrap();
+        git::private_file(&user.join(".codex/config.toml"), b"model = \"user-only\"\n").unwrap();
+        assert!(
+            git::local(&project, &["init", "--quiet"])
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(reject_project_authority(&project).is_ok());
+        let nested = project.join("src/nested");
+        git::private_directory(&nested).unwrap();
+        for authority in [".codex/config.toml", ".codex/hooks.json", ".mcp.json"] {
+            let file = project.join(authority);
+            git::private_directory(file.parent().unwrap()).unwrap();
+            git::private_file(&file, b"{}").unwrap();
+            assert!(reject_project_authority(&project).is_err());
+            assert!(reject_project_authority(&nested).is_err());
+            fs::remove_file(file).unwrap();
+        }
+        assert!(reject_project_authority(&nested).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn source_completion_excludes_agent_policy_and_opt_in_edits() {
