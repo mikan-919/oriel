@@ -8,8 +8,12 @@ export type WorkflowBinding = {
   repository: { owner: string; name: string };
 };
 export type WorkflowClaim = { kind: WorkflowKind; issue_number: number; version: string; branch: string | null };
+export type WorkflowTask = {
+  issue_number: number; title: string; url: string; how_identifier: string | null; how_url: string | null;
+};
 export type WorkflowAdmission = WorkflowClaim & {
   linear_id: string | null;
+  task: WorkflowTask;
   feedback?: { key: string; head_oid: string; pr_number: number };
   recovery?: { branch: string };
   execution?: { target_oid: string; base_branch: string; verification: string[][] };

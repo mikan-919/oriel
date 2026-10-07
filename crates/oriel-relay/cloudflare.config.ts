@@ -32,6 +32,15 @@ import {
 // SSH GitHub remotes are recognized through `git remote get-url origin`.
 // `orield integrations` remains read-only linked-HOW discovery. Web's per-device
 // Development workflow creates GitHub WHATs and shows WHAT/HOW/PR/current blockers.
+// Your devices shows live workflow task/stage cards: device, repository, WHAT/HOW
+// links, stage-change time, idle/paused/offline, and an explicitly stale browser stream.
+// /api/workflow-progress/connect is a same-Origin, Passkey-session read-only socket;
+// its sole client frame, "ready", requests a fresh snapshot and grants no authority.
+// Host stages use the existing leased control socket; task identity comes from native
+// admission facts, not model output. Snapshots are pushed on changes and at least
+// every 10s while watched; logout/expiry/revocation stop that session's delivery.
+// Control loss clears running claims. No progress history is stored; snapshots never
+// include prompts, stdout or tokens. Workflow offline is not terminal-host availability.
 // `orield workflow` explicitly starts read-only Codex HOW planning; `--once` scans
 // once. HOW is created in native Linear Triage with the exact GitHub Issue attachment.
 // Linear create IDs are deterministic UUID-v4-format IDs for issues, links and
@@ -42,6 +51,11 @@ import {
 // requests HOW refinement; PR reviews/comments and failed checks drive verified fixes
 // on the same canonical branch. Human merge is required before Linear Done,
 // including WHATs auto-closed by that merge.
+// Triage refinement replies contain the model's actual summary in the commenter's
+// language, not a fixed HOW-update notice. Read-only questions/blockers may be posted
+// without approving code; question-only replies leave the canonical HOW unchanged.
+// Signed how-response cursors deduplicate actual answers; old how-update receipts
+// do not consume unanswered requests. Changes to human approval still stop stale writes.
 // HOW updates compare Linear's canonical mutation receipt with a fresh native read:
 // Markdown formatting is accepted without treating intervening human edits or
 // unconfirmed writes as our saved draft.
@@ -111,8 +125,9 @@ import {
 // is not project authority. Codex is pinned to the same .git root marker.
 // Run one workflow daemon per device: a new control socket replaces the old one.
 // Live socket grants fence repository/WHAT and canonical branch across devices.
-// Provider action/credential POSTs have a bounded 90s deadline with live ownership
-// renewal every 5s; ordinary discovery retains its 12s deadline.
+// Provider action/credential POSTs and read-only discovery have bounded 90s deadlines
+// with live socket renewal every 5s. Source-writing child discovery guards retain
+// their strict 12s deadline; progress reporting never widens code authority.
 // Loss/uncertainty stops children before new writes. Approval edits return HOW to
 // Triage and require human reapproval; ambiguous prior seals need manual resolution.
 // Private worktrees under XDG_STATE_HOME (or ~/.local/state/oriel) retain dirty or

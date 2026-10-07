@@ -307,6 +307,14 @@ impl Session {
             .map_err(|_| anyhow!(Stop::Uncertain))?
             .map_err(|_: anyhow::Error| anyhow!(Stop::Uncertain))
     }
+    async fn progress(&mut self, stage: &'static str) -> Result<()> {
+        let mut request = json!({"type":"progress", "stage":stage});
+        if let Some(lease) = &self.lease {
+            request["lease_id"] = json!(lease);
+        }
+        self.exchange(request, "progressed").await?;
+        Ok(())
+    }
     async fn claim(&mut self, row: &Row, kind: &str) -> Result<()> {
         let reply = self.exchange(json!({"type":"claim", "kind":kind, "issue_number":row.issue.number, "version":row.version, "branch":row.branch}), "granted").await?;
         self.lease = Some(
@@ -339,13 +347,12 @@ impl Session {
         }
         Ok(())
     }
-    async fn snapshot(&self) -> Result<Snapshot> {
-        let response = self
-            .client
-            .get(self.endpoint.clone())
-            .send()
-            .await
-            .map_err(|_| anyhow!(Stop::Uncertain))?;
+    async fn snapshot(&mut self) -> Result<Snapshot> {
+        let request = self.client.get(self.endpoint.clone());
+        let response = self.owned_response(request).await?;
+        self.snapshot_body(response).await
+    }
+    async fn snapshot_body(&self, response: reqwest::Response) -> Result<Snapshot> {
         ensure!(
             response.status().is_success(),
             "workflow discovery HTTP {}; connect/select GitHub repository and Linear team in Web",
@@ -371,35 +378,50 @@ impl Session {
     }
     async fn guard(&mut self, guard: &Guard) -> Result<Snapshot> {
         self.checked().await?;
-        let snapshot = self
-            .snapshot()
-            .await
-            .map_err(|_| anyhow!(Stop::Uncertain))?;
+        let snapshot = if guard.code {
+            // Never extend the uncertainty window of a source-writing child.
+            let response = self
+                .client
+                .get(self.endpoint.clone())
+                .send()
+                .await
+                .map_err(|_| anyhow!(Stop::Uncertain))?;
+            self.snapshot_body(response).await
+        } else {
+            self.snapshot().await
+        }
+        .map_err(|_| anyhow!(Stop::Uncertain))?;
         guard.validate(&snapshot)?;
         Ok(snapshot)
+    }
+    async fn owned_response(
+        &mut self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let response = request.timeout(Duration::from_secs(90)).send();
+        tokio::pin!(response);
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                response = &mut response => return response.map_err(|_| anyhow!(Stop::Uncertain)),
+                _ = interval.tick() => {
+                    if self.lease.is_some() {
+                        self.checked().await.map_err(|_| anyhow!(Stop::Uncertain))?;
+                    } else {
+                        self.exchange(json!({"type":"heartbeat"}), "heartbeat").await?;
+                    }
+                },
+            }
+        }
     }
     async fn post(&mut self, operation: &str, mut body: Value) -> Result<Value> {
         self.checked().await?;
         body["lease_id"] = json!(self.lease.as_deref().context("missing workflow lease")?);
         let mut url = self.endpoint.clone();
         url.set_path(&format!("{}/{operation}", self.endpoint.path()));
-        // Provider actions perform several fenced reads and writes. Keep ownership
-        // live while awaiting them; the short discovery deadline is not a write deadline.
-        let response = self
-            .client
-            .post(url)
-            .timeout(Duration::from_secs(90))
-            .json(&body)
-            .send();
-        tokio::pin!(response);
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        interval.tick().await;
-        let response = loop {
-            tokio::select! {
-                response = &mut response => break response.map_err(|_| anyhow!(Stop::Uncertain))?,
-                _ = interval.tick() => self.checked().await.map_err(|_| anyhow!(Stop::Uncertain))?,
-            }
-        };
+        let request = self.client.post(url).json(&body);
+        let response = self.owned_response(request).await?;
         if response.status().is_server_error() {
             return Err(Stop::Uncertain.into());
         }
@@ -687,6 +709,7 @@ async fn open_worktree(
                 clean,
                 "remote branch advanced while local worktree is dirty; WIP preserved"
             );
+            session.progress("integrating").await?;
             ensure!(
                 git::local(&path, &["merge", "--ff-only", canonical])
                     .await?
@@ -694,6 +717,7 @@ async fn open_worktree(
                     .success(),
                 "cannot safely fast-forward existing canonical worktree"
             );
+            session.progress("preparing").await?;
         } else {
             ensure!(
                 git::local(&path, &["merge-base", "--is-ancestor", canonical, &head])
@@ -716,6 +740,7 @@ async fn open_worktree(
             clean,
             "target advanced while worktree is dirty; WIP preserved for human resolution"
         );
+        session.progress("integrating").await?;
         let merge = git::local(
             &path,
             &[
@@ -731,6 +756,7 @@ async fn open_worktree(
             let _ = git::local(&path, &["merge", "--abort"]).await;
             bail!("target integration conflicted; original work preserved");
         }
+        session.progress("preparing").await?;
     }
     Ok(path)
 }
@@ -772,7 +798,7 @@ fn agent_prompt(row: &Row, plan: bool) -> String {
             "implementation"
         },
         if plan {
-            "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. Human approval is a later Linear Todo transition; you cannot approve or implement. No source writes."
+            "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. If how_feedback is present, answer that comment directly in the commenter's language in summary; explain relevant changes or blockers rather than emit a generic update notice. For a question-only request keep the current HOW title and description unchanged. Human approval is a later Linear Todo transition; you cannot approve or implement. No source writes."
         } else {
             "Implement the approved HOW, or address the provided PR feedback, in this worktree. Preserve existing interrupted work. Make actual source changes. Leave all changes uncommitted for the trusted host to verify and checkpoint. Put an honest concise summary in summary; title/description may be empty."
         },
@@ -926,6 +952,10 @@ async fn agent(
         command.env("RUSTUP_HOME", home);
     }
     command.as_std_mut().process_group(0);
+    // Report only at child boundaries, never inside the source-writing guard loop.
+    session
+        .progress(if plan { "planning" } else { "implementing" })
+        .await?;
     session.guard(guard).await?;
     let mut child = command
         .spawn()
@@ -964,6 +994,7 @@ async fn agent(
     // the coding process and its descendants have stopped.
     drop(model_auth);
     let status = result?;
+    session.progress("reviewing").await?;
     session.guard(guard).await?;
     ensure!(
         status.success(),
@@ -984,7 +1015,7 @@ async fn agent(
         "unknown agent completion state"
     );
     ensure!(
-        result.status == "completed",
+        result.status == "completed" || plan,
         "agent requires human intervention; private explanation at {}",
         output.display()
     );
@@ -1012,6 +1043,7 @@ async fn verify(
     guard: &Guard,
 ) -> Result<()> {
     checked_configuration(configuration)?;
+    session.progress("verifying").await?;
     let home = root.join("verification-home");
     git::private_directory(&home)?;
     for argv in &configuration.verification {
@@ -1109,6 +1141,7 @@ async fn push(
     let reference = format!("refs/heads/{branch}");
     for attempt in 0..2 {
         session.guard(guard).await?;
+        session.progress("pushing").await?;
         let remote = git::remote(&session.repository);
         // Child completion may be uncertain; do not infer failure from push exit.
         // Read current provider+Git facts before any conditional resend.
@@ -1150,6 +1183,7 @@ async fn push(
             return Err(error);
         }
         drop(transport);
+        session.progress("reconciling").await?;
         // The provider snapshot now legitimately contains our pushed OID. Check
         // content/PR/config independently before adopting that remote checkpoint.
         session.checked().await?;
@@ -1315,6 +1349,7 @@ async fn implement(
     let candidate_tree = git::text(&path, &["write-tree"]).await?;
     let candidate_head = git::text(&path, &["rev-parse", "HEAD"]).await?;
     verify(session, root, &path, &current.configuration, &guard).await?;
+    session.progress("reviewing").await?;
     ensure!(
         git::local(&path, &["diff", "--quiet"])
             .await?
@@ -1375,6 +1410,7 @@ async fn implement(
         "agent changed execution policy; publication refused"
     );
     if !resume_checkpoint {
+        session.progress("integrating").await?;
         let staged = git::local(&path, &["diff", "--cached", "--quiet"]).await?;
         if !staged.status.success() {
             let message = format!(
@@ -1458,6 +1494,7 @@ async fn implement(
     push(session, &path, branch, &head, &mut guard).await?;
     println!("  pushed: {branch} @ {head}");
     session.guard(&guard).await?;
+    session.progress("publishing").await?;
     let result = if respond {
         session.action("responded", json!({"head_oid":head,"verified":true,"feedback_key":feedback_key.context("missing feedback cursor")?,"summary":summary})).await?
     } else {
@@ -1490,10 +1527,11 @@ async fn plan(session: &mut Session, root: &Path, snapshot: &Snapshot, row: &Row
     );
     let result = result?;
     session.guard(&guard).await?;
+    session.progress("publishing").await?;
     let proposal = session
         .action(
             "proposal",
-            json!({"title":result.title,"description":result.description}),
+            json!({"title":result.title,"description":result.description,"summary":result.summary}),
         )
         .await?;
     if let Some(url) = proposal["linear"]["url"].as_str() {
@@ -1518,6 +1556,7 @@ async fn scan(
     root: &Path,
     suppressed: &mut HashSet<(u64, String, String)>,
 ) -> Result<()> {
+    session.progress("discovering").await?;
     session
         .exchange(json!({"type":"heartbeat"}), "heartbeat")
         .await?;
@@ -1532,6 +1571,7 @@ async fn scan(
     if let Some(error) = &snapshot.configuration.error {
         println!("  Code disabled: {error}; read-only HOW planning remains available.");
     }
+    let mut resting_stage = "idle";
     for row in &snapshot.workflows {
         println!("#{} {} — {}", row.issue.number, row.phase, row.issue.url);
         if let Some(how) = &row.linear {
@@ -1568,12 +1608,20 @@ async fn scan(
         let identity = (row.issue.number, row.version.clone(), cursor);
         if suppressed.contains(&identity) {
             println!("  paused after failure; human/provider state change required");
+            resting_stage = "paused";
             continue;
         }
         if let Err(error) = session.claim(row, kind).await {
             println!("  claim refused: {error}");
             continue;
         }
+        session
+            .progress(if kind == "reconcile" {
+                "reconciling"
+            } else {
+                "preparing"
+            })
+            .await?;
         let result = match kind {
             "plan" => plan(session, root, &snapshot, row).await,
             "implement" => implement(session, root, &snapshot, row, false).await,
@@ -1595,12 +1643,17 @@ async fn scan(
         };
         if let Err(error) = result {
             println!("  stopped: {error}");
+            if matches!(error.downcast_ref::<Stop>(), Some(Stop::Uncertain)) {
+                return Err(error);
+            }
             match error.downcast_ref::<Stop>() {
                 Some(Stop::Changed) => {
+                    session.progress("reconciling").await?;
                     let _ = session.action("invalidate", json!({})).await;
                 }
                 Some(_) => {}
                 None => {
+                    session.progress("reconciling").await?;
                     // Durable provider retriage is authoritative. The in-memory
                     // suppression merely prevents repeated model runs during this
                     // explicit daemon session if the report itself is uncertain.
@@ -1614,9 +1667,14 @@ async fn scan(
                     }
                 }
             }
+            session.progress("paused").await?;
+            resting_stage = "paused";
+        } else {
+            resting_stage = "idle";
         }
         session.release().await?;
     }
+    session.progress(resting_stage).await?;
     Ok(())
 }
 
@@ -1712,17 +1770,21 @@ mod tests {
             }
         });
         let provider = tokio::spawn(async move {
-            let (mut stream, _) = http.accept().await.unwrap();
-            let mut buffer = [0; 4096];
-            assert!(stream.read(&mut buffer).await.unwrap() > 0);
-            tokio::time::sleep(Duration::from_secs(13)).await;
-            let live = started.elapsed().as_secs() - renewed.load(Ordering::Relaxed) < 8;
-            let status = if live { "200 OK" } else { "409 Conflict" };
-            let body = r#"{"updated":true}"#;
-            stream.write_all(format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            ).as_bytes()).await.unwrap();
+            for body in [
+                r#"{"repository":{"owner":"octocat","name":"connected"},"repository_id":1,"repository_node_id":"repo","base_branch":"main","target_oid":"1111111111111111111111111111111111111111","configuration":{"autonomous":false,"verification":[],"error":null},"workflows":[]}"#,
+                r#"{"updated":true}"#,
+            ] {
+                let (mut stream, _) = http.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                assert!(stream.read(&mut buffer).await.unwrap() > 0);
+                tokio::time::sleep(Duration::from_secs(13)).await;
+                let live = started.elapsed().as_secs() - renewed.load(Ordering::Relaxed) < 8;
+                let status = if live { "200 OK" } else { "409 Conflict" };
+                stream.write_all(format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).as_bytes()).await.unwrap();
+            }
         });
         let (socket, _) = connect_async(control_url).await.unwrap();
         let mut session = Session {
@@ -1736,8 +1798,11 @@ mod tests {
                 owner: "octocat".into(),
                 name: "connected".into(),
             },
-            lease: Some("lease".into()),
+            lease: None,
         };
+        let snapshot = session.snapshot().await.unwrap();
+        assert!(!snapshot.configuration.autonomous);
+        session.lease = Some("lease".into());
         assert_eq!(
             session
                 .post("actions", json!({"action":"proposal"}))

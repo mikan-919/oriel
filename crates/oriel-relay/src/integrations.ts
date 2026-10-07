@@ -32,6 +32,7 @@ type Auth = {
   host(request: Request, id: string): Promise<Device>;
   session(request: Request): Promise<Session>;
   liveSession(session: Session): void;
+  changed(): void;
   body(request: Request): Promise<Record<string, unknown>>;
   fail(status: number, message: string): never;
   json(data: unknown, status?: number): Response;
@@ -361,7 +362,7 @@ export class Integrations {
     for (const comment of [...comments].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
       if (!/@oriel\b/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
       const key = `how:${await digest([id, comment.id, comment.body])}`;
-      const marker = await this.workflowMarker(context, "how", key);
+      const marker = await this.workflowMarker(context, "how-response", key);
       if (!comments.some(response => response.body.includes(marker))) return { key, body: comment.body };
     }
     return null;
@@ -469,6 +470,8 @@ export class Integrations {
     if (!allowed) this.auth.fail(409, row.blocked_reason ?? "Workflow phase does not admit this operation");
     context.check();
     return { ...claim, linear_id: row.linear?.id ?? null,
+      task: { issue_number: row.issue.number, title: row.issue.title, url: row.issue.url,
+        how_identifier: row.linear?.identifier ?? null, how_url: row.linear?.url ?? null },
       ...(claim.kind === "respond" && row.feedback && row.pull_request ? { feedback: { key: row.feedback.key, head_oid: row.pull_request.head_oid, pr_number: row.pull_request.number } } : {}),
       ...(["implement", "respond"].includes(claim.kind) ? { execution: { target_oid: snapshot.target_oid, base_branch: snapshot.base_branch, verification: snapshot.configuration.verification } } : {}),
       ...(claim.kind === "reconcile" && row.recovery === "invalidate" ? { recovery: { branch: recoveries.get(row.issue.number)! } } : {}) };
@@ -704,6 +707,7 @@ export class Integrations {
     if (!kind || kind !== grant.kind) this.auth.fail(403, "Workflow action is not allowed by this lease");
     if (action === "proposal") {
       if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 256 || typeof body.description !== "string" || !body.description.trim() || body.description.length > 60000) this.auth.fail(400, "A bounded HOW title and description are required");
+      if (body.summary !== undefined && (typeof body.summary !== "string" || !body.summary.trim() || body.summary.length > 12000)) this.auth.fail(400, "A bounded model reply is required");
       let initial: { facts: WorkflowFacts; row: WorkflowRow };
       try { initial = await this.workflowCurrent(context, grant, ["needs-how", "triage"]); }
       catch (error) {
@@ -711,16 +715,21 @@ export class Integrations {
         const facts = await this.workflowFacts(context);
         const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
         if (row?.phase !== "triage" || row.linear?.id !== grant.linear_id || row.linear.title !== body.title || row.linear.description !== body.description) throw error;
-        if (row.how_feedback) await this.workflowComment(context, { ...grant, version: row.version, branch: row.branch }, "how", row.how_feedback.key, "Oriel updated the HOW proposal in response to this request.");
+        if (row.how_feedback) {
+          if (typeof body.summary !== "string") this.auth.fail(400, "A model reply is required for HOW feedback");
+          await this.workflowComment(context, { ...grant, version: row.version, branch: row.branch }, "how-response", row.how_feedback.key, body.summary);
+        }
         return { linear: row.linear };
       }
       if (initial.row.linear) {
         if (grant.linear_id === null) return { linear: initial.row.linear };
         const feedback = initial.row.how_feedback;
+        const reply = typeof body.summary === "string" ? body.summary : null;
+        if (feedback && reply === null) this.auth.fail(400, "A model reply is required for HOW feedback");
         const linear = await this.workflowUpdateHow(context, grant, { title: body.title, description: body.description }, ["triage"]);
-        if (feedback) {
+        if (feedback && reply !== null) {
           const version = await digest(["oriel/approval-fingerprint/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, initial.row.issue.title, initial.row.issue.body ?? "", linear.id, linear.title, linear.description ?? ""]);
-          await this.workflowComment(context, { ...grant, linear_id: linear.id, version, branch: `oriel/${linear.identifier}-gh-${grant.issue_number}-${version}` }, "how", feedback.key, "Oriel updated the HOW proposal in response to this request.");
+          await this.workflowComment(context, { ...grant, linear_id: linear.id, version, branch: `oriel/${linear.identifier}-gh-${grant.issue_number}-${version}` }, "how-response", feedback.key, reply);
         }
         return { linear };
       }
@@ -963,7 +972,10 @@ export class Integrations {
             !/^[a-z0-9._-]{1,100}$/.test(repository.name) || repository.name === "." || repository.name === "..") this.auth.fail(400, "Invalid GitHub repository");
       }
       const normalized = repository ? JSON.stringify(repository) : null;
-      if (normalized !== device.repository) this.sql.exec("UPDATE devices SET repository = ?, repository_generation = ? WHERE device_id = ?", normalized, random(), device.device_id);
+      if (normalized !== device.repository) {
+        this.sql.exec("UPDATE devices SET repository = ?, repository_generation = ? WHERE device_id = ?", normalized, random(), device.device_id);
+        this.auth.changed();
+      }
       return this.auth.json({ ok: true });
     }
     const callback = /^\/api\/integrations\/callback\/(github|linear)$/.exec(url.pathname);
@@ -1114,6 +1126,7 @@ export class Integrations {
       return { credential: refreshed, ciphertext };
     } catch (error) {
       this.sql.exec(`UPDATE account_integrations SET ${slot}_status = 'uncertain' WHERE user_id = ? AND provider = ? AND generation = ? AND ${slot} = ?`, connection.user_id, connection.provider, connection.generation, connection[slot]);
+      this.auth.changed();
       if (error instanceof Error && "status" in error) throw error;
       this.auth.fail(502, "Provider refresh failed; reconnect in Web");
     }
@@ -1215,6 +1228,7 @@ export class Integrations {
       guard();
       this.sql.exec("UPDATE account_integrations SET active = pending, target = ?, active_status = 'ready', pending = NULL, choices = NULL, generation = ? WHERE user_id = ? AND provider = ?", JSON.stringify(target), random(), user, provider);
       this.sql.exec("DELETE FROM account_oauth WHERE user_id = ? AND provider = ?", user, provider);
+      this.auth.changed();
       return this.auth.json({ ok: true });
     } catch (error) {
       if (error instanceof Error && "status" in error) throw error;
@@ -1227,6 +1241,7 @@ export class Integrations {
     const connection = this.row(user, provider);
     this.sql.exec("DELETE FROM account_integrations WHERE user_id = ? AND provider = ?", user, provider);
     this.sql.exec("DELETE FROM account_oauth WHERE user_id = ? AND provider = ?", user, provider);
+    this.auth.changed();
     let revoked = true;
     for (const ciphertext of new Set([connection?.active, connection?.pending].filter((value): value is string => !!value))) {
       try {

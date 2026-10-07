@@ -1,15 +1,37 @@
 import type { Device, Integrations } from "./integrations";
-import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant } from "./workflow";
+import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask } from "./workflow";
 
 const SOCKET_TAG = "workflow";
-const PROTOCOL = "oriel/workflow/v1";
+const WATCH_TAG = "workflow-progress";
+const PROTOCOL = "oriel/workflow/v2";
+const WATCH_PROTOCOL = "oriel/workflow-progress/v1";
 const HEARTBEAT_MS = 10_000;
 const EXPIRY_MS = 45_000;
+const STAGES = ["idle", "discovering", "preparing", "planning", "implementing", "reviewing", "verifying",
+  "integrating", "pushing", "publishing", "reconciling", "paused"] as const;
+type Stage = typeof STAGES[number];
+type ProgressTask = WorkflowTask & { repository: string };
+type ProgressDevice = {
+  device_id: string;
+  state: "offline" | "idle" | "running" | "paused";
+  stage: Stage | null;
+  task: ProgressTask | null;
+  updated_at: string | null;
+};
+type WatchAttachment = {
+  protocol: typeof WATCH_PROTOCOL;
+  session_hash: string;
+  user_id: string;
+  expires_at: number;
+};
 type Attachment = {
   protocol: typeof PROTOCOL;
   binding: WorkflowBinding;
   expires_at: number;
   grant: (WorkflowAdmission & { lease_id: string }) | null;
+  stage: Stage;
+  task: ProgressTask | null;
+  updated_at: string;
 };
 
 export class WorkflowLeaseError extends Error {
@@ -31,6 +53,8 @@ export class WorkflowLeases {
     private readonly ctx: DurableObjectState,
     private readonly integrations: Integrations,
     private readonly device: (id: string) => Device | undefined,
+    private readonly ownedDevices: (userId: string) => Pick<Device, "device_id">[],
+    private readonly sessionExpiry: (sessionHash: string, userId: string) => number | null,
   ) {}
 
   private attachment(ws: WebSocket): Attachment | null {
@@ -43,9 +67,73 @@ export class WorkflowLeases {
     try { ws.close(1008, "Workflow connection ended"); } catch { /* Already closed. */ }
   }
 
-  private live(ws: WebSocket): Attachment {
-    const attachment = this.attachment(ws);
+  private stopAll(): void {
+    for (const ws of [...this.ctx.getWebSockets(SOCKET_TAG), ...this.ctx.getWebSockets(WATCH_TAG)]) this.stop(ws);
+  }
+
+  private liveWatch(ws: WebSocket): WatchAttachment {
     try {
+      const attachment = ws.deserializeAttachment() as WatchAttachment | null;
+      if (!attachment || attachment.protocol !== WATCH_PROTOCOL || ws.readyState !== WebSocket.OPEN) throw new Error();
+      const expiry = this.sessionExpiry(attachment.session_hash, attachment.user_id);
+      if (expiry === null || expiry <= Date.now()) throw new Error();
+      return { ...attachment, expires_at: expiry };
+    } catch {
+      this.stop(ws);
+      throw new WorkflowLeaseError();
+    }
+  }
+
+  /** Read-only owner snapshots come only from paired-device rows and live control attachments. */
+  publish(): void {
+    try {
+      const controls = new Map<string, Attachment>();
+      for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
+        try {
+          const attachment = this.live(ws);
+          controls.set(attachment.binding.device_id, attachment);
+        } catch { /* Invalid control authority is closed before any snapshot is sent. */ }
+      }
+      for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+        let watcher: WatchAttachment;
+        try { watcher = this.liveWatch(ws); } catch { continue; }
+        const devices = this.ownedDevices(watcher.user_id).map((device): ProgressDevice => {
+          const control = controls.get(device.device_id);
+          if (!control || control.binding.user_id !== watcher.user_id) {
+            return { device_id: device.device_id, state: "offline", stage: null, task: null, updated_at: null };
+          }
+          return { device_id: device.device_id,
+            state: control.stage === "paused" ? "paused" : control.stage === "idle" ? "idle" : "running",
+            stage: control.stage, task: control.grant
+              ? { repository: `${control.binding.repository.owner}/${control.binding.repository.name}`, ...control.grant.task }
+              : control.task, updated_at: control.updated_at };
+        });
+        this.send(ws, { type: "workflow-progress", devices });
+      }
+    } catch {
+      // SQL/session failures must never leave a browser claiming an authoritative live stream.
+      this.stopAll();
+    }
+  }
+
+  watch(sessionHash: string, userId: string): Response {
+    const expiresAt = this.sessionExpiry(sessionHash, userId);
+    if (expiresAt === null || expiresAt <= Date.now()) throw new WorkflowLeaseError();
+    const pair = new WebSocketPair();
+    this.ctx.acceptWebSocket(pair[1], [WATCH_TAG]);
+    try {
+      pair[1].serializeAttachment({
+        protocol: WATCH_PROTOCOL, session_hash: sessionHash, user_id: userId, expires_at: expiresAt,
+      } satisfies WatchAttachment);
+    } catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
+    this.publish();
+    this.schedule();
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  private live(ws: WebSocket): Attachment {
+    try {
+      const attachment = this.attachment(ws);
       if (!attachment || attachment.expires_at <= Date.now() || ws.readyState !== WebSocket.OPEN) {
         throw new WorkflowLeaseError();
       }
@@ -61,13 +149,19 @@ export class WorkflowLeases {
   }
 
   private schedule(): void {
-    this.ctx.waitUntil((async () => {
-      const scheduled = await this.ctx.storage.getAlarm();
-      const deadline = Date.now() + HEARTBEAT_MS;
-      if (scheduled === null || scheduled > deadline) await this.ctx.storage.setAlarm(deadline);
-    })().catch(() => {
-      for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) this.stop(ws);
-    }));
+    try {
+      let deadline = Date.now() + HEARTBEAT_MS;
+      for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+        try { deadline = Math.min(deadline, this.liveWatch(ws).expires_at); } catch { /* Revoked watcher closed. */ }
+      }
+      for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
+        try { deadline = Math.min(deadline, this.live(ws).expires_at); } catch { /* Invalid control closed. */ }
+      }
+      // Compute and enqueue without an await: older reads must not overwrite a shortened session deadline.
+      this.ctx.waitUntil(this.ctx.storage.setAlarm(deadline).catch(() => this.stopAll()));
+    } catch {
+      this.stopAll();
+    }
   }
 
   connect(device: Device): Response {
@@ -76,10 +170,12 @@ export class WorkflowLeases {
       if (this.attachment(ws)?.binding.device_id === device.device_id) this.stop(ws);
     }
     const pair = new WebSocketPair();
-    const attachment: Attachment = { protocol: PROTOCOL, binding, expires_at: Date.now() + EXPIRY_MS, grant: null };
+    const attachment: Attachment = { protocol: PROTOCOL, binding, expires_at: Date.now() + EXPIRY_MS, grant: null,
+      stage: "idle", task: null, updated_at: new Date().toISOString() };
     this.ctx.acceptWebSocket(pair[1], [SOCKET_TAG]);
     try { pair[1].serializeAttachment(attachment); }
     catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
+    this.publish();
     this.schedule();
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
@@ -103,6 +199,15 @@ export class WorkflowLeases {
   }
 
   async message(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.ctx.getTags(ws).includes(WATCH_TAG)) {
+      if (message === "ready") {
+        this.publish();
+        this.schedule();
+        return;
+      }
+      this.stop(ws);
+      return;
+    }
     let requestId: string | null = null;
     try {
       if (typeof message !== "string" || message.length > 4096) throw new Error();
@@ -118,13 +223,36 @@ export class WorkflowLeases {
         this.send(ws, { type: "heartbeat", request_id: requestId });
         return;
       }
+      if (request.type === "progress") {
+        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id"].includes(key)) ||
+            !STAGES.includes(request.stage as Stage)) throw new Error();
+        if (attachment.grant) {
+          if (request.lease_id !== attachment.grant.lease_id) throw new WorkflowLeaseError();
+        } else if (!["idle", "discovering", "paused"].includes(request.stage as string) ||
+                   request.lease_id !== undefined) throw new WorkflowLeaseError();
+        attachment.stage = request.stage as Stage;
+        if (!attachment.grant && attachment.stage !== "paused") attachment.task = null;
+        attachment.updated_at = new Date().toISOString();
+        ws.serializeAttachment(attachment);
+        this.send(ws, { type: "progressed", request_id: requestId });
+        return;
+      }
       if (request.type === "check" || request.type === "release") {
         if (typeof request.lease_id !== "string" || attachment.grant?.lease_id !== request.lease_id) {
           throw new WorkflowLeaseError();
         }
         const leaseId = attachment.grant.lease_id;
         if (request.type === "release") {
+          if (attachment.stage === "paused") {
+            attachment.task = { repository: `${attachment.binding.repository.owner}/${attachment.binding.repository.name}`,
+              ...attachment.grant.task };
+          }
           attachment.grant = null;
+          if (attachment.stage !== "paused") {
+            attachment.stage = "idle";
+            attachment.task = null;
+          }
+          attachment.updated_at = new Date().toISOString();
           ws.serializeAttachment(attachment);
         }
         this.send(ws, { type: request.type === "check" ? "checked" : "released", request_id: requestId, lease_id: leaseId });
@@ -160,18 +288,25 @@ export class WorkflowLeases {
       }
       const leaseId = crypto.randomUUID();
       attachment.grant = { ...admitted, lease_id: leaseId };
+      attachment.stage = "preparing";
+      attachment.task = null;
+      attachment.updated_at = new Date().toISOString();
       ws.serializeAttachment(attachment);
       this.send(ws, { type: "granted", request_id: requestId, lease_id: leaseId });
     } catch {
       this.send(ws, { type: "rejected", request_id: requestId, error: "Workflow request rejected" });
+    } finally {
+      this.publish();
     }
   }
 
   close(ws: WebSocket): void {
     this.stop(ws);
+    this.publish();
   }
 
   async alarm(): Promise<void> {
+    this.publish();
     let deadline: number | null = null;
     for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
       try {
@@ -179,9 +314,13 @@ export class WorkflowLeases {
         deadline = Math.min(deadline ?? Date.now() + HEARTBEAT_MS, attachment.expires_at);
       } catch { /* Expired or changed bindings are already closed. */ }
     }
+    for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+      try { deadline = Math.min(deadline ?? Date.now() + HEARTBEAT_MS, this.liveWatch(ws).expires_at); }
+      catch { /* Expired or revoked watchers are already closed. */ }
+    }
     if (deadline !== null) {
       try { await this.ctx.storage.setAlarm(deadline); }
-      catch { for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) this.stop(ws); }
+      catch { this.stopAll(); }
     }
   }
 }

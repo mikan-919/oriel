@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import test from "node:test";
 import { client, connect, device, hostHeaders, origin, pair, runtime } from "./helpers.mjs";
 import { workflowFixture } from "./workflow-fixture.mjs";
@@ -142,13 +142,12 @@ test("native Markdown formatting is acknowledged once without granting Todo", as
     s.fixture.normalizeDescription = body => body.replace("Questions:\n1.", "Questions:\n\n1.");
     const description = "Questions:\n1. Keep disconnected devices visible?";
     const lease = await s.claim("plan");
-    const proposal = await s.action(lease, "proposal", { title: "Revised HOW", description });
+    const proposal = await s.action(lease, "proposal", { title: "Revised HOW", description, summary: "Offline devices remain visible; please confirm their status labels." });
     assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
     assert.equal(proposal.data.linear.description, "Questions:\n\n1. Keep disconnected devices visible?");
     const row = (await s.snapshot()).workflows.find(row => row.issue.number === 42);
     assert.equal(row.how_feedback, null, "The processed request must not retrigger another model run");
     assert.equal(row.phase, "triage");
-    assert.match(how.comments[1].body, /Oriel updated the HOW proposal/);
   } finally { await s.close(); }
 });
 
@@ -161,11 +160,44 @@ test("canonical update receipts do not hide intervening human edits", async () =
     s.fixture.holdReads = ({ provider, operation }) => {
       if (provider === "linear" && operation === "how" && s.fixture.calls.some(call => call.operation === "how-update")) how.description = "Human revision after the mutation";
     };
-    const proposal = await s.action(lease, "proposal", { title: "Revised HOW", description: "Agent proposal" });
+    const proposal = await s.action(lease, "proposal", { title: "Revised HOW", description: "Agent proposal", summary: "Updated the proposed scope." });
     assert.equal(proposal.status, 409);
     assert.equal(how.description, "Human revision after the mutation");
     assert.deepEqual(how.comments.map(comment => comment.id), ["request"]);
     assert.equal(how.state.name, "Triage");
+  } finally { await s.close(); }
+});
+
+test("HOW update receipts do not consume unanswered questions and reply retries do not duplicate answers", async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow("Triage");
+    const request = { id: "question", body: "@Oriel 見えてる？", createdAt: "2026-01-01T00:00:00Z" };
+    const key = `how:${createHash("sha256").update(JSON.stringify([how.id, request.id, request.body])).digest("hex")}`;
+    const signature = createHmac("sha256", Buffer.from(s.fixture.env.INTEGRATION_ENCRYPTION_KEY, "hex"))
+      .update(JSON.stringify(["oriel/workflow-cursor/v1", 501, "team", "how", key])).digest("base64url");
+    const receipt = { id: "old-receipt", body: `HOW update recorded.\n\n<!-- oriel:how:${Buffer.from(key).toString("base64url")}:${signature} -->`, createdAt: "2026-01-01T00:01:00Z" };
+    how.comments.push(request, receipt);
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).how_feedback.key, key);
+    const lease = await s.claim("plan");
+    const draft = { title: how.title, description: how.description };
+    for (const summary of [undefined, "", " ", "x".repeat(12001)]) {
+      const rejected = await s.action(lease, "proposal", { ...draft, ...(summary === undefined ? {} : { summary }) });
+      assert.equal(rejected.status, 400);
+      assert.equal(how.title, draft.title);
+      assert.equal(how.description, draft.description);
+      assert.deepEqual(how.comments.map(comment => comment.id), [request.id, receipt.id]);
+    }
+    s.fixture.uncertainty.set("how-comment", true);
+    const answered = await s.action(lease, "proposal", { ...draft, summary: "はい、コメントは見えています。実装はまだ承認していません。" });
+    assert.equal(answered.status, 200, JSON.stringify(answered.data));
+    const response = structuredClone(how.comments[2]);
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).how_feedback, null);
+    const retried = await s.action(lease, "proposal", { ...draft, summary: "A late retry must not replace the original answer." });
+    assert.equal(retried.status, 200);
+    assert.deepEqual(how.comments, [request, receipt, response]);
+    assert.equal(how.state.name, "Triage");
+    assert.equal((await s.action(lease, "begin")).status, 403);
   } finally { await s.close(); }
 });
 

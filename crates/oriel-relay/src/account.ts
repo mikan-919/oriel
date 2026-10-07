@@ -284,10 +284,19 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       },
       session: (request) => this.requireSession(request),
       liveSession: (session) => this.requireLiveSession(session),
+      changed: () => this.workflows.publish(),
       body: readBody, fail, json,
     });
-    this.workflows = new WorkflowLeases(this.ctx, this.integrations, id =>
-      this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0]);
+    this.workflows = new WorkflowLeases(this.ctx, this.integrations,
+      id => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0],
+      userId => this.sql.exec<Pick<Device, "device_id">>("SELECT device_id FROM devices WHERE user_id = ? ORDER BY name, device_id", userId).toArray(),
+      (sessionHash, userId) => {
+        const session = this.sql.exec<{ expires_at: number }>(
+          "SELECT sessions.expires_at FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.hash = ? AND users.id = ? AND sessions.expires_at > ?",
+          sessionHash, userId, now(),
+        ).toArray()[0];
+        return session ? session.expires_at * 1000 : null;
+      });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -316,6 +325,16 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         this.checkHost(device.host_hash, supplied);
         return this.workflows.connect(device);
       }
+      if (url.pathname === "/api/workflow-progress/connect") {
+        if (request.method !== "GET" || url.search || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+          fail(400, "Expected a WebSocket upgrade without query parameters");
+        }
+        this.requireOrigin(request);
+        if (request.headers.has("Authorization")) fail(403, "Workflow progress requires an owning browser session");
+        const session = await this.requireSession(request);
+        this.requireLiveSession(session);
+        return this.workflows.watch(session.hash, session.user.id);
+      }
       const route = `${request.method} ${url.pathname}`;
       const daemon = route === "POST /api/pair/start" ||
         /^GET \/api\/pair\/[a-f0-9]{32}\/status$/.test(route) ||
@@ -333,6 +352,8 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         } catch (error) {
           if (!(error instanceof HttpError) && !(error instanceof WorkflowLeaseError)) throw error;
           response = json({ error: error.message }, error.status);
+        } finally {
+          this.workflows.publish();
         }
         response.headers.set("Referrer-Policy", "no-referrer");
         return response;
@@ -371,6 +392,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
             if (session) this.sql.exec("DELETE FROM sessions WHERE hash = ?", session.hash);
             if (challengeHash) this.sql.exec("DELETE FROM challenges WHERE hash = ?", challengeHash);
           });
+          this.workflows.publish();
           response = json({ ok: true }, 200, [
             this.setCookie(this.sessionCookie, "", 0), this.setCookie(this.challengeCookie, "", 0),
           ]);
@@ -402,6 +424,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       }
     }
     if (clearChallenge) response.headers.append("Set-Cookie", this.setCookie(this.challengeCookie, "", 0));
+    this.workflows.publish();
     return response;
   }
 

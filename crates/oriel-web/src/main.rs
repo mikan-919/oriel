@@ -70,6 +70,37 @@ a {
     color: #8ab4f8;
 }
 
+#devices {
+    padding: 0;
+    list-style: none;
+}
+
+#devices > li {
+    border: 1px solid #666;
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+    margin-block: 0.75rem;
+    min-width: 0;
+}
+
+#devices h3 {
+    margin-block: 0 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.execution-card {
+    border-top: 1px solid #666;
+    margin-top: 0.75rem;
+}
+
+.execution-card p {
+    margin-block: 0.5rem;
+}
+
+.execution-state {
+    font-weight: bold;
+}
+
 #repository-issues .how-description {
     white-space: pre-wrap;
 }
@@ -125,6 +156,7 @@ const anonymousActions = document.getElementById("anonymous-actions");
 const sessionActions = document.getElementById("session-actions");
 const deviceList = document.getElementById("devices");
 const deviceSummary = document.getElementById("device-summary");
+const progressStatus = document.getElementById("workflow-progress-status");
 const pairSection = document.getElementById("pairing");
 const pairDetails = document.getElementById("pair-details");
 const pairStatus = document.getElementById("pair-status");
@@ -182,6 +214,20 @@ let pairTimer;
 let terminal;
 let fit;
 let socket;
+let progressSocket;
+let progressRetry;
+let progressExpiry;
+let progressRetryDelay = 5000;
+let progressReceivedAt = 0;
+let progressStream = "signed-out";
+let progressSnapshot = new Map();
+const deviceRows = new Map();
+const progressStages = {
+    idle: "Idle", discovering: "Discovering", preparing: "Preparing",
+    planning: "Planning", implementing: "Implementing", reviewing: "Reviewing",
+    verifying: "Verifying", integrating: "Integrating", pushing: "Pushing",
+    publishing: "Publishing", reconciling: "Reconciling", paused: "Paused",
+};
 const encoder = new TextEncoder();
 
 function render() {
@@ -258,6 +304,9 @@ function setUser(next) {
         disconnect();
         clearTimeout(pairTimer);
         accountEpoch++;
+        stopProgress();
+        progressSnapshot.clear();
+        deviceRows.clear();
         integrationsRequest++;
         issuesRequest++;
         repositoryRequest++;
@@ -282,6 +331,7 @@ function setUser(next) {
     }
     user = next;
     render();
+    if (user) connectProgress();
 }
 
 async function api(path, body) {
@@ -391,50 +441,257 @@ async function authenticate(kind) {
     await refreshAccountData();
 }
 
+function setProgressStream(state) {
+    progressStream = state;
+    const message = {
+        "signed-out": "Sign in to see live execution.",
+        connecting: "Connecting to live execution… Execution is not yet confirmed.",
+        live: "Live execution connected. This is read-only; Todo approval and PR merge remain human decisions.",
+        stale: "Live execution stream is stale or unavailable. Last reported activity is not confirmed; reconnecting while signed in.",
+    }[state];
+    if (progressStatus.textContent !== message) progressStatus.textContent = message;
+    renderProgressCards();
+}
+
+function stopProgress() {
+    clearTimeout(progressRetry);
+    clearTimeout(progressExpiry);
+    progressRetry = undefined;
+    const connection = progressSocket;
+    progressSocket = undefined;
+    connection?.close();
+    progressReceivedAt = 0;
+    progressRetryDelay = 5000;
+    setProgressStream("signed-out");
+}
+
+function retryProgress(epoch) {
+    if (!currentAccount(epoch) || progressRetry) return;
+    progressRetry = setTimeout(async () => {
+        progressRetry = undefined;
+        if (!currentAccount(epoch)) return;
+        try {
+            const result = await api("/api/session");
+            if (!currentAccount(epoch)) return;
+            setUser(result.user);
+        } catch (_) {
+            if (currentAccount(epoch)) retryProgress(epoch);
+        }
+    }, progressRetryDelay);
+    progressRetryDelay = Math.min(progressRetryDelay * 2, 30000);
+}
+
+function staleProgress() {
+    if (!user) return;
+    clearTimeout(progressExpiry);
+    const connection = progressSocket;
+    progressSocket = undefined;
+    connection?.close();
+    setProgressStream("stale");
+    retryProgress(accountEpoch);
+}
+
+function connectProgress() {
+    if (!user || progressSocket || progressRetry) return;
+    const epoch = accountEpoch;
+    const url = new URL("/api/workflow-progress/connect", location.origin);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    setProgressStream(progressSnapshot.size ? "stale" : "connecting");
+    let connection;
+    try {
+        connection = new WebSocket(url);
+    } catch (_) {
+        setProgressStream("stale");
+        retryProgress(epoch);
+        return;
+    }
+    progressSocket = connection;
+    const current = () => currentAccount(epoch) && progressSocket === connection;
+    connection.addEventListener("open", () => {
+        if (current()) connection.send("ready");
+    });
+    // Relay sends fresh snapshots at least every 10 seconds, even without stage changes.
+    const expire = () => {
+        if (!current()) return;
+        staleProgress();
+    };
+    progressExpiry = setTimeout(expire, 60000);
+    connection.addEventListener("message", (event) => {
+        if (!current()) return;
+        try {
+            const frame = JSON.parse(event.data);
+            if (frame.type !== "workflow-progress" || !Array.isArray(frame.devices)) throw new Error("Invalid progress snapshot");
+            const snapshot = new Map();
+            for (const device of frame.devices) {
+                if (typeof device.device_id !== "string" || !["offline", "idle", "running", "paused"].includes(device.state)) {
+                    throw new Error("Invalid device progress");
+                }
+                snapshot.set(device.device_id, device);
+            }
+            progressSnapshot = snapshot;
+            progressReceivedAt = Date.now();
+            progressRetryDelay = 5000;
+            clearTimeout(progressExpiry);
+            progressExpiry = setTimeout(expire, 60000);
+            setProgressStream("live");
+        } catch (_) {
+            expire();
+        }
+    });
+    connection.addEventListener("error", () => {
+        if (!current()) return;
+        expire();
+    });
+    connection.addEventListener("close", () => {
+        if (!current()) return;
+        clearTimeout(progressExpiry);
+        progressSocket = undefined;
+        setProgressStream("stale");
+        retryProgress(epoch);
+    });
+}
+
+function updateProgressLink(link, label, address, host) {
+    link.textContent = label;
+    link.hidden = !address;
+    if (!address) {
+        link.removeAttribute("href");
+        return;
+    }
+    try {
+        const checked = issueLink(label, address, host);
+        link.href = checked.href;
+        link.target = checked.target;
+        link.rel = checked.rel;
+    } catch (_) {
+        link.hidden = true;
+        link.removeAttribute("href");
+    }
+}
+
+function renderProgressCards() {
+    for (const [id, row] of deviceRows) {
+        const progress = progressSnapshot.get(id);
+        const stale = progressStream !== "live";
+        const stage = progressStages[progress?.stage] || progress?.stage || "Stage unavailable";
+        const state = progress ? `${progress.state[0].toUpperCase()}${progress.state.slice(1)}` : "Waiting for snapshot";
+        const detail = progress?.state === "offline" ? " — workflow control disconnected"
+            : progress?.state === "idle" ? " — waiting for work"
+            : progress ? ` — ${stage}` : "";
+        const label = stale ? `Stale stream — ${progress ? `last reported ${state}${detail}; execution not confirmed` : "execution not confirmed"}`
+            : `${state}${detail}`;
+        row.card.dataset.state = stale ? "stale" : progress?.state || "unknown";
+        if (row.state.textContent !== label) row.state.textContent = label;
+        const task = progress?.task;
+        updateProgressLink(row.whatLink, task ? `#${task.issue_number}: ${task.title}` : "", task?.url, "github.com");
+        row.whatEmpty.textContent = task ? (row.whatLink.hidden ? `#${task.issue_number}: ${task.title} (link unavailable)` : "")
+            : "None reported.";
+        updateProgressLink(row.howLink, task?.how_identifier || "Open Linear HOW", task?.how_url, "linear.app");
+        row.howEmpty.textContent = row.howLink.hidden ? task?.how_identifier || "None reported." : "";
+        const repository = task?.repository || (row.device.repository
+            ? `${row.device.repository.owner}/${row.device.repository.name}` : "Not reported.");
+        row.progressRepository.textContent = `Repository: ${repository}`;
+        const updated = progress?.updated_at ? new Date(progress.updated_at) : null;
+        if (updated && !Number.isNaN(updated.getTime())) {
+            row.updated.dateTime = updated.toISOString();
+            row.updated.textContent = updated.toLocaleString();
+        } else {
+            row.updated.removeAttribute("datetime");
+            row.updated.textContent = "Not reported.";
+        }
+    }
+}
+
+function createDeviceRow(device) {
+    const item = document.createElement("li");
+    item.id = `device-${device.device_id}`;
+    const label = document.createElement("h3");
+    const repository = document.createElement("p");
+    repository.id = `repository-${device.device_id}`;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "Open terminal";
+    const work = document.createElement("button");
+    work.type = "button";
+    work.textContent = "Open workflow";
+    const card = document.createElement("div");
+    card.id = `execution-${device.device_id}`;
+    card.className = "execution-card";
+    const state = document.createElement("p");
+    state.id = `execution-state-${device.device_id}`;
+    state.className = "execution-state";
+    state.setAttribute("role", "status");
+    state.setAttribute("aria-atomic", "true");
+    const what = document.createElement("p");
+    const whatLink = document.createElement("a");
+    whatLink.id = `execution-what-${device.device_id}`;
+    const whatEmpty = document.createElement("span");
+    what.append("WHAT: ", whatLink, whatEmpty);
+    const how = document.createElement("p");
+    const howLink = document.createElement("a");
+    howLink.id = `execution-how-${device.device_id}`;
+    const howEmpty = document.createElement("span");
+    how.append("HOW: ", howLink, howEmpty);
+    const progressRepository = document.createElement("p");
+    progressRepository.id = `execution-repository-${device.device_id}`;
+    const updatedLine = document.createElement("p");
+    const updated = document.createElement("time");
+    updated.id = `execution-updated-${device.device_id}`;
+    updatedLine.append("Updated: ", updated);
+    card.append(state, what, how, progressRepository, updatedLine);
+    item.append(label, repository, open, work, card);
+    const row = {device, item, label, repository, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
+    open.addEventListener("click", () => perform(() => openTerminal(row.device)));
+    work.addEventListener("click", () => perform(async () => {
+        repositoryDeviceId = row.device.device_id;
+        await refreshWorkflow();
+    }));
+    return row;
+}
+
 async function refreshDevices() {
     if (!user) return;
     const epoch = accountEpoch;
     const result = await api("/api/devices");
     if (!currentAccount(epoch)) return;
     devices = result.devices;
-    deviceList.replaceChildren();
-    repositoryRequest++;
-    repositoryIssues.replaceChildren();
-    workflowSnapshot = null;
+    for (const [id, row] of deviceRows) {
+        if (!devices.some((device) => device.device_id === id)) {
+            row.item.remove();
+            deviceRows.delete(id);
+            progressSnapshot.delete(id);
+        }
+    }
     if (!devices.some((device) => device.device_id === repositoryDeviceId)) {
+        repositoryRequest++;
+        repositoryIssues.replaceChildren();
+        workflowSnapshot = null;
         repositoryDeviceId = devices.length === 1 ? devices[0].device_id : null;
     }
     const selected = devices.find((device) => device.device_id === repositoryDeviceId);
     repositoryDetails.textContent = selected ? `${selected.name} (${selected.device_id})` : "";
-    repositoryStatus.textContent = selected
-        ? "Refresh the workflow to read this device's reported repository."
-        : "Choose a device to view its Issue → Linear → PR workflow.";
+    if (!workflowSnapshot) {
+        repositoryStatus.textContent = selected
+            ? "Refresh the workflow to read this device's reported repository."
+            : "Choose a device to view its Issue → Linear → PR workflow.";
+    }
     deviceSummary.textContent = devices.length ? "Open an owned device:" : "No paired devices yet.";
     for (const device of devices) {
-        const item = document.createElement("li");
-        const label = document.createElement("span");
-        label.textContent = `${device.name} (${device.device_id}) `;
-        const open = document.createElement("button");
-        open.type = "button";
-        open.textContent = "Open terminal";
-        open.disabled = busy;
-        open.addEventListener("click", () => perform(() => openTerminal(device)));
-        const repository = document.createElement("p");
-        repository.id = `repository-${device.device_id}`;
-        repository.textContent = device.repository
+        let row = deviceRows.get(device.device_id);
+        if (!row) {
+            row = createDeviceRow(device);
+            deviceRows.set(device.device_id, row);
+            deviceList.append(row.item);
+        }
+        row.device = device;
+        row.label.textContent = `${device.name} (${device.device_id})`;
+        row.repository.textContent = device.repository
             ? `Last reported repository: ${device.repository.owner}/${device.repository.name}`
             : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
-        const work = document.createElement("button");
-        work.type = "button";
-        work.textContent = "Open workflow";
-        work.disabled = busy;
-        work.addEventListener("click", () => perform(async () => {
-            repositoryDeviceId = device.device_id;
-            await refreshWorkflow();
-        }));
-        item.append(label, repository, open, work);
-        deviceList.append(item);
+        row.open.disabled = busy;
+        row.work.disabled = busy;
     }
+    renderProgressCards();
     if (pairClaimed && pairInfo && devices.some((device) => device.device_id === pairInfo.device_id)) {
         pairing.token = null;
         clearTimeout(pairTimer);
@@ -876,9 +1133,16 @@ document.getElementById("register").addEventListener("click", () => perform(() =
 document.getElementById("login").addEventListener("click", () => perform(() => authenticate("login")));
 document.getElementById("backup").addEventListener("click", () => perform(() => authenticate("register")));
 document.getElementById("logout").addEventListener("click", () => perform(async () => {
-    await api("/api/auth/logout", {});
-    setUser(null);
-    status.textContent = "Signed out.";
+    stopProgress();
+    progressStatus.textContent = "Signing out…";
+    try {
+        await api("/api/auth/logout", {});
+        setUser(null);
+        status.textContent = "Signed out.";
+    } catch (error) {
+        connectProgress();
+        throw error;
+    }
 }));
 document.getElementById("refresh").addEventListener("click", () => perform(async () => {
     setUser((await api("/api/session")).user);
@@ -901,6 +1165,10 @@ whatForm.addEventListener("submit", (event) => {
 document.getElementById("close-terminal").addEventListener("click", () => {
     disconnect();
     status.textContent = "Terminal closed. The device remains paired.";
+});
+window.addEventListener("offline", staleProgress);
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && progressStream === "live" && Date.now() - progressReceivedAt >= 60000) staleProgress();
 });
 setInterval(async () => {
     if (!user || busy || workflowRefreshing || !repositoryDeviceId || dashboard.hidden || document.hidden) return;
@@ -1022,6 +1290,7 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                     <section>
                         <h2>"Your devices"</h2>
                         <p id="device-summary">"Sign in to see your devices."</p>
+                        <p id="workflow-progress-status" role="status" aria-live="polite" aria-atomic="true">"Sign in to see live execution."</p>
                         <ul id="devices"></ul>
                     </section>
                     <section id="repository-work" hidden="">
