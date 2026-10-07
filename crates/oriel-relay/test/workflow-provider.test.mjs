@@ -134,6 +134,41 @@ test("WHAT browser creation and deterministic HOW recover unknown sends without 
   } finally { await s.close(); }
 });
 
+test("native Markdown formatting is acknowledged once without granting Todo", async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow("Triage");
+    how.comments.push({ id: "request", body: "@Oriel revise the HOW", createdAt: "2026-01-01T00:00:00Z", user: { name: "Human" } });
+    s.fixture.normalizeDescription = body => body.replace("Questions:\n1.", "Questions:\n\n1.");
+    const description = "Questions:\n1. Keep disconnected devices visible?";
+    const lease = await s.claim("plan");
+    const proposal = await s.action(lease, "proposal", { title: "Revised HOW", description });
+    assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
+    assert.equal(proposal.data.linear.description, "Questions:\n\n1. Keep disconnected devices visible?");
+    const row = (await s.snapshot()).workflows.find(row => row.issue.number === 42);
+    assert.equal(row.how_feedback, null, "The processed request must not retrigger another model run");
+    assert.equal(row.phase, "triage");
+    assert.match(how.comments[1].body, /Oriel updated the HOW proposal/);
+  } finally { await s.close(); }
+});
+
+test("canonical update receipts do not hide intervening human edits", async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow("Triage");
+    how.comments.push({ id: "request", body: "@oriel revise", createdAt: "2026-01-01T00:00:00Z" });
+    const lease = await s.claim("plan");
+    s.fixture.holdReads = ({ provider, operation }) => {
+      if (provider === "linear" && operation === "how" && s.fixture.calls.some(call => call.operation === "how-update")) how.description = "Human revision after the mutation";
+    };
+    const proposal = await s.action(lease, "proposal", { title: "Revised HOW", description: "Agent proposal" });
+    assert.equal(proposal.status, 409);
+    assert.equal(how.description, "Human revision after the mutation");
+    assert.deepEqual(how.comments.map(comment => comment.id), ["request"]);
+    assert.equal(how.state.name, "Triage");
+  } finally { await s.close(); }
+});
+
 test("exact human approval seals atomically, publishes only verified source, resumes review and reconciles actual merge", { timeout: 60000 }, async () => {
   const s = await setup();
   try {

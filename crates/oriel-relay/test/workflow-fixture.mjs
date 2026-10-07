@@ -109,8 +109,8 @@ export function workflowFixture() {
           how.state = structuredClone(state);
         }
         if (input.title !== undefined) how.title = input.title;
-        if (input.description !== undefined) how.description = input.description;
-        return uncertain(operation, Response.json({ data: { issueUpdate: { success: true } } }));
+        if (input.description !== undefined) how.description = fixture.normalizeDescription?.(input.description) ?? input.description;
+        return uncertain(operation, Response.json({ data: { issueUpdate: { success: true, issue: { id: how.id, title: how.title, description: how.description } } } }));
       }
       if (operation === "how-link") {
         const how = fixture.linears.find(how => how.id === input.issueId); assert.ok(how);

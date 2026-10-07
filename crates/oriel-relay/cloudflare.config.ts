@@ -38,9 +38,13 @@ import {
 // comments. Native INPUT_ERROR / "Entity not found: Issue" maps to an absent HOW
 // only for issue lookup; authorization, mixed errors and uncertain reads still block.
 // Review/edit HOW, then move it to native Todo to approve code. Oriel never sets Todo
-// or merges. @oriel comments in Triage request HOW refinement; PR reviews/comments
-// and failed checks drive verified fixes on the same canonical branch. Human merge
-// is required before Linear Done, including WHATs auto-closed by that merge.
+// or merges. Literal @oriel text (not a native account mention) in Triage comments
+// requests HOW refinement; PR reviews/comments and failed checks drive verified fixes
+// on the same canonical branch. Human merge is required before Linear Done,
+// including WHATs auto-closed by that merge.
+// HOW updates compare Linear's canonical mutation receipt with a fresh native read:
+// Markdown formatting is accepted without treating intervening human edits or
+// unconfirmed writes as our saved draft.
 // Each model invocation receives all readable GitHub WHAT and Linear HOW comments,
 // paginated and oldest-first, including bots, author and creation time. Unreadable
 // history blocks discovery rather than appearing empty. Discussion is untrusted
@@ -107,6 +111,8 @@ import {
 // is not project authority. Codex is pinned to the same .git root marker.
 // Run one workflow daemon per device: a new control socket replaces the old one.
 // Live socket grants fence repository/WHAT and canonical branch across devices.
+// Provider action/credential POSTs have a bounded 90s deadline with live ownership
+// renewal every 5s; ordinary discovery retains its 12s deadline.
 // Loss/uncertainty stops children before new writes. Approval edits return HOW to
 // Triage and require human reapproval; ambiguous prior seals need manual resolution.
 // Private worktrees under XDG_STATE_HOME (or ~/.local/state/oriel) retain dirty or

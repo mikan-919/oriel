@@ -575,8 +575,9 @@ export class Integrations {
     if (!current.row.linear) this.auth.fail(409, "A unique HOW is required");
     const id = current.row.linear.id;
     const before = current.row.linear;
-    const matches = (how: LinearHow) => (input.stateId === undefined || how.state.id === input.stateId) &&
-      (input.title === undefined || how.title === input.title) && (input.description === undefined || how.description === input.description);
+    let expected = input;
+    const matches = (how: LinearHow) => (expected.stateId === undefined || how.state.id === expected.stateId) &&
+      (expected.title === undefined || how.title === expected.title) && (expected.description === undefined || how.description === expected.description);
     for (let attempt = 0; attempt < 2; attempt++) {
       if (input.stateId) {
         const state = current.row.linear!.state;
@@ -610,7 +611,25 @@ export class Integrations {
         this.auth.fail(409, "Human changes prevented the HOW update");
       }
       context.check();
-      try { await this.workflowLinear(context, "mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}", { id, input }); }
+      try {
+        const result = await this.workflowLinear<{ issueUpdate: { success: boolean; issue: { id: string; title: string; description: string | null } | null } }>(context,
+          "mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success issue{id title description}}}", { id, input });
+        const saved = result.issueUpdate.issue;
+        if (result.issueUpdate.success === true && saved?.id === id) {
+          // Linear canonicalizes Markdown. Confirm its own mutation receipt against
+          // a fresh read, not the pre-canonicalized request; unknown sends stay strict.
+          const canonical = { ...input };
+          if (input.title !== undefined) {
+            if (typeof saved.title !== "string") this.auth.fail(502, "HOW update receipt is unavailable");
+            canonical.title = saved.title;
+          }
+          if (input.description !== undefined) {
+            if (typeof saved.description !== "string") this.auth.fail(502, "HOW update receipt is unavailable");
+            canonical.description = saved.description;
+          }
+          expected = canonical;
+        }
+      }
       catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
       const how = await this.workflowHow(context, id);
       if (!how || how.team.id !== context.team.team_id) this.auth.fail(409, "HOW update identity is unavailable");

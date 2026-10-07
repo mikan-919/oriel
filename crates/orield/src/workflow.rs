@@ -383,13 +383,23 @@ impl Session {
         body["lease_id"] = json!(self.lease.as_deref().context("missing workflow lease")?);
         let mut url = self.endpoint.clone();
         url.set_path(&format!("{}/{operation}", self.endpoint.path()));
+        // Provider actions perform several fenced reads and writes. Keep ownership
+        // live while awaiting them; the short discovery deadline is not a write deadline.
         let response = self
             .client
             .post(url)
+            .timeout(Duration::from_secs(90))
             .json(&body)
-            .send()
-            .await
-            .map_err(|_| anyhow!(Stop::Uncertain))?;
+            .send();
+        tokio::pin!(response);
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.tick().await;
+        let response = loop {
+            tokio::select! {
+                response = &mut response => break response.map_err(|_| anyhow!(Stop::Uncertain))?,
+                _ = interval.tick() => self.checked().await.map_err(|_| anyhow!(Stop::Uncertain))?,
+            }
+        };
         if response.status().is_server_error() {
             return Err(Stop::Uncertain.into());
         }
@@ -1661,6 +1671,84 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workflow_post_keeps_ownership_beyond_discovery_timeout() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_url = format!("ws://{}", control.local_addr().unwrap());
+        let started = std::time::Instant::now();
+        let renewed = Arc::new(AtomicU64::new(0));
+        let control_renewed = Arc::clone(&renewed);
+        let ownership = tokio::spawn(async move {
+            let (stream, _) = control.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let kind = request["type"].as_str().unwrap();
+                if kind == "heartbeat" {
+                    control_renewed.store(started.elapsed().as_secs(), Ordering::Relaxed);
+                }
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "type": if kind == "check" { "checked" } else { kind },
+                            "request_id": request["request_id"],
+                            "lease_id": "lease",
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let provider = tokio::spawn(async move {
+            let (mut stream, _) = http.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).await.unwrap() > 0);
+            tokio::time::sleep(Duration::from_secs(13)).await;
+            let live = started.elapsed().as_secs() - renewed.load(Ordering::Relaxed) < 8;
+            let status = if live { "200 OK" } else { "409 Conflict" };
+            let body = r#"{"updated":true}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).as_bytes()).await.unwrap();
+        });
+        let (socket, _) = connect_async(control_url).await.unwrap();
+        let mut session = Session {
+            client: Client::builder()
+                .timeout(Duration::from_secs(12))
+                .build()
+                .unwrap(),
+            endpoint,
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: Some("lease".into()),
+        };
+        assert_eq!(
+            session
+                .post("actions", json!({"action":"proposal"}))
+                .await
+                .unwrap(),
+            json!({"updated":true})
+        );
+        session.socket.close(None).await.unwrap();
+        provider.await.unwrap();
+        ownership.await.unwrap();
+    }
 
     #[tokio::test]
     async fn project_authority_is_bounded_by_the_git_project() {
