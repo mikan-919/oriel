@@ -1,0 +1,14 @@
+# Repository execution opt-in; human Linear Todo approval is still required.
+schemaVersion: 1
+execution:
+  backend: worktree
+  autonomous: true
+  # Workspace checks and existing Relay/Web CI, without deployment.
+  verification:
+    - ["cargo", "test", "--workspace"]
+    - ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+    - ["npm", "--prefix", "crates/oriel-relay", "ci"]
+    - ["npm", "--prefix", "crates/oriel-relay", "run", "build"]
+    - ["npm", "--prefix", "crates/oriel-relay", "test"]
+    - ["npm", "--prefix", "crates/oriel-web", "ci"]
+    - ["npm", "--prefix", "crates/oriel-web", "run", "build"]
