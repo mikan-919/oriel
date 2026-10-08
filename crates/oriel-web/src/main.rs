@@ -575,7 +575,7 @@ function renderProgressCards() {
         const stale = progressStream !== "live";
         const stage = progressStages[progress?.stage] || progress?.stage || "Stage unavailable";
         const state = progress ? `${progress.state[0].toUpperCase()}${progress.state.slice(1)}` : "Waiting for snapshot";
-        const detail = progress?.state === "offline" ? " — workflow control disconnected"
+        const detail = progress?.state === "offline" ? " — workflow runner not connected; run orield workflow on this device to resume approved work"
             : progress?.state === "idle" ? " — waiting for work"
             : progress ? ` — ${stage}` : "";
         const label = stale ? `Stale stream — ${progress ? `last reported ${state}${detail}; execution not confirmed` : "execution not confirmed"}`
@@ -966,7 +966,8 @@ async function refreshWorkflow() {
             blocked: "Workflow blocked.",
         };
         const progress = progressSnapshot.get(device.device_id);
-        const disconnected = progressStream !== "live" || !progress || progress.state === "offline";
+        const runnerDisconnected = progressStream === "live" && (!progress || progress.state === "offline");
+        const progressUnavailable = progressStream !== "live";
         for (const row of result.workflows) {
             const item = document.createElement("li");
             const title = document.createElement("p");
@@ -974,9 +975,13 @@ async function refreshWorkflow() {
             const phase = document.createElement("p");
             phase.textContent = `${phases[row.phase]}${row.blocked_reason ? ` ${row.blocked_reason}` : ""}`;
             item.append(title, phase);
-            if (disconnected && ["approved", "running"].includes(row.phase)) {
+            if (runnerDisconnected && ["approved", "running"].includes(row.phase)) {
                 const recovery = document.createElement("p");
-                recovery.textContent = "To resume, reconnect this device and run orield workflow. It will recheck the current approval before continuing the matching branch.";
+                recovery.textContent = "The workflow runner is not connected. Run orield workflow in this device's checkout to resume; it rechecks the current approval before continuing the matching branch.";
+                item.append(recovery);
+            } else if (progressUnavailable && ["approved", "running"].includes(row.phase)) {
+                const recovery = document.createElement("p");
+                recovery.textContent = "Live progress is unavailable, so this page cannot confirm whether the workflow runner is connected. The runner rechecks approval before continuing work.";
                 item.append(recovery);
             }
             appendDescription(item, "WHAT (GitHub issue description)", row.issue.body);
@@ -1020,7 +1025,10 @@ async function refreshWorkflow() {
         if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
         workflowSnapshot = null;
         repositoryIssues.replaceChildren();
-        repositoryStatus.textContent = `Could not load workflow: ${errorText(error)}`;
+        const message = errorText(error);
+        repositoryStatus.textContent = message.includes("provider state could not be confirmed")
+            ? `Could not confirm current provider state. This request did not authorize a workflow action. Retry later; reconnect only if Integrations reports an expired connection. ${message}`
+            : `Could not load workflow: ${message}`;
         render();
         throw error;
     }
@@ -1302,7 +1310,7 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                     </section>
                     <section id="repository-work" hidden="">
                         <h2>"Development workflow"</h2>
-                        <p>"GitHub Issue = WHAT → Linear = HOW → pull request = DO. Run orield workflow in the checkout to propose HOW in Triage. Review HOW in Linear and move it to Todo to approve execution. Review and merge the PR on GitHub; only a confirmed merge is reflected as Linear Done."</p>
+                        <p>"GitHub Issue = WHAT → Linear = HOW → pull request = DO. Run orield workflow in the checkout to propose HOW in Triage. The workflow runner is separate from terminal access, so a paired device can show its runner as disconnected until this command is running. Review HOW in Linear and move it to Todo to approve execution. Review and merge the PR on GitHub; only a confirmed merge is reflected as Linear Done."</p>
                         <p>"Code execution also requires an explicit .oriel.yaml opt-in and verification commands on the repository's default target branch. Formal GitHub Issue link attachments identify HOW; matching titles do not. This page never approves Todo or merges a PR."</p>
                         <p id="repository-details"></p>
                         <button id="refresh-repository" type="button">"Refresh workflow"</button>
