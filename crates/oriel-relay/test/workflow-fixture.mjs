@@ -12,7 +12,7 @@ export function workflowFixture() {
       { id: "progress", name: "In Progress", type: "started" }, { id: "review", name: "In Review", type: "started" },
       { id: "done", name: "Done", type: "completed" }, { id: "canceled", name: "Canceled", type: "canceled" },
     ], base_branch: "main", target_oid: "1".repeat(40), repository_node_id: "R_501", autonomous: true, verification: [["true"]],
-    config_source: undefined, configurations: new Map(), calls: [], grants: [], uncertainty: new Map(), failures: new Map(), allowFailureApprovalRestore: false, allowAutomaticTodo: true, holdReads: undefined,
+    config_source: undefined, configurations: new Map(), calls: [], grants: [], uncertainty: new Map(), failures: new Map(), allowFailureApprovalRestore: false, holdReads: undefined,
     issuePageSize: 100, attachmentPageSize: 100, comments: new Map(), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
     compare: undefined, sealSupported: true, trees: new Map(),
   });
@@ -105,7 +105,7 @@ export function workflowFixture() {
         if (!how) return Response.json({ errors: [{ message: "not found" }] });
         if (input.stateId) {
           const state = fixture.states.find(state => state.id === input.stateId);
-          if (state?.name === "Todo") assert.equal(fixture.allowFailureApprovalRestore || fixture.allowAutomaticTodo, true, "Todo may only be restored after an admitted failure or automatic repository execution");
+          if (state?.name === "Todo") assert.equal(fixture.allowFailureApprovalRestore, true, "Todo may only be restored after an admitted implementation fails");
           how.state = structuredClone(state);
         }
         if (input.title !== undefined) how.title = input.title;

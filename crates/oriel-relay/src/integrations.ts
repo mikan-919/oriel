@@ -299,7 +299,7 @@ export class Integrations {
               else if (exact("Triage", "triage")) row.phase = "triage";
               else if (exact("Todo", "unstarted") && !pr) row.phase = "approved";
               else if (row.canonical_oid && (exact("In Progress", "started") || how.state.type === "started" && /review/i.test(how.state.name) && states.filter(state => state.type === "started" && /review/i.test(state.name)).length === 1)) row.phase = pr?.state === "open" ? "review" : pr ? "blocked" : "running";
-              else { row.phase = "blocked"; row.blocked_reason = pr?.state === "closed" ? "PR closed without merge" : "Todo or a matching sealed In Progress branch is required"; }
+              else { row.phase = "blocked"; row.blocked_reason = pr?.state === "closed" ? "PR closed without merge" : "Human Todo or a matching sealed In Progress branch is required"; }
               const priorPrefix = `oriel/${how.identifier}-gh-${issue.number}-`;
               const prior = new Set([...refs.keys(), ...pulls.filter(candidate => candidate.head.repo?.id === repository.id && candidate.base.repo.id === repository.id &&
                 candidate.base.ref === snapshot.base_branch && !candidate.draft && candidate.body?.trim() === `Closes #${issue.number}`).map(candidate => candidate.head.ref)]
@@ -571,7 +571,7 @@ export class Integrations {
     const facts = await this.workflowFacts(context);
     const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
     if (!row || (row.linear?.id ?? null) !== grant.linear_id && !(grant.kind === "plan" && grant.linear_id === null && row.phase === "triage")) this.auth.fail(409, "Formal workflow identity changed");
-    const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && (row.phase === "triage" || row.phase === "approved" && facts.snapshot.configuration.autonomous) && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === grant.version;
+    const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === grant.version;
     if (!changed && !recoveredPlan && (row.version !== grant.version || row.branch !== grant.branch)) this.auth.fail(409, "Workflow approval content changed");
     if (phases && !phases.includes(row.phase)) this.auth.fail(409, row.blocked_reason ?? "Workflow native state no longer admits this operation");
     if (grant.execution && phases?.some(phase => ["approved", "running", "review"].includes(phase)) &&
@@ -657,13 +657,6 @@ export class Integrations {
     return matching[0];
   }
 
-  private async workflowAutoApprove(context: WorkflowContext, grant: WorkflowGrant, row: WorkflowRow, autonomous: boolean): Promise<LinearHow | null> {
-    if (!row.linear || !autonomous || row.phase === "approved") return row.linear;
-    if (row.phase !== "triage" || !row.branch) this.auth.fail(409, "Automatic approval requires a current, linked HOW in Triage");
-    const todo = this.workflowState(await this.workflowStates(context), "Todo", "unstarted");
-    return this.workflowUpdateHow(context, { ...grant, linear_id: row.linear.id, version: row.version, branch: row.branch }, { stateId: todo.id }, ["triage"]);
-  }
-
   private async workflowSourceChange(context: WorkflowContext, base: string, head: string, files: { filename: string }[]): Promise<boolean> {
     const source = (path: string) => !/(^|\/)(HANDOFF\.md|\.oriel\.yaml)$/.test(path) && !/\.md$/i.test(path);
     if (files.some(file => source(file.filename))) return true;
@@ -726,25 +719,18 @@ export class Integrations {
       let initial: { facts: WorkflowFacts; row: WorkflowRow };
       try { initial = await this.workflowCurrent(context, grant, ["needs-how", "triage"]); }
       catch (error) {
-        if (!(error instanceof Error) || !("status" in error) || error.status !== 409) throw error;
+        if (!(error instanceof Error) || !("status" in error) || error.status !== 409 || grant.linear_id === null) throw error;
         const facts = await this.workflowFacts(context);
         const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
-        if (!row || !(row.phase === "triage" || row.phase === "approved") || !row.linear) throw error;
-        const hash = await digest(["oriel/how/v1", facts.snapshot.repository_node_id, row.issue.node_id, context.team.team_id]);
-        const expectedId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
-        if (row.linear.id !== (grant.linear_id ?? expectedId) || row.phase === "triage" && (row.linear.title !== body.title || row.linear.description !== body.description)) throw error;
-        if (row.phase === "approved") return { linear: row.linear };
+        if (row?.phase !== "triage" || row.linear?.id !== grant.linear_id || row.linear.title !== body.title || row.linear.description !== body.description) throw error;
         if (row.how_feedback) {
           if (typeof body.summary !== "string") this.auth.fail(400, "A model reply is required for HOW feedback");
           await this.workflowComment(context, { ...grant, version: row.version, branch: row.branch }, "how-response", row.how_feedback.key, body.summary);
         }
-        return { linear: await this.workflowAutoApprove(context, grant, row, facts.snapshot.configuration.autonomous) };
+        return { linear: row.linear };
       }
       if (initial.row.linear) {
-        if (grant.linear_id === null) {
-          if (initial.row.phase === "triage" && (initial.row.linear.title !== body.title || initial.row.linear.description !== body.description)) this.auth.fail(409, "Recovered HOW differs from the admitted proposal");
-          return { linear: await this.workflowAutoApprove(context, grant, initial.row, initial.facts.snapshot.configuration.autonomous) };
-        }
+        if (grant.linear_id === null) return { linear: initial.row.linear };
         const feedback = initial.row.how_feedback;
         const reply = typeof body.summary === "string" ? body.summary : null;
         if (feedback && reply === null) this.auth.fail(400, "A model reply is required for HOW feedback");
@@ -753,10 +739,7 @@ export class Integrations {
           const version = await digest(["oriel/approval-fingerprint/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, initial.row.issue.title, initial.row.issue.body ?? "", linear.id, linear.title, linear.description ?? ""]);
           await this.workflowComment(context, { ...grant, linear_id: linear.id, version, branch: `oriel/${linear.identifier}-gh-${grant.issue_number}-${version}` }, "how-response", feedback.key, reply);
         }
-        const updated = await this.workflowFacts(context);
-        const row = updated.snapshot.workflows.find(candidate => candidate.issue.number === grant.issue_number);
-        if (!row || row.linear?.id !== linear.id) this.auth.fail(409, "HOW changed before automatic approval");
-        return { linear: await this.workflowAutoApprove(context, grant, row, updated.snapshot.configuration.autonomous) };
+        return { linear };
       }
       const hash = await digest(["oriel/how/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, context.team.team_id]);
       const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
@@ -784,11 +767,11 @@ export class Integrations {
       const current = await this.workflowFacts(context);
       const row = current.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
       if (row?.phase !== "triage" || row.linear?.id !== id || row.issue.title !== initial.row.issue.title || row.issue.body !== initial.row.issue.body) this.auth.fail(409, "HOW formal identity changed during proposal");
-      return { linear: await this.workflowAutoApprove(context, grant, row, current.snapshot.configuration.autonomous) };
+      return { linear: row.linear };
     }
     if (action === "begin") {
       let { facts, row } = await this.workflowCurrent(context, grant, ["approved", "running"]);
-      if (!row.branch || !row.linear || !facts.snapshot.configuration.autonomous) this.auth.fail(409, "Automatic execution configuration is required");
+      if (!row.branch || !row.linear || !facts.snapshot.configuration.autonomous) this.auth.fail(409, "Current approval and target opt-in are required");
       if (!row.canonical_oid) {
         // Both comparisons are one provider transaction; never degrade to sequential ref creation.
         await this.workflowCurrent(context, grant, ["approved"]);

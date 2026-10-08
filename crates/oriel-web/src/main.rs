@@ -460,7 +460,7 @@ function setProgressStream(state) {
     const message = {
         "signed-out": "Sign in to see live execution.",
         connecting: "Connecting to live execution… Execution is not yet confirmed.",
-        live: "Live execution connected. Workflow activity is read-only in this view.",
+        live: "Live execution connected. This is read-only; Todo approval and PR merge remain human decisions.",
         stale: "Live execution stream is stale or unavailable. Last reported activity is not confirmed; reconnecting while signed in.",
     }[state];
     if (progressStatus.textContent !== message) progressStatus.textContent = message;
@@ -994,8 +994,8 @@ async function refreshWorkflow() {
         const items = document.createDocumentFragment();
         const phases = {
             "needs-how": "Waiting for the daemon to propose HOW in Linear Triage.",
-            triage: result.configuration.autonomous ? "Preparing HOW for automatic execution." : "Review or edit HOW in Linear; automatic execution is disabled for this repository.",
-            approved: "Automatically admitted by repository configuration; waiting for the daemon to begin implementation.",
+            triage: "Review or edit HOW in Linear. Move it to Todo to approve execution.",
+            approved: "Human-approved; waiting for the daemon to begin implementation.",
             running: "In Progress. The daemon resumes only the matching approved branch.",
             review: "Review the PR on GitHub. Human merge is the final approval.",
             merged: "PR merged; waiting for the daemon to reflect Linear Done.",
@@ -1054,7 +1054,7 @@ async function refreshWorkflow() {
         const gate = configuration.error
             ? `Code execution blocked: ${configuration.error} Read-only HOW planning may still run.`
             : configuration.autonomous
-                ? `Code execution starts automatically after HOW preparation and uses ${configuration.verification.length} configured verification commands.`
+                ? `Code execution requires human Todo and ${configuration.verification.length} configured verification commands.`
                 : "Code execution blocked: the target branch has not opted in with autonomous: true.";
         repositoryStatus.textContent = `${result.workflows.length ? `${result.workflows.length} workflows.` : "No workflows yet. Create a GitHub WHAT below or open an issue on GitHub."} ${gate}`;
         render();
@@ -1354,8 +1354,8 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                     </section>
                     <section id="repository-work" hidden="">
                         <h2>"Development workflow"</h2>
-                        <p>"GitHub Issue = WHAT → Linear = HOW → pull request = DO. Run orield workflow in the checkout. With automatic execution enabled for the repository, Oriel prepares HOW and starts implementation without task-by-task approval. PR review and merge remain in GitHub."</p>
-                        <p>"Code execution requires .oriel.yaml to enable worktrees and verification commands on the repository's default target branch. Formal GitHub Issue link attachments identify HOW; matching titles do not. This page does not control the workflow."</p>
+                        <p>"GitHub Issue = WHAT → Linear = HOW → pull request = DO. Run orield workflow in the checkout to propose HOW in Triage. The workflow runner is separate from terminal access, so a paired device can show its runner as disconnected until this command is running. Review HOW in Linear and move it to Todo to approve execution. Review and merge the PR on GitHub; only a confirmed merge is reflected as Linear Done."</p>
+                        <p>"Code execution also requires an explicit .oriel.yaml opt-in and verification commands on the repository's default target branch. Formal GitHub Issue link attachments identify HOW; matching titles do not. This page never approves Todo or merges a PR."</p>
                         <p id="repository-details"></p>
                         <button id="refresh-repository" type="button">"Refresh workflow"</button>
                         <p id="repository-status" role="status"></p>
