@@ -129,6 +129,9 @@ struct AgentResult {
 enum Stop {
     Changed,
     Uncertain,
+    LeaseLost,
+    Interrupted,
+    Rejected,
     PullClosed,
     TargetChanged,
 }
@@ -137,6 +140,11 @@ impl fmt::Display for Stop {
         f.write_str(match self {
             Self::Changed => "WHAT/HOW content changed; approval revoked",
             Self::Uncertain => "live ownership or current provider facts could not be established",
+            Self::LeaseLost => {
+                "workflow lease is unavailable; local work is preserved for a fresh claim"
+            }
+            Self::Interrupted => "interrupted by Ctrl-C",
+            Self::Rejected => "Relay rejected the workflow request",
             Self::PullClosed => "pull request is no longer open; coding stopped",
             Self::TargetChanged => {
                 "immutable target/configuration advanced; work retained for fresh admission"
@@ -280,32 +288,91 @@ impl Session {
     }
     async fn exchange(&mut self, mut request: Value, expected: &str) -> Result<Value> {
         let id = random_hex::<16>()?;
+        let operation = request["type"].as_str().unwrap_or("control").to_owned();
+        // Admission rechecks provider facts, just like a long HTTP action.
+        // Keep the control connection alive while those reads are in flight.
+        let claiming = operation == "claim";
+        let wait = Duration::from_secs(if claiming { 90 } else { 8 });
         request["request_id"] = json!(id);
         let response = async {
             self.socket
                 .send(Message::Text(request.to_string().into()))
                 .await?;
-            while let Some(message) = self.socket.next().await {
-                match message? {
-                    Message::Text(text) => {
-                        let value: Value = serde_json::from_str(&text)?;
-                        ensure!(
-                            value["request_id"] == id && value["type"] == expected,
-                            "workflow ownership rejected or invalid response"
-                        );
-                        return Ok(value);
+            let mut heartbeat: Option<(String, tokio::time::Instant)> = None;
+            let mut reply = None;
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                let heartbeat_deadline = heartbeat
+                    .as_ref()
+                    .map(|(_, deadline)| *deadline)
+                    .unwrap_or_else(|| tokio::time::Instant::now() + wait);
+                tokio::select! {
+                    message = self.socket.next() => {
+                        match message.context("workflow ownership connection ended")?? {
+                            Message::Text(text) => {
+                                let value: Value = serde_json::from_str(&text)?;
+                                if value["request_id"] == id {
+                                    if value["type"] == "rejected" {
+                                        let reason = value["error"].as_str()
+                                            .filter(|message| !message.is_empty() && message.len() <= 1024 && !message.chars().any(char::is_control))
+                                            .unwrap_or("Workflow request rejected")
+                                            .to_owned();
+                                        return Err(anyhow!(Stop::Rejected).context(reason));
+                                    }
+                                    ensure!(value["type"] == expected, "invalid workflow {operation} response");
+                                    if heartbeat.is_none() {
+                                        return Ok(value);
+                                    }
+                                    // A heartbeat acknowledgement may follow the grant;
+                                    // consume it before starting another exchange.
+                                    reply = Some(value);
+                                } else if heartbeat.as_ref().is_some_and(|(id, _)| value["request_id"] == *id) {
+                                    ensure!(value["type"] == "heartbeat", "workflow admission heartbeat rejected");
+                                    heartbeat = None;
+                                    if let Some(value) = reply.take() {
+                                        return Ok(value);
+                                    }
+                                } else {
+                                    bail!("workflow {operation} received a response for another request");
+                                }
+                            }
+                            Message::Ping(bytes) => self.socket.send(Message::Pong(bytes)).await?,
+                            Message::Close(_) => bail!("workflow ownership connection closed during {operation}"),
+                            _ => bail!("invalid workflow ownership message"),
+                        }
                     }
-                    Message::Ping(bytes) => self.socket.send(Message::Pong(bytes)).await?,
-                    Message::Close(_) => bail!("workflow ownership connection closed"),
-                    _ => bail!("invalid workflow ownership message"),
+                    _ = interval.tick(), if claiming && reply.is_none() => {
+                        if heartbeat.is_none() {
+                            let id = random_hex::<16>()?;
+                            self.socket.send(Message::Text(json!({"type":"heartbeat", "request_id":id}).to_string().into())).await?;
+                            heartbeat = Some((id, tokio::time::Instant::now() + Duration::from_secs(8)));
+                        }
+                    }
+                    _ = tokio::time::sleep_until(heartbeat_deadline), if heartbeat.is_some() => {
+                        bail!("workflow admission heartbeat timed out after 8 seconds");
+                    }
+                    _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
                 }
             }
-            bail!("workflow ownership connection ended")
         };
-        tokio::time::timeout(Duration::from_secs(8), response)
+        tokio::time::timeout(wait, response)
             .await
-            .map_err(|_| anyhow!(Stop::Uncertain))?
-            .map_err(|_: anyhow::Error| anyhow!(Stop::Uncertain))
+            .map_err(|_| {
+                anyhow!(
+                    "workflow {operation} response timed out after {} seconds",
+                    wait.as_secs()
+                )
+                .context(Stop::Uncertain)
+            })?
+            .map_err(|error: anyhow::Error| {
+                if error.downcast_ref::<Stop>().is_some() {
+                    error
+                } else {
+                    error.context(Stop::Uncertain)
+                }
+            })
     }
     async fn progress(&mut self, stage: &'static str) -> Result<()> {
         let mut request = json!({"type":"progress", "stage":stage});
@@ -394,31 +461,43 @@ impl Session {
                     && message.len() <= 1024
                     && !message.chars().any(char::is_control)
             });
-        anyhow!(
+        let error = anyhow!(
             "workflow {operation} HTTP {}: {}",
             status.as_u16(),
             detail
                 .as_deref()
                 .unwrap_or("Relay error details unavailable")
-        )
+        );
+        if status == reqwest::StatusCode::CONFLICT
+            && detail.as_deref() == Some("Workflow lease is unavailable")
+        {
+            error.context(Stop::LeaseLost)
+        } else {
+            error
+        }
     }
     async fn guard(&mut self, guard: &Guard) -> Result<Snapshot> {
         self.checked().await?;
         let snapshot = if guard.code {
             // Never extend the uncertainty window of a source-writing child.
-            let response = self
-                .client
-                .get(self.endpoint.clone())
-                .send()
-                .await
-                .map_err(|_| {
+            let request = self.client.get(self.endpoint.clone());
+            let response = tokio::select! {
+                response = request.send() => response.map_err(|_| {
                     anyhow!("workflow discovery transport failed").context(Stop::Uncertain)
-                })?;
+                })?,
+                _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
+            };
             self.snapshot_body(response).await
         } else {
             self.snapshot().await
         }
-        .map_err(|error| error.context(Stop::Uncertain))?;
+        .map_err(|error| {
+            if error.downcast_ref::<Stop>().is_some() {
+                error
+            } else {
+                error.context(Stop::Uncertain)
+            }
+        })?;
         guard.validate(&snapshot)?;
         Ok(snapshot)
     }
@@ -435,11 +514,12 @@ impl Session {
                 response = &mut response => return response.map_err(|_| anyhow!(Stop::Uncertain)),
                 _ = interval.tick() => {
                     if self.lease.is_some() {
-                        self.checked().await.map_err(|_| anyhow!(Stop::Uncertain))?;
+                        self.checked().await?;
                     } else {
                         self.exchange(json!({"type":"heartbeat"}), "heartbeat").await?;
                     }
                 },
+                _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
             }
         }
     }
@@ -481,7 +561,7 @@ impl Session {
                 _ = interval.tick() => {
                     if let Err(error) = self.guard(guard).await { break (Err(error), false); }
                 }
-                _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Uncertain)), false),
+                _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
             }
         };
         // Kill descendants even on successful agent exit: none may survive into
@@ -1107,7 +1187,7 @@ async fn agent(
         tokio::select! {
             status = &mut completion => break (status.map_err(|_| anyhow!("agent completion uncertain")), true),
             _ = interval.tick() => if let Err(error) = session.guard(guard).await { break (Err(error), false); },
-            _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Uncertain)), false),
+            _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
         }
     };
     git::stop_group(id)?;
@@ -1304,7 +1384,7 @@ async fn push(
             tokio::select! {
                 output = &mut completion => break (output.map_err(|_| anyhow!("CAS push send uncertain")), true),
                 _ = interval.tick() => if let Err(error) = session.guard(guard).await { break (Err(error), false); },
-                _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Uncertain)), false),
+                _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
             }
         };
         git::stop_group(id)?;
@@ -1746,8 +1826,11 @@ async fn scan(
             continue;
         }
         if let Err(error) = session.claim(row, kind).await {
-            println!("  claim refused: {error}");
-            continue;
+            // A timed-out claim can still be granted by Relay. Reconnecting
+            // discards that session instead of mixing its late reply with
+            // another request or retaining an unconfirmed lease.
+            println!("  claim failed: {error:#}");
+            return Err(error);
         }
         session
             .progress(if kind == "reconcile" {
@@ -1777,7 +1860,10 @@ async fn scan(
         };
         if let Err(error) = result {
             println!("  stopped: {error:#}");
-            if matches!(error.downcast_ref::<Stop>(), Some(Stop::Uncertain)) {
+            if matches!(
+                error.downcast_ref::<Stop>(),
+                Some(Stop::LeaseLost | Stop::Interrupted | Stop::Rejected | Stop::Uncertain)
+            ) {
                 return Err(error);
             }
             match error.downcast_ref::<Stop>() {
@@ -1819,25 +1905,51 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         "Explicit workflow start enables read-only HOW planning. Code still requires human Todo and immutable target opt-in."
     );
     loop {
-        let connection = Session::connect(
-            origin,
-            identity,
-            Repository {
-                owner: repository.owner.clone(),
-                name: repository.name.clone(),
-            },
-        )
-        .await;
+        let connection = tokio::select! {
+            connection = Session::connect(
+                origin,
+                identity,
+                Repository {
+                    owner: repository.owner.clone(),
+                    name: repository.name.clone(),
+                },
+            ) => connection,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
         match connection {
             Ok(mut session) => loop {
                 let result = scan(&mut session, &root, &mut suppressed).await;
                 if once {
-                    return result;
+                    return match result {
+                        Err(error)
+                            if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) =>
+                        {
+                            Ok(())
+                        }
+                        result => result,
+                    };
                 }
                 if let Err(error) = result {
-                    println!(
-                        "Workflow disconnected/uncertain: {error:#}; local work is preserved."
-                    );
+                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) {
+                        let _ = session.socket.close(None).await;
+                        return Ok(());
+                    }
+                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::Rejected)) {
+                        println!(
+                            "Workflow request rejected: {error:#}; reconnecting with local work preserved."
+                        );
+                        let _ = session.socket.close(None).await;
+                        break;
+                    }
+                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
+                        println!(
+                            "Workflow lease lost: {error:#}; reconnecting with local work preserved."
+                        );
+                    } else {
+                        println!(
+                            "Workflow disconnected/uncertain: {error:#}; local work is preserved."
+                        );
+                    }
                     break;
                 }
                 tokio::select! {
@@ -1922,6 +2034,91 @@ mod tests {
                 PathBuf::from("/nix/store/node/bin")
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn slow_claim_keeps_ownership_and_drains_heartbeat_before_next_request() {
+        use tokio::net::TcpListener;
+
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_url = format!("ws://{}", control.local_addr().unwrap());
+        let ownership = tokio::spawn(async move {
+            let (stream, _) = control.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("missing claim");
+            };
+            let claim: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(claim["type"], "claim");
+            // Provider admission exceeds the old eight-second control timeout.
+            let admission = tokio::time::sleep(Duration::from_secs(9));
+            tokio::pin!(admission);
+            let mut heartbeats = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = &mut admission => break,
+                    message = socket.next() => {
+                        let Message::Text(text) = message.unwrap().unwrap() else {
+                            panic!("missing admission heartbeat");
+                        };
+                        let request: Value = serde_json::from_str(&text).unwrap();
+                        assert_eq!(request["type"], "heartbeat");
+                        heartbeats.push(request);
+                    }
+                }
+            }
+            assert!(!heartbeats.is_empty(), "admission must keep ownership live");
+            socket
+                .send(Message::Text(
+                    json!({
+                        "type":"granted", "request_id":claim["request_id"], "lease_id":"lease"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            // Grant arrives before the outstanding heartbeat acknowledgement.
+            for heartbeat in heartbeats {
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "type":"heartbeat", "request_id":heartbeat["request_id"]
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                socket.send(Message::Text(json!({
+                    "type": if request["type"] == "check" { "checked" } else { "heartbeat" },
+                    "request_id":request["request_id"], "lease_id":"lease"
+                }).to_string().into())).await.unwrap();
+            }
+        });
+        let (socket, _) = connect_async(control_url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://localhost/").unwrap(),
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: None,
+        };
+        let row = serde_json::from_value(json!({
+            "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
+            "what_comments":[],"how_comments":[],"version":"approved","phase":"approved"
+        })).unwrap();
+        session.claim(&row, "implement").await.unwrap();
+        assert_eq!(session.lease.as_deref(), Some("lease"));
+        session.checked().await.unwrap();
+        session.socket.close(None).await.unwrap();
+        ownership.await.unwrap();
     }
 
     #[tokio::test]
