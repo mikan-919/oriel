@@ -1564,7 +1564,7 @@ async fn plan(session: &mut Session, root: &Path, snapshot: &Snapshot, row: &Row
         )
         .await?;
     if let Some(url) = proposal["linear"]["url"].as_str() {
-        println!("  HOW: {url} — Triage; human must move to Todo");
+        println!("  HOW: {url} — Triage; automatic execution will start when enabled");
     }
     let repository = repository_root(root, snapshot.repository_id).await?;
     // Only this clean, immutable, remote-restorable planning worktree is removed.
@@ -1617,7 +1617,7 @@ async fn scan(
         }
         let kind = match row.phase.as_str() {
             "needs-how" => "plan",
-            "triage" if row.how_feedback.is_some() => "plan",
+            "triage" if row.how_feedback.is_some() || snapshot.configuration.autonomous => "plan",
             "approved" | "running" => "implement",
             "review" if row.feedback.is_some() => "respond",
             "merged" => "reconcile",
@@ -1711,7 +1711,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
     let root = git::state_root()?;
     let mut suppressed = HashSet::new();
     println!(
-        "Explicit workflow start enables read-only HOW planning. Code still requires human Todo and immutable target opt-in."
+        "Explicit workflow start enables HOW planning and execution when the target repository opts in."
     );
     loop {
         let connection = Session::connect(

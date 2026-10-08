@@ -57,7 +57,7 @@ test("discovery failures identify the provider without exposing upstream bodies 
   } finally { await s.close(); }
 });
 
-test("HOW planning waits for native Triage and resumes when the team enables it", async () => {
+test("HOW planning waits for native Triage and then starts automatically when the team enables it", async () => {
   const s = await setup();
   try {
     const triage = s.fixture.states.shift();
@@ -67,10 +67,26 @@ test("HOW planning waits for native Triage and resumes when the team enables it"
     assert.deepEqual(s.fixture.linears, []);
     s.fixture.states.unshift(triage);
     assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "needs-how");
-    const proposal = await s.action(await s.claim("plan"), "proposal", { title: "HOW", description: "Scope for human review." });
+    const planning = await s.claim("plan");
+    const proposal = await s.action(planning, "proposal", { title: "HOW", description: "Scope for automatic execution." });
     assert.equal(proposal.status, 200);
-    assert.equal(proposal.data.linear.state.id, triage.id);
-    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "triage");
+    assert.equal(proposal.data.linear.state.name, "Todo");
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "approved");
+    await s.message({ type: "release", lease_id: planning });
+    const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    assert.equal(s.fixture.linears[0].state.name, "In Progress");
+  } finally { await s.close(); }
+});
+
+test("automatic Todo transition stays disabled without target repository opt-in", async () => {
+  const s = await setup();
+  try {
+    s.fixture.config_source = null;
+    const proposal = await s.action(await s.claim("plan"), "proposal", { title: "HOW", description: "Read-only planning remains available." });
+    assert.equal(proposal.status, 200);
+    assert.equal(proposal.data.linear.state.name, "Triage");
+    assert.equal((await s.snapshot()).workflows[0].phase, "triage");
   } finally { await s.close(); }
 });
 
@@ -118,12 +134,12 @@ test("native missing-HOW errors permit creation but authorization and mixed fail
     s.fixture.missingHowErrors = [missing];
     const proposal = await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation." });
     assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
-    assert.equal(proposal.data.linear.state.type, "triage");
+    assert.equal(proposal.data.linear.state.type, "unstarted");
     assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).linear.id, proposal.data.linear.id);
   } finally { await s.close(); }
 });
 
-test("WHAT browser creation and deterministic HOW recover unknown sends without granting Todo", { timeout: 60000 }, async () => {
+test("WHAT browser creation and deterministic HOW recover unknown sends with automatic execution", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
     const request = { title: "Browser WHAT", body: "Describe the actual need", request_id: randomUUID() };
@@ -141,7 +157,7 @@ test("WHAT browser creation and deterministic HOW recover unknown sends without 
     s.fixture.uncertainty.set("how-create", true); s.fixture.uncertainty.set("how-link", true);
     const proposal = await s.action(lease, "proposal", { title: "HOW plan", description: "Implement source and run verification." });
     assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
-    assert.equal(proposal.data.linear.state.name, "Triage");
+    assert.equal(proposal.data.linear.state.name, "Todo");
     assert.equal(s.fixture.linears.length, 1);
     s.fixture.linears[0].description = "Human refinement remains authoritative";
     const retry = await s.action(lease, "proposal", { title: "HOW plan", description: "Implement source and run verification." });
@@ -149,11 +165,11 @@ test("WHAT browser creation and deterministic HOW recover unknown sends without 
     assert.equal(retry.data.linear.description, "Human refinement remains authoritative");
     assert.equal(s.fixture.linears[0].attachments.length, 1);
     assert.equal((await s.action(lease, "begin")).status, 403);
-    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "triage");
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "approved");
   } finally { await s.close(); }
 });
 
-test("native Markdown formatting is acknowledged once without granting Todo", async () => {
+test("native Markdown formatting is acknowledged once before automatic execution", async () => {
   const s = await setup();
   try {
     const how = s.fixture.addHow("Triage");
@@ -166,7 +182,8 @@ test("native Markdown formatting is acknowledged once without granting Todo", as
     assert.equal(proposal.data.linear.description, "Questions:\n\n1. Keep disconnected devices visible?");
     const row = (await s.snapshot()).workflows.find(row => row.issue.number === 42);
     assert.equal(row.how_feedback, null, "The processed request must not retrigger another model run");
-    assert.equal(row.phase, "triage");
+    assert.equal(row.phase, "approved");
+    assert.equal(row.linear.state.name, "Todo");
   } finally { await s.close(); }
 });
 
@@ -215,7 +232,7 @@ test("HOW update receipts do not consume unanswered questions and reply retries 
     const retried = await s.action(lease, "proposal", { ...draft, summary: "A late retry must not replace the original answer." });
     assert.equal(retried.status, 200);
     assert.deepEqual(how.comments, [request, receipt, response]);
-    assert.equal(how.state.name, "Triage");
+    assert.equal(how.state.name, "Todo");
     assert.equal((await s.action(lease, "begin")).status, 403);
   } finally { await s.close(); }
 });
