@@ -353,11 +353,9 @@ impl Session {
         self.snapshot_body(response).await
     }
     async fn snapshot_body(&self, response: reqwest::Response) -> Result<Snapshot> {
-        ensure!(
-            response.status().is_success(),
-            "workflow discovery HTTP {}; connect/select GitHub repository and Linear team in Web",
-            response.status().as_u16()
-        );
+        if !response.status().is_success() {
+            return Err(Self::http_failure(response, "discovery").await);
+        }
         let snapshot: Snapshot = response
             .json()
             .await
@@ -376,6 +374,34 @@ impl Session {
         );
         Ok(snapshot)
     }
+    async fn http_failure(mut response: reqwest::Response, operation: &str) -> anyhow::Error {
+        let status = response.status();
+        // Only Relay's bounded JSON error is diagnostic; never log raw bodies
+        // (Cloudflare HTML, provider payloads, or successful credential replies).
+        let mut body = Vec::new();
+        while let Ok(Some(chunk)) = response.chunk().await {
+            if body.len() + chunk.len() > 4096 {
+                body.clear();
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let detail = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+            .filter(|message| {
+                !message.is_empty()
+                    && message.len() <= 1024
+                    && !message.chars().any(char::is_control)
+            });
+        anyhow!(
+            "workflow {operation} HTTP {}: {}",
+            status.as_u16(),
+            detail
+                .as_deref()
+                .unwrap_or("Relay error details unavailable")
+        )
+    }
     async fn guard(&mut self, guard: &Guard) -> Result<Snapshot> {
         self.checked().await?;
         let snapshot = if guard.code {
@@ -385,12 +411,14 @@ impl Session {
                 .get(self.endpoint.clone())
                 .send()
                 .await
-                .map_err(|_| anyhow!(Stop::Uncertain))?;
+                .map_err(|_| {
+                    anyhow!("workflow discovery transport failed").context(Stop::Uncertain)
+                })?;
             self.snapshot_body(response).await
         } else {
             self.snapshot().await
         }
-        .map_err(|_| anyhow!(Stop::Uncertain))?;
+        .map_err(|error| error.context(Stop::Uncertain))?;
         guard.validate(&snapshot)?;
         Ok(snapshot)
     }
@@ -422,14 +450,15 @@ impl Session {
         url.set_path(&format!("{}/{operation}", self.endpoint.path()));
         let request = self.client.post(url).json(&body);
         let response = self.owned_response(request).await?;
-        if response.status().is_server_error() {
-            return Err(Stop::Uncertain.into());
+        if !response.status().is_success() {
+            let uncertain = response.status().is_server_error();
+            let error = Self::http_failure(response, operation).await;
+            return Err(if uncertain {
+                error.context(Stop::Uncertain)
+            } else {
+                error
+            });
         }
-        ensure!(
-            response.status().is_success(),
-            "workflow {operation} refused: HTTP {} (provider details withheld)",
-            response.status().as_u16()
-        );
         response.json().await.map_err(|_| anyhow!(Stop::Uncertain))
     }
     async fn action(&mut self, action: &str, mut body: Value) -> Result<Value> {
@@ -1642,7 +1671,7 @@ async fn scan(
             _ => unreachable!(),
         };
         if let Err(error) = result {
-            println!("  stopped: {error}");
+            println!("  stopped: {error:#}");
             if matches!(error.downcast_ref::<Stop>(), Some(Stop::Uncertain)) {
                 return Err(error);
             }
@@ -1704,7 +1733,9 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
                     return result;
                 }
                 if let Err(error) = result {
-                    println!("Workflow disconnected/uncertain: {error}; local work is preserved.");
+                    println!(
+                        "Workflow disconnected/uncertain: {error:#}; local work is preserved."
+                    );
                     break;
                 }
                 tokio::select! {
@@ -1729,6 +1760,100 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workflow_failures_preserve_relay_reason_and_stop_authority() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_url = format!("ws://{}", control.local_addr().unwrap());
+        let ownership = tokio::spawn(async move {
+            let (stream, _) = control.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                socket.send(Message::Text(json!({
+                    "type": if request["type"] == "check" { "checked" } else { "heartbeat" },
+                    "request_id": request["request_id"], "lease_id": "lease"
+                }).to_string().into())).await.unwrap();
+            }
+        });
+        let provider = tokio::spawn(async move {
+            let reason = r#"{"error":"Linear workflow request failed (http_503); provider state could not be confirmed"}"#;
+            for body in [
+                reason.to_owned(),
+                reason.to_owned(),
+                reason.to_owned(),
+                "<html>private-upstream-payload</html>".to_owned(),
+                json!({"error": "private-upstream-payload".repeat(300)}).to_string(),
+                json!({"error": "forged\nlog-line"}).to_string(),
+            ] {
+                let (mut stream, _) = http.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                assert!(stream.read(&mut buffer).await.unwrap() > 0);
+                stream.write_all(format!(
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        let (socket, _) = connect_async(control_url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint,
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: Some("lease".into()),
+        };
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "repository":{"owner":"octocat","name":"connected"},
+            "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+            "target_oid":"1111111111111111111111111111111111111111",
+            "configuration":{"autonomous":true,"verification":[["cargo","check"]],"error":null},
+            "workflows":[{
+                "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
+                "what_comments":[],"how_comments":[],"version":"approved","phase":"running"
+            }]
+        })).unwrap();
+        let discovery = session.snapshot().await.err().unwrap();
+        assert!(format!("{discovery:#}").contains("http_503"));
+        let guarded = session
+            .guard(&Guard::new(&snapshot, &snapshot.workflows[0], true))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            guarded.downcast_ref::<Stop>(),
+            Some(Stop::Uncertain)
+        ));
+        assert!(format!("{guarded:#}").contains("http_503"));
+        let publication = session
+            .post("actions", json!({"action":"publish"}))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(
+            publication.downcast_ref::<Stop>(),
+            Some(Stop::Uncertain)
+        ));
+        assert!(format!("{publication:#}").contains("http_503"));
+        for _ in 0..3 {
+            let error = session.snapshot().await.err().unwrap();
+            let diagnostic = format!("{error:#}");
+            assert!(diagnostic.contains("502"));
+            assert!(!diagnostic.contains("private-upstream-payload"));
+            assert!(!diagnostic.contains("forged"));
+        }
+        session.socket.close(None).await.unwrap();
+        provider.await.unwrap();
+        ownership.await.unwrap();
+    }
 
     #[tokio::test]
     async fn workflow_post_keeps_ownership_beyond_discovery_timeout() {

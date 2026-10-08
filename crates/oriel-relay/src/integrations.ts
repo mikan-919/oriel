@@ -137,7 +137,7 @@ export class Integrations {
     }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "manual" });
     context.check();
     if (missing && response.status === 404) return null;
-    if (!response.ok) this.auth.fail(502, "GitHub workflow operation could not be confirmed");
+    if (!response.ok) this.auth.fail(502, `GitHub workflow ${method} failed (HTTP ${response.status}); provider state could not be confirmed`);
     const result = await response.json() as T;
     context.check();
     return result;
@@ -155,9 +155,17 @@ export class Integrations {
 
   private async workflowLinear<T>(context: WorkflowContext, query: string, variables: Record<string, unknown> = {}): Promise<T> {
     context.check();
-    const result = await this.linear<T>(context.linear, query, variables);
-    context.check();
-    return result;
+    try {
+      const result = await this.linear<T>(context.linear, query, variables);
+      context.check();
+      return result;
+    } catch (error) {
+      context.check();
+      if (error instanceof Error && ("status" in error || ("missingIssue" in error && error.missingIssue === true))) throw error;
+      const code = error instanceof Error && "providerCode" in error && typeof error.providerCode === "string" &&
+        /^(?:http_[0-9]{3}|graphql_error)$/.test(error.providerCode) ? error.providerCode : "transport_or_response_error";
+      this.auth.fail(502, `Linear workflow request failed (${code}); provider state could not be confirmed`);
+    }
   }
 
   private async workflowHow(context: WorkflowContext, id: string): Promise<WorkflowHow | null> {

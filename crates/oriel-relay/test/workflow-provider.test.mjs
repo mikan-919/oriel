@@ -38,6 +38,25 @@ async function setup() {
   return { fixture, worker, owner, daemon, socket, message, snapshot, claim, action, close };
 }
 
+test("discovery failures identify the provider without exposing upstream bodies or granting work", async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow("Todo");
+    for (const [operation, provider] of [["pr-comments", "GitHub"], ["states", "Linear"]]) {
+      s.fixture.failures.set(operation, 503);
+      const failed = await s.daemon.api(`/api/workflows/${device}`, undefined, hostHeaders);
+      assert.equal(failed.status, 502);
+      assert.ok(failed.data.error.includes(provider), JSON.stringify(failed.data));
+      assert.ok(failed.data.error.includes("503"), JSON.stringify(failed.data));
+      assert.ok(!JSON.stringify(failed.data).includes("private-provider-diagnostic"));
+      const rejected = await s.message({ type: "claim", kind: "implement", issue_number: 42, version: "unconfirmed", branch: "oriel/unconfirmed" });
+      assert.equal(rejected.type, "rejected");
+      s.fixture.failures.delete(operation);
+    }
+    assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "approved");
+  } finally { await s.close(); }
+});
+
 test("HOW planning waits for native Triage and resumes when the team enables it", async () => {
   const s = await setup();
   try {

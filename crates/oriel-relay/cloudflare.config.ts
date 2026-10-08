@@ -128,6 +128,10 @@ import {
 // Provider action/credential POSTs and read-only discovery have bounded 90s deadlines
 // with live socket renewal every 5s. Source-writing child discovery guards retain
 // their strict 12s deadline; progress reporting never widens code authority.
+// Discovery and provider-action failures retain Relay's bounded JSON error through
+// host uncertainty handling: provider HTTP/GraphQL codes remain visible, while raw
+// upstream bodies and tokens are never printed. A 502 does not imply OAuth expiry
+// or require reconnecting; work still stops until current facts can be established.
 // Loss/uncertainty stops children before new writes. Approval edits return HOW to
 // Triage and require human reapproval; ambiguous prior seals need manual resolution.
 // Private worktrees under XDG_STATE_HOME (or ~/.local/state/oriel) retain dirty or
