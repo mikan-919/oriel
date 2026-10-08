@@ -965,6 +965,8 @@ async function refreshWorkflow() {
             closed: "Closed without a confirmed managed merge; no autonomous execution.",
             blocked: "Workflow blocked.",
         };
+        const progress = progressSnapshot.get(device.device_id);
+        const disconnected = progressStream !== "live" || !progress || progress.state === "offline";
         for (const row of result.workflows) {
             const item = document.createElement("li");
             const title = document.createElement("p");
@@ -972,6 +974,11 @@ async function refreshWorkflow() {
             const phase = document.createElement("p");
             phase.textContent = `${phases[row.phase]}${row.blocked_reason ? ` ${row.blocked_reason}` : ""}`;
             item.append(title, phase);
+            if (disconnected && ["approved", "running"].includes(row.phase)) {
+                const recovery = document.createElement("p");
+                recovery.textContent = "To resume, reconnect this device and run orield workflow. It will recheck the current approval before continuing the matching branch.";
+                item.append(recovery);
+            }
             appendDescription(item, "WHAT (GitHub issue description)", row.issue.body);
             if (row.linear) {
                 const how = document.createElement("p");
