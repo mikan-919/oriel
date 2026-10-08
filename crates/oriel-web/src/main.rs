@@ -189,6 +189,16 @@ const providerControls = Object.fromEntries(providers.map((provider) => [provide
 }]));
 let integrations = null;
 let accountEpoch = 0;
+let deviceTimer;
+let deviceRefresh;
+const terminalLabels = {online: "使用可能", grace: "再接続中", offline: "使用不可", unknown: "状態確認中"};
+function scheduleDevices() {
+    clearTimeout(deviceTimer);
+    if (user) deviceTimer = setTimeout(async () => {
+        try { await refreshDevices(); } catch { /* refreshDevices displays the failure. */ }
+        scheduleDevices();
+    }, 5000);
+}
 let integrationsRequest = 0;
 let issuesRequest = 0;
 let repositoryRequest = 0;
@@ -235,6 +245,7 @@ function render() {
     anonymousActions.hidden = !!user;
     sessionActions.hidden = !user;
     for (const button of dashboard.querySelectorAll("button")) button.disabled = busy;
+    for (const row of deviceRows.values()) row.open.disabled = busy || row.device.terminal_status !== "online";
     approvePair.disabled = busy || !user || !pairInfo || pairClaimed;
     pairSection.hidden = !pairing.token && !pairing.invalid && !pairInfo;
     if (pairing.invalid) {
@@ -304,6 +315,8 @@ function setUser(next) {
         disconnect();
         clearTimeout(pairTimer);
         accountEpoch++;
+        clearTimeout(deviceTimer);
+        deviceRefresh = null;
         stopProgress();
         progressSnapshot.clear();
         deviceRows.clear();
@@ -332,6 +345,7 @@ function setUser(next) {
     user = next;
     render();
     if (user) connectProgress();
+    scheduleDevices();
 }
 
 async function api(path, body) {
@@ -639,8 +653,10 @@ function createDeviceRow(device) {
     updated.id = `execution-updated-${device.device_id}`;
     updatedLine.append("Updated: ", updated);
     card.append(state, what, how, progressRepository, updatedLine);
-    item.append(label, repository, open, work, card);
-    const row = {device, item, label, repository, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
+    const availability = document.createElement("p");
+    availability.setAttribute("role", "status");
+    item.append(label, repository, availability, open, work, card);
+    const row = {device, item, label, repository, availability, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
     open.addEventListener("click", () => perform(() => openTerminal(row.device)));
     work.addEventListener("click", () => perform(async () => {
         repositoryDeviceId = row.device.device_id;
@@ -649,7 +665,26 @@ function createDeviceRow(device) {
     return row;
 }
 
-async function refreshDevices() {
+function refreshDevices() {
+    if (!user) return Promise.resolve();
+    if (deviceRefresh) return deviceRefresh;
+    const epoch = accountEpoch;
+    const pending = updateDevices().catch(error => {
+        if (currentAccount(epoch)) {
+            deviceSummary.textContent = "状態確認失敗: " + errorText(error);
+            for (const row of deviceRows.values()) {
+                row.device.terminal_status = "unknown";
+                row.availability.textContent = "状態確認失敗";
+                row.open.disabled = true;
+            }
+        }
+        throw error;
+    }).finally(() => { if (deviceRefresh === pending) deviceRefresh = null; });
+    deviceRefresh = pending;
+    return pending;
+}
+
+async function updateDevices() {
     if (!user) return;
     const epoch = accountEpoch;
     const result = await api("/api/devices");
@@ -688,14 +723,17 @@ async function refreshDevices() {
         row.repository.textContent = device.repository
             ? `Last reported repository: ${device.repository.owner}/${device.repository.name}`
             : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
-        row.open.disabled = busy;
+        row.availability.textContent = terminalLabels[device.terminal_status] || terminalLabels.unknown;
+        row.open.disabled = busy || device.terminal_status !== "online";
         row.work.disabled = busy;
     }
     renderProgressCards();
     if (pairClaimed && pairInfo && devices.some((device) => device.device_id === pairInfo.device_id)) {
         pairing.token = null;
         clearTimeout(pairTimer);
-        pairStatus.textContent = "Device paired after local approval. You can now open its terminal.";
+        pairStatus.textContent = "Device paired after local approval. " +
+            (devices.find(device => device.device_id === pairInfo.device_id)?.terminal_status === "online"
+                ? "You can now open its terminal." : "Waiting for the terminal host to become available.");
     }
 }
 
@@ -1062,6 +1100,11 @@ function sendResize() {
 }
 
 async function openTerminal(device) {
+    const epoch = accountEpoch;
+    await refreshDevices();
+    if (!currentAccount(epoch)) return;
+    device = devices.find(current => current.device_id === device.device_id);
+    if (!device || device.terminal_status !== "online") throw new Error("Terminal unavailable: " + (terminalLabels[device?.terminal_status] || terminalLabels.unknown));
     const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
     if (location.protocol !== "https:" && !(location.protocol === "http:" && loopback)) {
         throw new Error("Terminal connections require HTTPS (or loopback HTTP).");
@@ -1130,7 +1173,7 @@ async function openTerminal(device) {
         disconnect();
         status.textContent = failed
             ? "Connection failed. The device may be offline, your session may have expired, or access was rejected."
-            : `Disconnected (code ${event.code}). Open the device again to reconnect.`;
+            : `Disconnected (${event.reason || event.code}). Open the device again to reconnect.`;
         const ownerId = user?.id;
         try {
             const result = await api("/api/session");
@@ -1306,6 +1349,7 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                         <h2>"Your devices"</h2>
                         <p id="device-summary">"Sign in to see your devices."</p>
                         <p id="workflow-progress-status" role="status" aria-live="polite" aria-atomic="true">"Sign in to see live execution."</p>
+                        <p>"Disconnected input is discarded. Output replay and terminal restoration after daemon restart are not guaranteed. Reopen the terminal after the host becomes available."</p>
                         <ul id="devices"></ul>
                     </section>
                     <section id="repository-work" hidden="">

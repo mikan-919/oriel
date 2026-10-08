@@ -81,7 +81,16 @@ test("Passkeys, local pairing confirmation and ownership protect opaque terminal
 
     const host = await daemon.upgrade("host", { ...hostHeaders, Cookie: "" });
     assert.equal(host.status, 101);
+    host.webSocket.addEventListener("message", event => {
+      if (typeof event.data === "string" && event.data.startsWith("\u001eoriel-heartbeat:")) {
+        host.webSocket.send(event.data.replace("oriel-heartbeat:", "oriel-heartbeat-ack:"));
+      }
+    });
     host.webSocket.accept();
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if ((await owner.api("/api/devices")).data.devices[0].terminal_status === "online") break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     const terminal = await owner.upgrade("client");
     assert.equal(terminal.status, 101);
     assert.equal(terminal.headers.get("Sec-WebSocket-Protocol"), "oriel-client");
@@ -452,7 +461,7 @@ test("Only the paired host reports normalized repository metadata; existing devi
     const route = `/api/integrations/${device}/repository`;
     const repository = { owner: "octocat", name: "working" };
     const devices = () => owner.api("/api/devices");
-    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null }]);
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline" }]);
     assert.equal((await owner.api(route, { repository })).status, 401);
     assert.equal((await stranger.api(route, { repository })).status, 401);
     assert.equal((await stranger.api(route, { repository }, { Authorization: `Bearer ${"e".repeat(64)}` })).status, 403);
@@ -474,7 +483,7 @@ test("Only the paired host reports normalized repository metadata; existing devi
     await storage.exec("INSERT INTO devices SELECT device_id, name, user_id, host_hash FROM current_devices");
     await storage.exec("DROP TABLE current_devices");
     await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
-    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null }]);
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline" }]);
     assert.equal((await daemon.api(route, { repository }, hostHeaders)).status, 200);
     assert.deepEqual((await devices()).data.devices[0].repository, repository);
   } finally { await worker.dispose(); }
@@ -649,5 +658,53 @@ test("Linked Linear provider failures are sanitized and pagination cannot cycle 
       return Response.json(data);
     };
     assert.equal((await owner.api(route)).status, 502);
+  } finally { await worker.dispose(); }
+});
+
+test("host disconnect stays listed and terminal reopens after reconnect without pairing", { timeout: 30000 }, async () => {
+  const worker = await runtime();
+  try {
+    const { owner, daemon } = await pair(worker);
+    const openHost = async () => {
+      const response = await daemon.upgrade("host", { ...hostHeaders, Cookie: "" });
+      assert.equal(response.status, 101);
+      const socket = response.webSocket;
+      socket.addEventListener("message", event => {
+        if (typeof event.data === "string" && event.data.startsWith("\u001eoriel-heartbeat:")) {
+          socket.send(event.data.replace("oriel-heartbeat:", "oriel-heartbeat-ack:"));
+        }
+      });
+      socket.accept();
+      return socket;
+    };
+    const waitFor = async status => {
+      for (let attempt = 0; attempt < 140; attempt++) {
+        const { data } = await owner.api("/api/devices");
+        const row = data.devices.find(entry => entry.device_id === device);
+        assert.ok(row, "disconnected devices remain registered");
+        if (row.terminal_status === status) return row;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.fail(`device did not reach ${status}`);
+    };
+
+    let host = await openHost();
+    assert.equal((await waitFor("online")).name, "integration-host");
+    const firstTerminal = await owner.upgrade("client");
+    assert.equal(firstTerminal.status, 101);
+    firstTerminal.webSocket.accept();
+    const terminalClosed = new Promise(resolve => firstTerminal.webSocket.addEventListener("close", resolve, { once: true }));
+    host.close();
+    assert.equal((await waitFor("grace")).terminal_status, "grace");
+    assert.equal((await waitFor("offline")).name, "integration-host");
+    assert.equal((await terminalClosed).code, 1013);
+    assert.equal((await owner.upgrade("client")).status, 409);
+
+    host = await openHost();
+    assert.equal((await waitFor("online")).name, "integration-host");
+    const reopened = await owner.upgrade("client");
+    assert.equal(reopened.status, 101);
+    reopened.webSocket.accept();
+    host.close();
   } finally { await worker.dispose(); }
 });

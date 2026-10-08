@@ -7,7 +7,8 @@
     "build": "cargo run --release -p oriel-web && cf build",
     "check": "npm run build && node ../../scripts/deploy-worker.mjs --dry-run",
     "deploy": "npm run build && node ../../scripts/deploy-worker.mjs",
-    "deploy:prebuilt": "node ../../scripts/deploy-worker.mjs"
+    "deploy:prebuilt": "node ../../scripts/deploy-worker.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/build-output-utils": "0.8.2",

@@ -11,7 +11,34 @@ import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
 import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 
-export interface AccountEnv extends IntegrationEnv {}
+export interface AccountEnv extends IntegrationEnv {
+  RELAY: DurableObjectNamespace;
+}
+
+async function terminalStatuses(env: AccountEnv, devices: { device_id: string }[]): Promise<string[]> {
+  const statuses = devices.map(() => "unknown");
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(8, devices.length) }, async () => {
+    while (cursor < devices.length) {
+      const index = cursor++;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const stub = env.RELAY.get(env.RELAY.idFromName(devices[index].device_id));
+        const value = await Promise.race([
+          (async () => {
+            const response = await stub.fetch("https://relay/internal/terminal-status");
+            if (!response.ok) throw new Error("Status lookup failed");
+            return await response.json() as { terminal_status?: string };
+          })(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Status timeout")), 2000); }),
+        ]);
+        if (["online", "grace", "offline", "unknown"].includes(value.terminal_status ?? "")) statuses[index] = value.terminal_status!;
+      } catch { /* Preserve registrations when presence cannot be checked. */ }
+      finally { clearTimeout(timer); }
+    }
+  }));
+  return statuses;
+}
 
 type User = { id: string; display_name: string };
 type Session = { hash: string; user: User };
@@ -365,9 +392,13 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           break;
         case "GET /api/devices": {
           const session = await this.requireSession(request);
-          response = json({ devices: this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
+          const devices = this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
             "SELECT device_id, name, repository FROM devices WHERE user_id = ? ORDER BY name, device_id", session.user.id,
-          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null") })) });
+          ).toArray();
+          const statuses = await terminalStatuses(this.env, devices);
+          response = json({ devices: devices.map(({ repository, ...device }, index) => ({
+            ...device, repository: JSON.parse(repository ?? "null"), terminal_status: statuses[index],
+          })) });
           break;
         }
         case "POST /api/auth/register/options":
