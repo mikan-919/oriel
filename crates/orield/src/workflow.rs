@@ -827,9 +827,9 @@ fn agent_prompt(row: &Row, plan: bool) -> String {
             "implementation"
         },
         if plan {
-            "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. If how_feedback is present, answer that comment directly in the commenter's language in summary; explain relevant changes or blockers rather than emit a generic update notice. For a question-only request keep the current HOW title and description unchanged. Human approval is a later Linear Todo transition; you cannot approve or implement. No source writes."
+            "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. If how_feedback is present, answer that comment directly in the commenter's language in summary; explain relevant changes or blockers rather than emit a generic update notice. For a question-only request keep the current HOW title and description unchanged. Automatic execution is admitted by the relay only when target configuration opts in; you cannot approve or implement. No source writes."
         } else {
-            "Implement the approved HOW, or address the provided PR feedback, in this worktree. Preserve existing interrupted work. Make actual source changes. Leave all changes uncommitted for the trusted host to verify and checkpoint. Put an honest concise summary in summary; title/description may be empty."
+            "Implement the HOW admitted by the target repository configuration, or address the provided PR feedback, in this worktree. Preserve existing interrupted work. Make actual source changes. Leave all changes uncommitted for the trusted host to verify and checkpoint. Put an honest concise summary in summary; title/description may be empty."
         },
         task
     )
@@ -1543,7 +1543,9 @@ async fn implement(
 async fn plan(session: &mut Session, root: &Path, snapshot: &Snapshot, row: &Row) -> Result<()> {
     let guard = Guard::new(snapshot, row, false);
     let path = open_worktree(session, root, snapshot, row, &guard, true).await?;
-    println!("  plan: Codex read-only; no autonomous code permission is implied");
+    println!(
+        "  plan: read-only HOW planning; execution follows the target repository configuration"
+    );
     let result = agent(session, root, &path, row, &guard, true).await;
     let clean = git::text(&path, &["status", "--porcelain", "--untracked-files=all"])
         .await?
@@ -1660,7 +1662,7 @@ async fn scan(
             {
                 session.action("invalidate", json!({})).await.map(|_| {
                     println!(
-                        "  Approval revoked: HOW returned to Triage; human reapproval required"
+                        "  Approval revoked: HOW returned to Triage; it will be prepared again if automatic execution is enabled"
                     )
                 })
             }

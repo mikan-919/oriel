@@ -1,4 +1,4 @@
-# Repository execution opt-in; human Linear Todo approval is still required.
+# Repository execution opt-in; configured workflows start without per-task Todo approval.
 schemaVersion: 1
 execution:
   backend: worktree
