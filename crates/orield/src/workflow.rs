@@ -829,7 +829,7 @@ fn agent_prompt(row: &Row, plan: bool) -> String {
         if plan {
             "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. If how_feedback is present, answer that comment directly in the commenter's language in summary; explain relevant changes or blockers rather than emit a generic update notice. For a question-only request keep the current HOW title and description unchanged. Human approval is a later Linear Todo transition; you cannot approve or implement. No source writes."
         } else {
-            "Implement the approved HOW, or address the provided PR feedback, in this worktree. Preserve existing interrupted work. Make actual source changes. Leave all changes uncommitted for the trusted host to verify and checkpoint. Put an honest concise summary in summary; title/description may be empty."
+            "Implement the approved HOW, or address the provided PR feedback, in this worktree. Preserve existing interrupted work. Make actual source changes. For each package directory with package.json and package-lock.json but no node_modules, run npm ci --offline --prefix <directory> before npm scripts. Use isolated offline package caches when available; do not stop only because tests could not run. The trusted host runs configured verification after your changes. Leave all changes uncommitted for the trusted host to verify and checkpoint. Put an honest concise summary in summary; title/description may be empty."
         },
         task
     )
@@ -872,6 +872,86 @@ fn rustup_home() -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
+fn private_home_path(path: &std::ffi::OsStr, home: &Path) -> std::ffi::OsString {
+    let shim_dirs = [
+        home.join(".local/share/vite-plus/bin"),
+        home.join(".local/share/vite-plus/fallback-bin"),
+    ];
+    std::env::join_paths(std::env::split_paths(path).filter(|entry| !shim_dirs.contains(entry)))
+        .unwrap_or_else(|_| path.to_owned())
+}
+
+fn link_cache(source: &Path, target: &Path) -> Result<bool> {
+    let Ok(metadata) = fs::symlink_metadata(source) else {
+        return Ok(false);
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if let Ok(metadata) = fs::symlink_metadata(target) {
+        ensure!(
+            metadata.file_type().is_symlink() && fs::read_link(target)? == source,
+            "private dependency cache path is not the expected link"
+        );
+    } else {
+        std::os::unix::fs::symlink(source, target)?;
+    }
+    Ok(true)
+}
+
+fn dependency_cache_environment(home: &Path) -> Result<Vec<(String, String)>> {
+    let cargo_source = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    let npm_source = std::env::var_os("npm_config_cache")
+        .or_else(|| std::env::var_os("NPM_CONFIG_CACHE"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".npm")));
+    dependency_cache_environment_from(home, cargo_source.as_deref(), npm_source.as_deref())
+}
+
+fn dependency_cache_environment_from(
+    home: &Path,
+    cargo_source: Option<&Path>,
+    npm_source: Option<&Path>,
+) -> Result<Vec<(String, String)>> {
+    let mut environment = Vec::new();
+    if let Some(source) = cargo_source {
+        let cargo_home = home.join(".cargo");
+        git::private_directory(&cargo_home)?;
+        let linked = ["registry", "git"]
+            .into_iter()
+            .try_fold(false, |linked, name| {
+                Ok::<_, anyhow::Error>(
+                    link_cache(&source.join(name), &cargo_home.join(name))? || linked,
+                )
+            })?;
+        if linked {
+            environment.extend([
+                (
+                    "CARGO_HOME".to_owned(),
+                    cargo_home.to_string_lossy().into_owned(),
+                ),
+                ("CARGO_NET_OFFLINE".to_owned(), "true".to_owned()),
+            ]);
+        }
+    }
+    if let Some(source) = npm_source {
+        let npm_cache = home.join(".npm");
+        git::private_directory(&npm_cache)?;
+        if link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))? {
+            environment.extend([
+                (
+                    "npm_config_cache".to_owned(),
+                    npm_cache.to_string_lossy().into_owned(),
+                ),
+                ("npm_config_offline".to_owned(), "true".to_owned()),
+            ]);
+        }
+    }
+    Ok(environment)
+}
+
 fn reject_project_authority(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
         for authority in [".codex/config.toml", ".codex/hooks.json", ".mcp.json"] {
@@ -900,6 +980,15 @@ async fn agent(
     git::private_directory(&run)?;
     let home = run.join("home");
     git::private_directory(&home)?;
+    let package_environment = dependency_cache_environment(&home)?;
+    let package_policy = package_environment
+        .iter()
+        .map(|(name, value)| format!(",{name}={}", json!(value)))
+        .collect::<String>();
+    let tool_path = private_home_path(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
+    );
     let codex_home = home.join(".codex");
     git::private_directory(&codex_home)?;
     let model_auth = ModelAuth(codex_home.join("auth.json"));
@@ -916,15 +1005,16 @@ async fn agent(
         .map(|path| format!(",RUSTUP_HOME={}", json!(path.to_string_lossy())))
         .unwrap_or_default();
     let shell_environment = format!(
-        "shell_environment_policy.set={{PATH={},HOME={},GIT_CONFIG_NOSYSTEM=\"1\",GIT_CONFIG_GLOBAL=\"/dev/null\",GIT_TERMINAL_PROMPT=\"0\",GIT_ASKPASS=\"/bin/false\"{}}}",
-        serde_json::to_string(&std::env::var("PATH").unwrap_or_default())?,
+        "shell_environment_policy.set={{PATH={},HOME={},GIT_CONFIG_NOSYSTEM=\"1\",GIT_CONFIG_GLOBAL=\"/dev/null\",GIT_TERMINAL_PROMPT=\"0\",GIT_ASKPASS=\"/bin/false\"{}{}}}",
+        serde_json::to_string(&tool_path.to_string_lossy())?,
         serde_json::to_string(home.to_str().context("non-UTF8 private agent home")?)?,
         rustup_environment,
+        package_policy,
     );
     let mut command = Command::new("codex");
     command
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PATH", &tool_path)
         .env("HOME", &home)
         .env("CODEX_HOME", &codex_home)
         .env("LANG", "C.UTF-8")
@@ -932,6 +1022,11 @@ async fn agent(
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "/bin/false")
+        .envs(
+            package_environment
+                .iter()
+                .map(|(name, value)| (name, value)),
+        )
         .args([
             "exec",
             "--json",
@@ -1075,6 +1170,11 @@ async fn verify(
     session.progress("verifying").await?;
     let home = root.join("verification-home");
     git::private_directory(&home)?;
+    let package_environment = dependency_cache_environment(&home)?;
+    let tool_path = private_home_path(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
+    );
     for argv in &configuration.verification {
         println!("  verify: {}", argv[0]);
         let logs = root.join("verification").join(random_hex::<12>()?);
@@ -1088,13 +1188,18 @@ async fn verify(
             .args(&argv[1..])
             .current_dir(path)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", &tool_path)
             .env("HOME", &home)
             .env("LANG", "C.UTF-8")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "/bin/false")
+            .envs(
+                package_environment
+                    .iter()
+                    .map(|(name, value)| (name, value)),
+            )
             .stdin(Stdio::null())
             .stdout(fs::OpenOptions::new().write(true).open(stdout)?)
             .stderr(fs::OpenOptions::new().write(true).open(stderr)?)
@@ -1757,6 +1862,67 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_agent_homes_reuse_only_offline_package_caches() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-cache-{}", random_hex::<12>().unwrap()));
+        let cargo = root.join("user/.cargo");
+        let npm = root.join("user/.npm");
+        let home = root.join("agent/home");
+        for path in [cargo.join("registry"), npm.join("_cacache")] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::create_dir_all(&cargo).unwrap();
+        fs::write(cargo.join("credentials.toml"), "must not be shared").unwrap();
+        git::private_directory(&home).unwrap();
+
+        let environment =
+            dependency_cache_environment_from(&home, Some(&cargo), Some(&npm)).unwrap();
+        let value = |name: &str| {
+            environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+                .unwrap()
+        };
+        let private_cargo = home.join(".cargo");
+        let private_npm = home.join(".npm");
+        assert_eq!(value("CARGO_HOME"), private_cargo.to_str().unwrap());
+        assert_eq!(value("CARGO_NET_OFFLINE"), "true");
+        assert_eq!(
+            fs::read_link(private_cargo.join("registry")).unwrap(),
+            cargo.join("registry")
+        );
+        assert!(!private_cargo.join("credentials.toml").exists());
+        assert_eq!(value("npm_config_cache"), private_npm.to_str().unwrap());
+        assert_eq!(value("npm_config_offline"), "true");
+        assert_eq!(
+            fs::read_link(private_npm.join("_cacache")).unwrap(),
+            npm.join("_cacache")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_agent_path_skips_user_home_runtime_shims() {
+        let home = Path::new("/home/example");
+        let path = std::env::join_paths([
+            Path::new("/usr/bin"),
+            home.join(".local/share/vite-plus/bin").as_path(),
+            Path::new("/nix/store/node/bin"),
+            home.join(".local/share/vite-plus/fallback-bin").as_path(),
+        ])
+        .unwrap();
+        let filtered = private_home_path(&path, home);
+        assert_eq!(
+            std::env::split_paths(&filtered).collect::<Vec<_>>(),
+            [
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/nix/store/node/bin")
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn workflow_failures_preserve_relay_reason_and_stop_authority() {
