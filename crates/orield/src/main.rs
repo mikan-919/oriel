@@ -185,6 +185,23 @@ fn load_identity(path: &Path) -> Result<DeviceIdentity> {
     load_identity(path)
 }
 
+fn lock_workflow_identity(path: &Path) -> Result<File> {
+    // Keep the device's existing identity file locked for this process's lifetime.
+    // No lock file or credential rewrite is needed; closing the handle releases it.
+    let file = File::open(path).context("failed to open workflow device identity")?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => {
+            bail!(
+                "workflow already running for this device; stop the existing orield workflow before starting another"
+            )
+        }
+        Err(fs::TryLockError::Error(error)) => {
+            Err(error).context("failed to lock workflow device identity")
+        }
+    }
+}
+
 fn relay_origin(value: &str) -> Result<Url> {
     ensure!(
         !value.contains('\\')
@@ -519,6 +536,7 @@ async fn main() -> Result<()> {
                     "Verified canonical branches are pushed with CAS; PR review fixes resume\n",
                     "the same branch. Only an observed human merge moves Linear to Done.\n",
                     "--once scans once; continuous mode scans immediately, then every 15s.\n",
+                    "Only one workflow process may run per device; a second start exits before connecting.\n",
                     "Interrupted/unpushed work is preserved under $XDG_STATE_HOME/oriel/workflow\n",
                     "(fallback $HOME/.local/state/oriel/workflow); transcripts remain private.\n",
                     "Codex must support exec structured output and config/rules isolation.\n\n",
@@ -538,7 +556,13 @@ async fn main() -> Result<()> {
         [arg, once] if arg == "workflow" && once == "--once" => "once",
         _ => bail!("usage: orield [--help | integrations | workflow [--once]]"),
     };
-    let identity = load_identity(&identity_path()?)?;
+    let identity_file = identity_path()?;
+    let identity = load_identity(&identity_file)?;
+    let _workflow_owner = if mode == "workflow" || mode == "once" {
+        Some(lock_workflow_identity(&identity_file)?)
+    } else {
+        None
+    };
     let relay_value = match std::env::var("ORIEL_RELAY_URL") {
         Ok(value) => value,
         Err(std::env::VarError::NotPresent) => {
@@ -805,6 +829,27 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn workflow_identity_lock_blocks_duplicate_runs_and_releases_on_exit() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("oriel/device.json");
+        let identity = load_identity(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        let owner = lock_workflow_identity(&path).unwrap();
+        let error = lock_workflow_identity(&path).unwrap_err();
+        assert!(error.to_string().contains("workflow already running"));
+        // Ordinary daemon/terminal identity reads remain possible.
+        assert!(load_identity(&path).unwrap() == identity);
+        let other = directory.0.join("other/device.json");
+        load_identity(&other).unwrap();
+        let other_owner = lock_workflow_identity(&other).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(owner);
+        let replacement = lock_workflow_identity(&path).unwrap();
+        drop(replacement);
+        drop(other_owner);
     }
 
     #[test]
