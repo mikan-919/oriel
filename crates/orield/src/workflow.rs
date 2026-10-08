@@ -1683,17 +1683,14 @@ async fn scan(
                 Some(_) => {}
                 None => {
                     session.progress("reconciling").await?;
-                    // Durable provider retriage is authoritative. The in-memory
-                    // suppression merely prevents repeated model runs during this
-                    // explicit daemon session if the report itself is uncertain.
                     let reason: String = error.to_string().chars().take(1000).collect();
                     if let Err(reflection) = session.action("fail", json!({"reason":reason})).await
                     {
                         println!(
                             "  failure reflection uncertain: {reflection}; paused until human/provider state changes"
                         );
-                        suppressed.insert(identity);
                     }
+                    suppressed.insert(identity);
                 }
             }
             session.progress("paused").await?;

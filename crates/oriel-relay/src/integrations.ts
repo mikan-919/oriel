@@ -594,7 +594,7 @@ export class Integrations {
         const state = current.row.linear!.state;
         const target = current.facts.states.find(candidate => candidate.id === input.stateId);
         const review = current.facts.states.filter(candidate => candidate.type === "started" && /review/i.test(candidate.name));
-        const targetAllowed = target && (target.name === "Triage" && target.type === "triage" || target.name === "In Progress" && target.type === "started" || target.name === "Done" && target.type === "completed" || review.length === 1 && target.id === review[0].id);
+        const targetAllowed = target && (target.name === "Triage" && target.type === "triage" || target.name === "Todo" && target.type === "unstarted" || target.name === "In Progress" && target.type === "started" || target.name === "Done" && target.type === "completed" || review.length === 1 && target.id === review[0].id);
         if (!target || !targetAllowed || current.facts.states.filter(candidate => candidate.name === target.name && candidate.type === target.type).length !== 1 ||
           !current.row.fingerprint || !current.facts.states.some(candidate => candidate.id === state.id && candidate.name === state.name && candidate.type === state.type)) this.auth.fail(409, "Native HOW transition identity changed");
         if (matches(current.row.linear!)) return current.row.linear!;
@@ -842,7 +842,7 @@ export class Integrations {
       return { linear };
     }
     if (action === "invalidate" || action === "fail") {
-      if (grant.kind === "plan" || grant.kind === "reconcile" && (action !== "invalidate" || !grant.recovery)) this.auth.fail(403, "Only owned code work or admitted stale-approval reconciliation can be returned to Triage");
+      if (grant.kind === "plan" || grant.kind === "reconcile" && (action !== "invalidate" || !grant.recovery)) this.auth.fail(403, "Only owned code work or admitted stale-approval reconciliation can be changed");
       const current = await this.workflowCurrent(context, grant, undefined, action === "invalidate");
       if (!current.row.linear || current.row.phase === "blocked" && current.row.fingerprint === null) this.auth.fail(409, "Unknown or ambiguous approval is not overwritten");
       if (grant.recovery && current.row.phase !== "triage" && (current.row.recovery !== "invalidate" || current.facts.recoveries.get(grant.issue_number) !== grant.recovery.branch)) this.auth.fail(409, "Prior canonical recovery evidence changed");
@@ -851,7 +851,7 @@ export class Integrations {
       if (state.type === "completed" || state.type === "canceled") return { linear: current.row.linear };
       if (current.row.phase === "triage") return { linear: current.row.linear };
       const known = current.facts.states.some(candidate => candidate.id === state.id && candidate.name === state.name && candidate.type === state.type);
-      if (!known || !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || state.type === "started" && /review/i.test(state.name))) this.auth.fail(409, "Native HOW state cannot be safely returned to Triage");
+      if (!known || !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || state.type === "started" && /review/i.test(state.name))) this.auth.fail(409, "Native HOW state cannot be safely updated");
       if (action === "fail") {
         if (typeof body.reason !== "string" || !body.reason.trim()) this.auth.fail(400, "A failure reason is required");
         let reason = body.reason.slice(0, 4000);
@@ -872,7 +872,17 @@ export class Integrations {
           if (!readback || readback.state !== "closed" || readback.merged_at) this.auth.fail(409, "Obsolete PR closure was not confirmed");
         }
       }
-      const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Triage", "triage").id }, ["approved", "running", "review", "blocked"], action === "invalidate");
+      if (action === "fail") {
+        // An implementation lease proves this HOW was already approved. If it
+        // stopped before publication, restore that approval instead of revoking
+        // it by moving the HOW to Triage.
+        if (grant.kind === "implement" && current.row.phase === "running" && state.name === "In Progress" && state.type === "started") {
+          const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Todo", "unstarted").id }, ["running"]);
+          return { linear };
+        }
+        return { linear: current.row.linear };
+      }
+      const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Triage", "triage").id }, ["approved", "running", "review", "blocked"], true);
       return { linear };
     }
     this.auth.fail(400, "Unsupported workflow action");

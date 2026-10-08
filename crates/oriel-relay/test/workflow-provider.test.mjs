@@ -311,8 +311,10 @@ test("changed approval is returned to Triage, failures are bounded, and Git gran
     await s.message({ type: "release", lease_id: plan }); how.state = { ...s.fixture.states.find(state => state.id === "todo") };
     const broken = await s.claim("implement"); assert.equal((await s.action(broken, "begin")).status, 200);
     s.fixture.uncertainty.set("how-comment", true); s.fixture.uncertainty.set("how-update", true);
+    s.fixture.allowFailureApprovalRestore = true;
     const failure = await s.action(broken, "fail", { reason: "Configured verification failed: private-linear-access" });
-    assert.equal(failure.status, 200, JSON.stringify(failure.data)); assert.equal(how.state.name, "Triage");
+    assert.equal(failure.status, 200, JSON.stringify(failure.data)); assert.equal(how.state.name, "Todo");
+    assert.equal((await s.snapshot()).workflows[0].phase, "approved", "runtime failures restore, but do not revoke, human approval");
     assert.equal(how.comments[0].body.includes("private-linear-access"), false);
     await s.owner.api("/api/integrations/github/disconnect", {});
     const revoked = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: broken }, hostHeaders); assert.equal(revoked.status, 409);
