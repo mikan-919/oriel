@@ -41,10 +41,14 @@ import {
 // every 10s while watched; logout/expiry/revocation stop that session's delivery.
 // Control loss clears running claims. No progress history is stored; snapshots never
 // include prompts, stdout or tokens. Workflow offline is not terminal-host availability.
-// `orield workflow` starts read-only Codex HOW planning for GitHub issues with a
-// human comment containing only /oriel how; `--once` scans once.
-// GitHub commands are read from comment text. PR requests start with /oriel
-// followed by whitespace and the requested change.
+// `orield workflow` answers human Issue comments starting with /oriel using
+// read-only Codex. /oriel how followed by optional instructions starts HOW
+// planning with a start notification and a result reply linking the Linear HOW.
+// Existing Triage HOWs can be revised; other states receive a read-only answer.
+// A leading full-width slash is accepted. Signed comment identities deduplicate
+// starts and answers across reconnects; editing a request creates a new identity.
+// `--once` scans once. PR requests start with /oriel followed by whitespace
+// and the requested change.
 // HOW is created in native Linear Triage with the exact GitHub Issue attachment.
 // Linear create IDs are deterministic UUID-v4-format IDs for issues, links and
 // comments. Native INPUT_ERROR / "Entity not found: Issue" maps to an absent HOW

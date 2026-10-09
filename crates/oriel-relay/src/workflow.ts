@@ -1,7 +1,7 @@
 import { parseDocument } from "yaml";
 import type { Device } from "./integrations";
 
-export type WorkflowKind = "plan" | "implement" | "respond" | "reconcile";
+export type WorkflowKind = "plan" | "discuss" | "implement" | "respond" | "reconcile";
 export type WorkflowBinding = {
   user_id: string; device_id: string; host_hash: string; repository_generation: string;
   github_generation: string; linear_generation: string; repository_id: number; team_id: string;
@@ -14,6 +14,7 @@ export type WorkflowTask = {
 export type WorkflowAdmission = WorkflowClaim & {
   linear_id: string | null;
   initial_what_version?: string;
+  issue_feedback?: { key: string };
   task: WorkflowTask;
   feedback?: { key: string; head_oid: string; pr_number: number };
   recovery?: { branch: string };
@@ -33,6 +34,7 @@ export type WorkflowRow = {
   branch: string | null; canonical_oid: string | null; pull_request: PullRequest | null;
   phase: "waiting-how" | "needs-how" | "triage" | "approved" | "running" | "review" | "merged" | "done" | "closed" | "blocked";
   blocked_reason: string | null; feedback: Feedback | null; how_feedback: { key: string; body: string } | null;
+  issue_feedback: { key: string; body: string; planning: boolean } | null;
   recovery: "invalidate" | null;
 };
 export type Configuration = { autonomous: boolean; verification: string[][]; error: string | null };

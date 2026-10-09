@@ -40,6 +40,8 @@ type Auth = {
 };
 const SECRET = /^[a-f0-9]{64}$/;
 const GITHUB_COMMAND = "/oriel";
+const githubCommand = (body: string) => /^[\/／]oriel(?:\s|$)/i.test(body.trimStart())
+  ? { planning: /^[\/／]oriel\s+how(?:\s|$)/i.test(body.trimStart()) } : null;
 const PERMISSIONS = { contents: "write", issues: "write", pull_requests: "write", metadata: "read" };
 const TOKEN_ERRORS = ["incorrect_client_credentials", "bad_verification_code", "redirect_uri_mismatch", "access_denied", "invalid_grant", "invalid_client"];
 const now = () => Math.floor(Date.now() / 1000);
@@ -264,17 +266,16 @@ export class Integrations {
         return !!match && match[1].toLowerCase() === context.repository.owner.toLowerCase() && match[2].toLowerCase() === context.repository.name.toLowerCase() && Number(match[3]) === issue.number;
       }));
       // Any human GitHub user may request planning, including before deployment.
-      // The entire comment must be the command; quotes, code and prose do not opt in.
+      // Commands must start the comment; quotes, code and prose do not opt in.
       const initialComments = linked.length === 0 && issue.state === "open"
         ? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
-      const requests = initialComments.filter(comment => comment.user?.type === "User" && comment.body.trim().toLowerCase() === `${GITHUB_COMMAND} how`)
-        .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      const request = await this.workflowIssueFeedback(context, initialComments, true);
       const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
-        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : requests.length ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null,
+        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : request ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, issue_feedback: null, recovery: null,
         what_comments: [], how_comments: [] };
       if (linked.length === 0 && issue.state === "open") {
-        row.version = await digest(["oriel/initial-how-request/v1", row.version, requests.map(comment => [String(comment.id), comment.body, comment.user.login])]);
-        if (!requests.length) row.blocked_reason = `Waiting for a human GitHub user to comment ${GITHUB_COMMAND} how (entire comment); this requests planning only, not implementation`;
+        row.version = await digest(["oriel/initial-how-request/v1", row.version, request?.key ?? null]);
+        if (!request) row.blocked_reason = `Waiting for a human GitHub user to start a comment with ${GITHUB_COMMAND} how; this requests planning only, not implementation`;
       }
       if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
         row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
@@ -334,10 +335,11 @@ export class Integrations {
           }
         }
       }
-      if (["waiting-how", "needs-how", "triage", "approved", "running", "review"].includes(row.phase)) {
+      if (issue.state === "open") {
         const comments = linked.length === 0 ? initialComments : await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
         row.what_comments = comments.map(comment => ({ id: String(comment.id), body: comment.body, author: comment.user?.login ?? null, created_at: comment.created_at }))
           .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+        row.issue_feedback = await this.workflowIssueFeedback(context, comments);
         if (row.linear) {
           const comments = await this.workflowLinearComments(context, row.linear.id);
           row.how_comments = comments.map(comment => ({ id: comment.id, body: comment.body, author: comment.user?.name ?? null, created_at: comment.createdAt }))
@@ -360,6 +362,18 @@ export class Integrations {
     const hmac = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
     const signature = await crypto.subtle.sign("HMAC", hmac, encoder.encode(JSON.stringify(["oriel/workflow-cursor/v1", context.repository.repository_id, kind === "what" ? null : context.team.team_id, kind, key])));
     return `<!-- oriel:${kind}:${base64url(encoder.encode(key))}:${base64url(new Uint8Array(signature))} -->`;
+  }
+
+  private async workflowIssueFeedback(context: WorkflowContext, comments: GithubComment[], planningOnly = false): Promise<WorkflowRow["issue_feedback"]> {
+    for (const comment of [...comments].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id)) {
+      if (comment.user?.type !== "User" || /<!-- oriel:/.test(comment.body)) continue;
+      const command = githubCommand(comment.body);
+      if (!command || planningOnly && !command.planning) continue;
+      const key = `issue-comment:${await digest([comment.id, comment.user.login, comment.body])}`;
+      const marker = await this.workflowMarker(context, "issue-response", key);
+      if (!comments.some(reply => reply.user?.type === "Bot" && reply.body.includes(marker))) return { key, body: comment.body, planning: command.planning };
+    }
+    return null;
   }
 
   private async workflowLinearComments(context: WorkflowContext, id: string): Promise<LinearComment[]> {
@@ -422,7 +436,7 @@ export class Integrations {
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body, comments: notes.filter(note => note.line !== null || note.commit_id === pr.head_oid).map(note => ({ path: note.path, line: note.line, body: note.body })) };
     }
     for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at))) {
-      if (comment.user.type === "Bot" || !/^\/oriel(?:\s|$)/i.test(comment.body.trimStart()) || /<!-- oriel:/.test(comment.body)) continue;
+      if (comment.user.type !== "User" || !githubCommand(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
       const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
     }
@@ -484,19 +498,21 @@ export class Integrations {
   }
 
   async workflowAdmission(device: Device, claim: WorkflowClaim, check: () => void): Promise<WorkflowAdmission> {
-    if (!["plan", "implement", "respond", "reconcile"].includes(claim.kind) || !Number.isSafeInteger(claim.issue_number) || claim.issue_number <= 0 || !SECRET.test(claim.version) || claim.branch !== null && typeof claim.branch !== "string") this.auth.fail(400, "Invalid workflow claim");
+    if (!["plan", "discuss", "implement", "respond", "reconcile"].includes(claim.kind) || !Number.isSafeInteger(claim.issue_number) || claim.issue_number <= 0 || !SECRET.test(claim.version) || claim.branch !== null && typeof claim.branch !== "string") this.auth.fail(400, "Invalid workflow claim");
     const context = await this.workflowContext(device, check);
     const { snapshot, recoveries } = await this.workflowFacts(context);
     const row = snapshot.workflows.find(row => row.issue.number === claim.issue_number);
     if (!row || row.version !== claim.version || row.branch !== claim.branch) this.auth.fail(409, "Workflow content or canonical branch changed");
-    const allowed = claim.kind === "plan" ? ["needs-how", "triage"].includes(row.phase) :
+    const allowed = claim.kind === "plan" ? ["needs-how", "triage"].includes(row.phase) && (!row.issue_feedback || row.issue_feedback.planning) :
+      claim.kind === "discuss" ? row.issue.state === "open" && !!row.issue_feedback :
       claim.kind === "implement" ? ["approved", "running"].includes(row.phase) :
       claim.kind === "respond" ? row.phase === "review" && !!row.feedback :
       row.phase === "merged" || row.phase === "done" || row.phase === "blocked" && row.recovery === "invalidate";
     if (!allowed) this.auth.fail(409, row.blocked_reason ?? "Workflow phase does not admit this operation");
     context.check();
     return { ...claim, linear_id: row.linear?.id ?? null,
-      ...(claim.kind === "plan" && !row.linear ? { initial_what_version: await digest(["oriel/what-version/v1", snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) } : {}),
+      ...(claim.kind === "plan" ? { initial_what_version: await digest(["oriel/what-version/v1", snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) } : {}),
+      ...(["plan", "discuss"].includes(claim.kind) && row.issue_feedback ? { issue_feedback: { key: row.issue_feedback.key } } : {}),
       task: { issue_number: row.issue.number, title: row.issue.title, url: row.issue.url,
         how_identifier: row.linear?.identifier ?? null, how_url: row.linear?.url ?? null },
       ...(claim.kind === "respond" && row.feedback && row.pull_request ? { feedback: { key: row.feedback.key, head_oid: row.pull_request.head_oid, pr_number: row.pull_request.number } } : {}),
@@ -536,8 +552,8 @@ export class Integrations {
       const leased = () => { check(); authority.verify(device, grant.lease_id); };
       const context = await this.workflowContext(device, leased, route[2] === "actions");
       if (route[2] === "git-token") {
-        if (!["plan", "implement", "respond"].includes(grant.kind)) this.auth.fail(409, "Reconciliation does not need Git credentials");
-        if (grant.kind === "plan") await this.workflowAdmission(device, grant, leased);
+        if (!["plan", "discuss", "implement", "respond"].includes(grant.kind)) this.auth.fail(409, "Reconciliation does not need Git credentials");
+        if (["plan", "discuss"].includes(grant.kind)) await this.workflowCurrent(context, grant);
         else {
           const current = await this.workflowCurrent(context, grant, grant.kind === "implement" ? ["running"] : ["review"]);
           if (!current.row.canonical_oid) this.auth.fail(409, "Code Git credentials require a current matching sealed branch");
@@ -547,7 +563,7 @@ export class Integrations {
           }
         }
         leased();
-        return this.auth.json(await this.installationToken(device.user_id, leased, { contents: grant.kind === "plan" ? "read" : "write", metadata: "read" }));
+        return this.auth.json(await this.installationToken(device.user_id, leased, { contents: ["plan", "discuss"].includes(grant.kind) ? "read" : "write", metadata: "read" }));
       }
       return this.auth.json(await this.workflowAction(context, grant, body));
     } catch (error) {
@@ -593,6 +609,7 @@ export class Integrations {
     const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === (grant.initial_what_version ?? grant.version);
     if (!changed && !recoveredPlan && (row.version !== grant.version || row.branch !== grant.branch)) this.auth.fail(409, "Workflow approval content changed");
     if (phases && !phases.includes(row.phase)) this.auth.fail(409, row.blocked_reason ?? "Workflow native state no longer admits this operation");
+    if (grant.issue_feedback && row.issue_feedback?.key !== grant.issue_feedback.key && !recoveredPlan) this.auth.fail(409, "Admitted Issue request was edited, deleted or answered");
     if (grant.execution && phases?.some(phase => ["approved", "running", "review"].includes(phase)) &&
       (facts.snapshot.target_oid !== grant.execution.target_oid || facts.snapshot.base_branch !== grant.execution.base_branch || !facts.snapshot.configuration.autonomous ||
        JSON.stringify(facts.snapshot.configuration.verification) !== JSON.stringify(grant.execution.verification))) this.auth.fail(409, "Commit-pinned execution target or verification configuration changed");
@@ -710,13 +727,17 @@ export class Integrations {
   }
 
   private async workflowComment(context: WorkflowContext, grant: WorkflowGrant, kind: string, key: string, text: string, githubPr: number | null = null, changed = false, expectedHead?: string): Promise<void> {
+    const issueComment = kind.startsWith("issue-");
+    if (issueComment && (githubPr !== grant.issue_number || grant.issue_feedback?.key !== key)) this.auth.fail(403, "Issue replies require the admitted comment identity");
     const marker = await this.workflowMarker(context, kind, key);
     const content = `${text}\n\n${marker}`;
     const read = async () => githubPr === null ? (await this.workflowLinearComments(context, grant.linear_id!)).map(comment => comment.body) :
-      (await this.workflowList<GithubComment>(context, `${context.path}/issues/${githubPr}/comments`)).map(comment => comment.body);
+      (await this.workflowList<GithubComment>(context, `${context.path}/issues/${githubPr}/comments`))
+        .filter(comment => !issueComment || comment.user?.type === "Bot").map(comment => comment.body);
     if ((await read()).some(body => body.includes(marker))) return;
-    const current = await this.workflowCurrent(context, grant, githubPr === null ? undefined : ["review"], changed);
-    if (githubPr !== null && current.row.pull_request?.number !== githubPr) this.auth.fail(409, "Response PR identity changed");
+    const current = await this.workflowCurrent(context, grant, githubPr === null || issueComment ? undefined : ["review"], changed);
+    if (issueComment && current.row.issue_feedback?.key !== key) this.auth.fail(409, "Admitted Issue request was edited, deleted or answered");
+    if (githubPr !== null && !issueComment && current.row.pull_request?.number !== githubPr) this.auth.fail(409, "Response PR identity changed");
     if (expectedHead && (current.row.canonical_oid !== expectedHead || current.row.pull_request?.head_oid !== expectedHead)) this.auth.fail(409, "Verified response head changed before publication");
     context.check();
     try {
@@ -730,14 +751,55 @@ export class Integrations {
     if (!(await read()).some(body => body.includes(marker))) this.auth.fail(502, "Workflow response is unconfirmed; retry with the same content identity");
   }
 
+  private async workflowIssuePlanReply(context: WorkflowContext, grant: WorkflowGrant, linear: LinearHow, summary: unknown): Promise<void> {
+    if (!grant.issue_feedback) return;
+    if (typeof summary !== "string" || !summary.trim() || summary.length > 12000) this.auth.fail(400, "A bounded model reply is required for Issue planning");
+    const { snapshot } = await this.workflowFacts(context);
+    const row = snapshot.workflows.find(row => row.issue.number === grant.issue_number);
+    if (!row || row.phase !== "triage" || row.linear?.id !== linear.id || row.linear.title !== linear.title || row.linear.description !== linear.description) this.auth.fail(409, "HOW changed before the Issue reply");
+    if (await digest(["oriel/what-version/v1", snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) !== grant.initial_what_version) this.auth.fail(409, "WHAT changed before the Issue reply");
+    // A completed initial HOW remains recoverable after its request is removed.
+    // Reply only while the admitted comment is still pending.
+    if (grant.linear_id === null && row.issue_feedback?.key !== grant.issue_feedback.key) return;
+    await this.workflowComment(context, { ...grant, linear_id: linear.id, version: row.version, branch: row.branch }, "issue-response", grant.issue_feedback.key,
+      `${summary}\n\nHOW: ${linear.url}`, grant.issue_number);
+  }
+
   private async workflowAction(context: WorkflowContext, grant: WorkflowGrant, body: Record<string, unknown>): Promise<unknown> {
     const action = body.action;
-    const kind = action === "proposal" ? "plan" : action === "begin" || action === "publish" ? "implement" :
+    const kind = action === "proposal" || action === "started" ? "plan" : action === "answered" ? "discuss" : action === "begin" || action === "publish" ? "implement" :
       action === "responded" ? "respond" : action === "done" ? "reconcile" : action === "invalidate" || action === "fail" ? grant.kind : null;
     if (!kind || kind !== grant.kind) this.auth.fail(403, "Workflow action is not allowed by this lease");
+    if (action === "started") {
+      const { row } = await this.workflowCurrent(context, grant, ["needs-how", "triage"]);
+      if (!grant.issue_feedback || !row.issue_feedback?.planning) this.auth.fail(409, "A current Issue HOW request is required");
+      await this.workflowComment(context, grant, "issue-started", grant.issue_feedback.key,
+        "HOWの計画を開始しました。結果はLinearのTriageに作成・更新し、このIssueにも返信します。", grant.issue_number);
+      return { started: true };
+    }
+    if (action === "answered") {
+      if (!grant.issue_feedback || typeof body.summary !== "string" || !body.summary.trim() || body.summary.length > 12000) this.auth.fail(400, "An admitted Issue request and bounded reply are required");
+      await this.workflowComment(context, grant, "issue-response", grant.issue_feedback.key, body.summary, grant.issue_number);
+      return { answered: true };
+    }
+    if (action === "fail" && ["plan", "discuss"].includes(grant.kind)) {
+      const { row } = await this.workflowCurrent(context, grant);
+      if (grant.issue_feedback && row.issue_feedback?.key === grant.issue_feedback.key) await this.workflowComment(context, grant, "issue-response", grant.issue_feedback.key,
+        "依頼の処理中にエラーが発生したため停止しました。依頼コメントを編集するか、新しいコメントで再依頼してください。詳細はworkflowを起動した端末のログを確認してください。", grant.issue_number);
+      return { stopped: true };
+    }
     if (action === "proposal") {
       if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 256 || typeof body.description !== "string" || !body.description.trim() || body.description.length > 60000) this.auth.fail(400, "A bounded HOW title and description are required");
       if (body.summary !== undefined && (typeof body.summary !== "string" || !body.summary.trim() || body.summary.length > 12000)) this.auth.fail(400, "A bounded model reply is required");
+      if (grant.issue_feedback) {
+        if (typeof body.summary !== "string") this.auth.fail(400, "A model reply is required for Issue planning");
+        const marker = await this.workflowMarker(context, "issue-response", grant.issue_feedback.key);
+        const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${grant.issue_number}/comments`);
+        if (comments.some(comment => comment.user?.type === "Bot" && comment.body.includes(marker))) {
+          const { snapshot } = await this.workflowFacts(context);
+          return { linear: snapshot.workflows.find(row => row.issue.number === grant.issue_number)?.linear ?? null };
+        }
+      }
       let initial: { facts: WorkflowFacts; row: WorkflowRow };
       try { initial = await this.workflowCurrent(context, grant, ["needs-how", "triage"]); }
       catch (error) {
@@ -745,15 +807,19 @@ export class Integrations {
         const facts = await this.workflowFacts(context);
         const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
         if (row?.phase !== "triage" || row.linear?.id !== grant.linear_id || row.linear.title !== body.title || row.linear.description !== body.description) throw error;
-        if (row.how_feedback) {
+        if (row.how_feedback && !grant.issue_feedback) {
           if (typeof body.summary !== "string") this.auth.fail(400, "A model reply is required for HOW feedback");
           await this.workflowComment(context, { ...grant, version: row.version, branch: row.branch }, "how-response", row.how_feedback.key, body.summary);
         }
+        await this.workflowIssuePlanReply(context, grant, row.linear, body.summary);
         return { linear: row.linear };
       }
       if (initial.row.linear) {
-        if (grant.linear_id === null) return { linear: initial.row.linear };
-        const feedback = initial.row.how_feedback;
+        if (grant.linear_id === null) {
+          await this.workflowIssuePlanReply(context, grant, initial.row.linear, body.summary);
+          return { linear: initial.row.linear };
+        }
+        const feedback = grant.issue_feedback ? null : initial.row.how_feedback;
         const reply = typeof body.summary === "string" ? body.summary : null;
         if (feedback && reply === null) this.auth.fail(400, "A model reply is required for HOW feedback");
         const linear = await this.workflowUpdateHow(context, grant, { title: body.title, description: body.description }, ["triage"]);
@@ -761,6 +827,7 @@ export class Integrations {
           const version = await digest(["oriel/approval-fingerprint/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, initial.row.issue.title, initial.row.issue.body ?? "", linear.id, linear.title, linear.description ?? ""]);
           await this.workflowComment(context, { ...grant, linear_id: linear.id, version, branch: `oriel/${linear.identifier}-gh-${grant.issue_number}-${version}` }, "how-response", feedback.key, reply);
         }
+        await this.workflowIssuePlanReply(context, grant, linear, body.summary);
         return { linear };
       }
       const hash = await digest(["oriel/how/v1", initial.facts.snapshot.repository_node_id, initial.row.issue.node_id, context.team.team_id]);
@@ -789,6 +856,7 @@ export class Integrations {
       const current = await this.workflowFacts(context);
       const row = current.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
       if (row?.phase !== "triage" || row.linear?.id !== id || row.issue.title !== initial.row.issue.title || row.issue.body !== initial.row.issue.body) this.auth.fail(409, "HOW formal identity changed during proposal");
+      await this.workflowIssuePlanReply(context, grant, row.linear, body.summary);
       return { linear: row.linear };
     }
     if (action === "begin") {
@@ -864,7 +932,7 @@ export class Integrations {
       return { linear };
     }
     if (action === "invalidate" || action === "fail") {
-      if (grant.kind === "plan" || grant.kind === "reconcile" && (action !== "invalidate" || !grant.recovery)) this.auth.fail(403, "Only owned code work or admitted stale-approval reconciliation can be changed");
+      if (["plan", "discuss"].includes(grant.kind) || grant.kind === "reconcile" && (action !== "invalidate" || !grant.recovery)) this.auth.fail(403, "Only owned code work or admitted stale-approval reconciliation can be changed");
       const current = await this.workflowCurrent(context, grant, undefined, action === "invalidate");
       if (!current.row.linear || current.row.phase === "blocked" && current.row.fingerprint === null) this.auth.fail(409, "Unknown or ambiguous approval is not overwritten");
       if (grant.recovery && current.row.phase !== "triage" && (current.row.recovery !== "invalidate" || current.facts.recoveries.get(grant.issue_number) !== grant.recovery.branch)) this.auth.fail(409, "Prior canonical recovery evidence changed");

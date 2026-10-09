@@ -7,7 +7,7 @@ const PROTOCOL = "oriel/workflow/v2";
 const WATCH_PROTOCOL = "oriel/workflow-progress/v1";
 const HEARTBEAT_MS = 10_000;
 const EXPIRY_MS = 45_000;
-const STAGES = ["idle", "discovering", "preparing", "planning", "implementing", "reviewing", "verifying",
+const STAGES = ["idle", "discovering", "preparing", "planning", "discussing", "implementing", "reviewing", "verifying",
   "integrating", "pushing", "publishing", "reconciling", "paused"] as const;
 type Stage = typeof STAGES[number];
 type ProgressTask = WorkflowTask & { repository: string };
@@ -259,7 +259,7 @@ export class WorkflowLeases {
         return;
       }
       if (request.type !== "claim" || attachment.grant ||
-          !["plan", "implement", "respond", "reconcile"].includes(request.kind as string) ||
+          !["plan", "discuss", "implement", "respond", "reconcile"].includes(request.kind as string) ||
           !Number.isSafeInteger(request.issue_number) || (request.issue_number as number) <= 0 ||
           typeof request.version !== "string" || !/^[a-f0-9]{64}$/.test(request.version) ||
           !(request.branch === null || typeof request.branch === "string" && request.branch.length <= 255)) throw new Error();
