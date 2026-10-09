@@ -67,7 +67,7 @@ test("HOW planning waits for native Triage and resumes when the team enables it"
     assert.deepEqual(s.fixture.linears, []);
     s.fixture.states.unshift(triage);
     assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "needs-how");
-    const proposal = await s.action(await s.claim("plan"), "proposal", { title: "HOW", description: "Scope for human review." });
+    const proposal = await s.action(await s.claim("plan"), "proposal", { title: "HOW", description: "Scope for human review.", summary: "Prepared the HOW for human review." });
     assert.equal(proposal.status, 200);
     assert.equal(proposal.data.linear.state.id, triage.id);
     assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "triage");
@@ -112,11 +112,11 @@ test("native missing-HOW errors permit creation but authorization and mixed fail
     const forbidden = { message: "Entity not found: Issue", path: ["issue"], extensions: { code: "FORBIDDEN" } };
     for (const errors of [[forbidden], [missing, forbidden]]) {
       s.fixture.missingHowErrors = errors;
-      assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation." })).status, 502);
+      assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation.", summary: "Prepared the HOW; implementation awaits approval." })).status, 502);
       assert.deepEqual(s.fixture.linears, []);
     }
     s.fixture.missingHowErrors = [missing];
-    const proposal = await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation." });
+    const proposal = await s.action(lease, "proposal", { title: "HOW", description: "Review before approving implementation.", summary: "Prepared the HOW; implementation awaits approval." });
     assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
     assert.equal(proposal.data.linear.state.type, "triage");
     assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).linear.id, proposal.data.linear.id);
@@ -139,12 +139,12 @@ test("WHAT browser creation and deterministic HOW recover unknown sends without 
     assert.equal((await foreign.api(`/api/workflows/${device}/issues`, { ...request, request_id: randomUUID() })).status, 403);
     const lease = await s.claim("plan");
     s.fixture.uncertainty.set("how-create", true); s.fixture.uncertainty.set("how-link", true);
-    const proposal = await s.action(lease, "proposal", { title: "HOW plan", description: "Implement source and run verification." });
+    const proposal = await s.action(lease, "proposal", { title: "HOW plan", description: "Implement source and run verification.", summary: "Prepared the HOW with implementation and verification steps." });
     assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
     assert.equal(proposal.data.linear.state.name, "Triage");
     assert.equal(s.fixture.linears.length, 1);
     s.fixture.linears[0].description = "Human refinement remains authoritative";
-    const retry = await s.action(lease, "proposal", { title: "HOW plan", description: "Implement source and run verification." });
+    const retry = await s.action(lease, "proposal", { title: "HOW plan", description: "Implement source and run verification.", summary: "Prepared the HOW with implementation and verification steps." });
     assert.equal(retry.status, 200, JSON.stringify(retry.data));
     assert.equal(retry.data.linear.description, "Human refinement remains authoritative");
     assert.equal(s.fixture.linears[0].attachments.length, 1);
@@ -156,6 +156,7 @@ test("WHAT browser creation and deterministic HOW recover unknown sends without 
 test("native Markdown formatting is acknowledged once without granting Todo", async () => {
   const s = await setup();
   try {
+    s.fixture.comments.set(42, []); // Exercise HOW feedback without a pending Issue command.
     const how = s.fixture.addHow("Triage");
     how.comments.push({ id: "request", body: "https://linear.app/example/profiles/oriel-agent revise the HOW", createdAt: "2026-01-01T00:00:00Z", user: { name: "Human" } });
     s.fixture.normalizeDescription = body => body.replace("Questions:\n1.", "Questions:\n\n1.");
@@ -173,6 +174,7 @@ test("native Markdown formatting is acknowledged once without granting Todo", as
 test("canonical update receipts do not hide intervening human edits", async () => {
   const s = await setup();
   try {
+    s.fixture.comments.set(42, []); // Exercise HOW feedback without a pending Issue command.
     const how = s.fixture.addHow("Triage");
     how.comments.push({ id: "request", body: "https://linear.app/example/profiles/oriel-agent revise", createdAt: "2026-01-01T00:00:00Z", user: { id: "human", name: "Human", app: false } });
     const lease = await s.claim("plan");
@@ -190,6 +192,7 @@ test("canonical update receipts do not hide intervening human edits", async () =
 test("HOW update receipts do not consume unanswered questions and reply retries do not duplicate answers", async () => {
   const s = await setup();
   try {
+    s.fixture.comments.set(42, []); // Exercise HOW feedback without a pending Issue command.
     const how = s.fixture.addHow("Triage");
     const request = { id: "question", body: "https://linear.app/example/profiles/oriel-agent 見えてる？", createdAt: "2026-01-01T00:00:00Z", user: { id: "human", name: "Human", app: false } };
     const key = `how:${createHash("sha256").update(JSON.stringify([how.id, request.id, request.body])).digest("hex")}`;
@@ -444,13 +447,14 @@ test("formal linking paginates attachments and issues before deciding uniqueness
 test("human HOW edits during final admission reads are never overwritten", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
+    s.fixture.comments.set(42, []); // Exercise HOW feedback without a pending Issue command.
     const how = s.fixture.addHow("Triage");
     const lease = await s.claim("plan");
     let reads = 0;
     s.fixture.holdReads = ({ operation }) => {
       if (operation === "states" && ++reads === 2) how.description = "Human-authored HOW must survive.";
     };
-    const result = await s.action(lease, "proposal", { title: "Agent proposal", description: "Agent-authored HOW" });
+    const result = await s.action(lease, "proposal", { title: "Agent proposal", description: "Agent-authored HOW", summary: "Updated the proposed scope." });
     assert.equal(result.status, 409);
     assert.equal(how.description, "Human-authored HOW must survive.");
     assert.equal(how.title, "Implement the HOW");
@@ -514,12 +518,12 @@ test("initial HOW requires a human command and invalidates edited or deleted req
     const lease = await s.claim("plan");
     request.body = "/oriel how?";
     assert.notEqual((await row()).version, ready.version);
-    assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan" })).status, 409);
+    assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan", summary: "Prepared the HOW for review." })).status, 409);
     request.body = "/oriel how";
     assert.equal((await row()).version, ready.version);
     s.fixture.comments.set(42, []);
     assert.equal((await row()).phase, "waiting-how");
-    assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan" })).status, 409);
+    assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan", summary: "Prepared the HOW for review." })).status, 409);
     assert.deepEqual(s.fixture.linears, []);
     s.fixture.addHow("Triage");
     assert.equal((await row()).phase, "triage", "Existing HOW survives request deletion");
@@ -534,7 +538,7 @@ test("initial HOW retries remain idempotent after the request is removed", async
   const s = await setup();
   try {
     const lease = await s.claim("plan");
-    const draft = { title: "HOW", description: "Resolve open WHAT questions before Todo." };
+    const draft = { title: "HOW", description: "Resolve open WHAT questions before Todo.", summary: "Prepared the HOW with open questions for human review." };
     const proposal = await s.action(lease, "proposal", draft);
     assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
     s.fixture.comments.set(42, []);
@@ -556,7 +560,7 @@ test("request deletion during final creation reads prevents initial HOW creation
     s.fixture.holdReads = ({ operation }) => {
       if (operation === "states" && ++reads === 2) s.fixture.comments.set(42, []);
     };
-    const result = await s.action(lease, "proposal", { title: "HOW", description: "Plan for review." });
+    const result = await s.action(lease, "proposal", { title: "HOW", description: "Plan for review.", summary: "Prepared the HOW for review." });
     assert.equal(result.status, 409);
     assert.deepEqual(s.fixture.linears, []);
   } finally { await s.close(); }
