@@ -189,16 +189,6 @@ const providerControls = Object.fromEntries(providers.map((provider) => [provide
 }]));
 let integrations = null;
 let accountEpoch = 0;
-let deviceTimer;
-let deviceRefresh;
-const terminalLabels = {online: "使用可能", grace: "再接続中", offline: "使用不可", unknown: "状態確認中"};
-function scheduleDevices() {
-    clearTimeout(deviceTimer);
-    if (user) deviceTimer = setTimeout(async () => {
-        try { await refreshDevices(); } catch { /* refreshDevices displays the failure. */ }
-        scheduleDevices();
-    }, 5000);
-}
 let integrationsRequest = 0;
 let issuesRequest = 0;
 let repositoryRequest = 0;
@@ -220,7 +210,9 @@ let busy = false;
 let pairInfo = null;
 let pairClaimed = false;
 let pairOwner = null;
-let pairTimer;
+let deviceRefresh = null;
+let deviceTimer;
+let deviceListFailed = false;
 let terminal;
 let fit;
 let socket;
@@ -245,7 +237,7 @@ function render() {
     anonymousActions.hidden = !!user;
     sessionActions.hidden = !user;
     for (const button of dashboard.querySelectorAll("button")) button.disabled = busy;
-    for (const row of deviceRows.values()) row.open.disabled = busy || row.device.terminal_status !== "online";
+    for (const row of deviceRows.values()) row.open.disabled = busy || deviceListFailed || row.device.terminal_status !== "online";
     approvePair.disabled = busy || !user || !pairInfo || pairClaimed;
     pairSection.hidden = !pairing.token && !pairing.invalid && !pairInfo;
     if (pairing.invalid) {
@@ -313,10 +305,7 @@ function disconnect() {
 function setUser(next) {
     if (user?.id !== next?.id) {
         disconnect();
-        clearTimeout(pairTimer);
         accountEpoch++;
-        clearTimeout(deviceTimer);
-        deviceRefresh = null;
         stopProgress();
         progressSnapshot.clear();
         deviceRows.clear();
@@ -343,9 +332,10 @@ function setUser(next) {
         deviceSummary.textContent = next ? "Loading owned devices…" : "Sign in to see your devices.";
     }
     user = next;
+    clearTimeout(deviceTimer);
+    if (user) scheduleDevices();
     render();
     if (user) connectProgress();
-    scheduleDevices();
 }
 
 async function api(path, body) {
@@ -625,6 +615,7 @@ function createDeviceRow(device) {
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "Open terminal";
+    open.title = "Disconnected input is not replayed. PTYs are not restored after host restart.";
     const work = document.createElement("button");
     work.type = "button";
     work.textContent = "Open workflow";
@@ -653,10 +644,8 @@ function createDeviceRow(device) {
     updated.id = `execution-updated-${device.device_id}`;
     updatedLine.append("Updated: ", updated);
     card.append(state, what, how, progressRepository, updatedLine);
-    const availability = document.createElement("p");
-    availability.setAttribute("role", "status");
-    item.append(label, repository, availability, open, work, card);
-    const row = {device, item, label, repository, availability, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
+    item.append(label, repository, open, work, card);
+    const row = {device, item, label, repository, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
     open.addEventListener("click", () => perform(() => openTerminal(row.device)));
     work.addEventListener("click", () => perform(async () => {
         repositoryDeviceId = row.device.device_id;
@@ -665,23 +654,20 @@ function createDeviceRow(device) {
     return row;
 }
 
-function refreshDevices() {
-    if (!user) return Promise.resolve();
-    if (deviceRefresh) return deviceRefresh;
+async function refreshDevices() {
+    if (!user) return;
     const epoch = accountEpoch;
-    const pending = updateDevices().catch(error => {
+    if (deviceRefresh?.epoch === epoch) return deviceRefresh.promise;
+    const promise = updateDevices().catch(error => {
         if (currentAccount(epoch)) {
-            deviceSummary.textContent = "状態確認失敗: " + errorText(error);
-            for (const row of deviceRows.values()) {
-                row.device.terminal_status = "unknown";
-                row.availability.textContent = "状態確認失敗";
-                row.open.disabled = true;
-            }
+            deviceListFailed = true;
+            deviceSummary.textContent = "状態確認失敗";
+            for (const row of deviceRows.values()) row.open.disabled = true;
         }
         throw error;
-    }).finally(() => { if (deviceRefresh === pending) deviceRefresh = null; });
-    deviceRefresh = pending;
-    return pending;
+    }).finally(() => { if (deviceRefresh?.promise === promise) deviceRefresh = null; });
+    deviceRefresh = {epoch, promise};
+    return promise;
 }
 
 async function updateDevices() {
@@ -689,6 +675,7 @@ async function updateDevices() {
     const epoch = accountEpoch;
     const result = await api("/api/devices");
     if (!currentAccount(epoch)) return;
+    deviceListFailed = false;
     devices = result.devices;
     for (const [id, row] of deviceRows) {
         if (!devices.some((device) => device.device_id === id)) {
@@ -719,21 +706,20 @@ async function updateDevices() {
             deviceList.append(row.item);
         }
         row.device = device;
-        row.label.textContent = `${device.name} (${device.device_id})`;
+        row.label.textContent = `${device.name} (${device.device_id}) — ${({online:"使用可能", grace:"再接続中", offline:"使用不可", unknown:"状態確認中"})[device.terminal_status] || "状態確認中"}`;
         row.repository.textContent = device.repository
             ? `Last reported repository: ${device.repository.owner}/${device.repository.name}`
             : "No GitHub repository reported. Start the updated orield from a GitHub checkout.";
-        row.availability.textContent = terminalLabels[device.terminal_status] || terminalLabels.unknown;
-        row.open.disabled = busy || device.terminal_status !== "online";
+        row.open.disabled = busy || deviceListFailed || device.terminal_status !== "online";
         row.work.disabled = busy;
     }
     renderProgressCards();
-    if (pairClaimed && pairInfo && devices.some((device) => device.device_id === pairInfo.device_id)) {
+    if (pairClaimed && pairInfo && pairOwner?.id === user.id && devices.some((device) => device.device_id === pairInfo.device_id)) {
         pairing.token = null;
-        clearTimeout(pairTimer);
-        pairStatus.textContent = "Device paired after local approval. " +
-            (devices.find(device => device.device_id === pairInfo.device_id)?.terminal_status === "online"
-                ? "You can now open its terminal." : "Waiting for the terminal host to become available.");
+        pairStatus.textContent = "Device paired after local approval. Terminal availability is shown in the device list.";
+    } else if (pairClaimed && pairInfo && pairing.token && pairOwner?.id === user.id && Date.now() >= pairInfo.expires_at * 1000) {
+        pairing.token = null;
+        pairStatus.textContent = "Pairing was not confirmed before expiry or was cancelled locally. Restart pairing on the device.";
     }
 }
 
@@ -764,23 +750,18 @@ async function claimPair() {
 }
 
 async function waitForPair() {
-    clearTimeout(pairTimer);
     if (!user || !pairing.token || !pairClaimed) return;
     if (user.id !== pairOwner.id) {
         pairStatus.textContent = `This pairing was approved for ${pairOwner.display_name} (${pairOwner.id}). Sign in to that account or restart pairing on the device.`;
         return;
     }
     pairStatus.textContent = "Waiting for approval on the device. Confirm the account name and ID on its local terminal. Keep this tab open.";
+    const epoch = accountEpoch;
     try {
         await refreshDevices();
-        if (!pairing.token) return;
-        if (Date.now() >= pairInfo.expires_at * 1000) {
-            pairing.token = null;
-            pairStatus.textContent = "Pairing was not confirmed before expiry or was cancelled locally. Restart pairing on the device.";
-            return;
-        }
-        pairTimer = setTimeout(waitForPair, 2000);
+        // The shared device refresh loop checks registration and pairing expiry.
     } catch (error) {
+        if (!currentAccount(epoch)) return;
         pairStatus.textContent = errorText(error) + " Use Refresh devices to check again.";
     }
 }
@@ -1102,9 +1083,7 @@ function sendResize() {
 async function openTerminal(device) {
     const epoch = accountEpoch;
     await refreshDevices();
-    if (!currentAccount(epoch)) return;
-    device = devices.find(current => current.device_id === device.device_id);
-    if (!device || device.terminal_status !== "online") throw new Error("Terminal unavailable: " + (terminalLabels[device?.terminal_status] || terminalLabels.unknown));
+    if (!currentAccount(epoch) || deviceListFailed || devices.find(d => d.device_id === device.device_id)?.terminal_status !== "online") throw new Error("Terminal host unavailable or not confirmed");
     const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
     if (location.protocol !== "https:" && !(location.protocol === "http:" && loopback)) {
         throw new Error("Terminal connections require HTTPS (or loopback HTTP).");
@@ -1173,7 +1152,7 @@ async function openTerminal(device) {
         disconnect();
         status.textContent = failed
             ? "Connection failed. The device may be offline, your session may have expired, or access was rejected."
-            : `Disconnected (${event.reason || event.code}). Open the device again to reconnect.`;
+            : `Disconnected (code ${event.code}): ${event.reason || "Open the device again to reconnect."}`;
         const ownerId = user?.id;
         try {
             const result = await api("/api/session");
@@ -1241,6 +1220,14 @@ setInterval(async () => {
     }
 }, 15000);
 
+function scheduleDevices() {
+    clearTimeout(deviceTimer);
+    const epoch = accountEpoch;
+    deviceTimer = setTimeout(async () => {
+        try { await refreshDevices(); } catch (_) {}
+        if (currentAccount(epoch)) scheduleDevices();
+    }, 5000);
+}
 render();
 perform(async () => {
     setUser((await api("/api/session")).user);
@@ -1347,9 +1334,9 @@ async fn home(__cx: &Cx) -> Result<impl View> {
                     </section>
                     <section>
                         <h2>"Your devices"</h2>
+                        <p>"Disconnected input is not replayed. Terminal processes are not restored after host restart. Open the terminal again after the device becomes available."</p>
                         <p id="device-summary">"Sign in to see your devices."</p>
                         <p id="workflow-progress-status" role="status" aria-live="polite" aria-atomic="true">"Sign in to see live execution."</p>
-                        <p>"Disconnected input is discarded. Output replay and terminal restoration after daemon restart are not guaranteed. Reopen the terminal after the host becomes available."</p>
                         <ul id="devices"></ul>
                     </section>
                     <section id="repository-work" hidden="">

@@ -719,11 +719,8 @@ where
                     }
 
                     Some(Ok(Message::Text(text))) => {
-                        if let Some(challenge) = text.as_str().strip_prefix("\u{1e}oriel-heartbeat:") {
-                            if challenge.len() <= 64 && challenge.split(':').count() == 2
-                                && challenge.split(':').all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())) {
-                                sender.send(Message::Text(format!("\u{1e}oriel-heartbeat-ack:{challenge}").into())).await?;
-                            }
+                        if text.starts_with("oriel-heartbeat:") {
+                            sender.send(Message::Text(text)).await?;
                             continue;
                         }
                         if let Some((cols, rows)) =

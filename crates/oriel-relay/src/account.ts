@@ -11,34 +11,7 @@ import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
 import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 
-export interface AccountEnv extends IntegrationEnv {
-  RELAY: DurableObjectNamespace;
-}
-
-async function terminalStatuses(env: AccountEnv, devices: { device_id: string }[]): Promise<string[]> {
-  const statuses = devices.map(() => "unknown");
-  let cursor = 0;
-  await Promise.all(Array.from({ length: Math.min(8, devices.length) }, async () => {
-    while (cursor < devices.length) {
-      const index = cursor++;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const stub = env.RELAY.get(env.RELAY.idFromName(devices[index].device_id));
-        const value = await Promise.race([
-          (async () => {
-            const response = await stub.fetch("https://relay/internal/terminal-status");
-            if (!response.ok) throw new Error("Status lookup failed");
-            return await response.json() as { terminal_status?: string };
-          })(),
-          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Status timeout")), 2000); }),
-        ]);
-        if (["online", "grace", "offline", "unknown"].includes(value.terminal_status ?? "")) statuses[index] = value.terminal_status!;
-      } catch { /* Preserve registrations when presence cannot be checked. */ }
-      finally { clearTimeout(timer); }
-    }
-  }));
-  return statuses;
-}
+export interface AccountEnv extends IntegrationEnv { RELAY: DurableObjectNamespace; }
 
 type User = { id: string; display_name: string };
 type Session = { hash: string; user: User };
@@ -394,11 +367,27 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           const session = await this.requireSession(request);
           const devices = this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
             "SELECT device_id, name, repository FROM devices WHERE user_id = ? ORDER BY name, device_id", session.user.id,
-          ).toArray();
-          const statuses = await terminalStatuses(this.env, devices);
-          response = json({ devices: devices.map(({ repository, ...device }, index) => ({
-            ...device, repository: JSON.parse(repository ?? "null"), terminal_status: statuses[index],
-          })) });
+          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null"), terminal_status: "unknown" }));
+          let cursor = 0;
+          await Promise.all(Array.from({ length: Math.min(8, devices.length) }, async () => {
+            while (cursor < devices.length) {
+              const device = devices[cursor++];
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const relay = this.env.RELAY.get(this.env.RELAY.idFromName(device.device_id));
+                const state = await Promise.race([
+                  relay.fetch(new Request("https://relay/internal/terminal-status")).then(async response => {
+                    if (!response.ok) throw new Error("State query failed");
+                    return response.text();
+                  }),
+                  new Promise<string>((_, reject) => { timer = setTimeout(() => reject(new Error("State query timeout")), 2000); }),
+                ]);
+                if (["online", "grace", "offline", "unknown"].includes(state)) device.terminal_status = state;
+              } catch { /* Keep unknown when the relay cannot be queried. */ }
+              finally { clearTimeout(timer); }
+            }
+          }));
+          response = json({ devices });
           break;
         }
         case "POST /api/auth/register/options":
