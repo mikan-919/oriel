@@ -614,13 +614,16 @@ export class Integrations {
       // that older copy: preserve human edits and terminal-state transitions.
       const baseline = current.facts.hows.find(how => how.id === id);
       const fresh = await this.workflowHow(context, id);
-      if (!baseline || !fresh || fresh.team.id !== context.team.team_id || fresh.identifier !== baseline.identifier ||
-        fresh.title !== baseline.title || fresh.description !== baseline.description || fresh.state.id !== baseline.state.id ||
-        fresh.state.name !== baseline.state.name || fresh.state.type !== baseline.state.type ||
-        fresh.attachments.length !== baseline.attachments.length ||
-        fresh.attachments.some((attachment, index) => attachment.url !== baseline.attachments[index].url)) {
-        this.auth.fail(409, "Human changes prevented the HOW update");
-      }
+      if (!baseline || !fresh) this.auth.fail(409, "Human changes prevented the HOW update (missing HOW)");
+      const differences = [
+        ["team", fresh.team.id !== context.team.team_id],
+        ["identifier", fresh.identifier !== baseline.identifier],
+        ["title", fresh.title !== baseline.title],
+        ["description", fresh.description !== baseline.description],
+        ["state", fresh.state.id !== baseline.state.id || fresh.state.name !== baseline.state.name || fresh.state.type !== baseline.state.type],
+        ["attachments", fresh.attachments.length !== baseline.attachments.length || fresh.attachments.some((attachment, index) => attachment.url !== baseline.attachments[index].url)],
+      ].filter(([, differs]) => differs).map(([field]) => field);
+      if (differences.length) this.auth.fail(409, `Human changes prevented the HOW update (${differences.join(", ")})`);
       context.check();
       try {
         const result = await this.workflowLinear<{ issueUpdate: { success: boolean; issue: { id: string; title: string; description: string | null } | null } }>(context,
