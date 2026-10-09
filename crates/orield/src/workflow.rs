@@ -472,6 +472,14 @@ impl Session {
             && detail.as_deref() == Some("Workflow lease is unavailable")
         {
             error.context(Stop::LeaseLost)
+        } else if status == reqwest::StatusCode::CONFLICT
+            && detail.as_deref().is_some_and(|message| {
+                message.starts_with("Human changes prevented the HOW update")
+            })
+        {
+            // Conflicting native reads require fresh admission, not a failure
+            // write based on the same stale HOW state.
+            error.context(Stop::Uncertain)
         } else {
             error
         }
