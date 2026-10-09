@@ -202,7 +202,7 @@ fn credential_request(request: &str, repository: &Repository) -> bool {
             "protocol" if protocol.is_none() => protocol = Some(value),
             "host" if host.is_none() => host = Some(value),
             "path" if path.is_none() => path = Some(value),
-            "username" => {}
+            "username" | "capability[]" | "wwwauth[]" => {}
             _ => return false,
         }
     }
