@@ -397,10 +397,11 @@ export class Integrations {
     if (!agent) return null; // Existing user OAuth connections need app authorization before native mentions.
     for (const comment of [...comments].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
       if (!comment.user || comment.user.app || comment.user.id === agent.id || /<!-- oriel:/.test(comment.body)) continue;
-      // Linear exports native user mentions as profile URLs in Markdown. Match
-      // the authenticated app's exact profile, never its display name or @oriel.
+      // Profile links identify native mentions. Also accept the explicit
+      // @oriel command in comment text while this app connection is available.
       const urls = comment.body.match(/https:\/\/linear\.app\/[^\s<>()[\]]+/g) ?? [];
-      if (!urls.some(url => url.replace(/[.,!?;:]+$/, "") === agent.url)) continue;
+      const command = /^@oriel(?:\s|[、。，,.!?！？:：]|$)/i.test(comment.body.trimStart());
+      if (!command && !urls.some(url => url.replace(/[.,!?;:]+$/, "") === agent.url)) continue;
       const key = `how:${await digest([id, comment.id, comment.body])}`;
       const marker = await this.workflowMarker(context, "how-response", key);
       if (!comments.some(response => response.body.includes(marker))) return { key, body: comment.body };

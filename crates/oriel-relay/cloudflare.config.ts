@@ -54,8 +54,8 @@ import {
 // comments. Native INPUT_ERROR / "Entity not found: Issue" maps to an absent HOW
 // only for issue lookup; authorization, mixed errors and uncertain reads still block.
 // Review/edit HOW, then move it to native Todo to approve code. Oriel never sets Todo
-// or merges. Native mentions of the authenticated Linear app in Triage comments
-// request HOW refinement; /oriel PR comments, reviews and failed checks drive verified fixes
+// or merges. Native mentions of the authenticated Linear app, or comments starting
+// with @oriel, request HOW refinement in Triage; /oriel PR comments, reviews and failed checks drive verified fixes
 // on the same canonical branch. Human merge is required before Linear Done,
 // including WHATs auto-closed by that merge.
 // Triage refinement replies contain the model's actual summary in the commenter's
@@ -92,8 +92,9 @@ import {
 // then select and save the Linear team. The OAuth application's name and icon are
 // shown in the mention picker. Replies are authored by the app, not the installer.
 // The native app profile comes from viewer{id name url app} and is stored with the
-// selected team; matching names or literal @oriel text cannot identify the app.
-// The existing workflow poll reads native mentions as exact profile URLs in Markdown;
+// selected team. Native profile URLs identify the app; an explicit @oriel comment
+// command is also accepted for the connected app.
+// The workflow poll reads profile links and explicit @oriel commands from Markdown;
 // AgentSessionEvent webhooks are not required or enabled by this integration.
 // Enable the selected team's Team Settings > Triage before proposing HOWs.
 // Required native states: Triage (triage), Todo (unstarted), In Progress (started),
