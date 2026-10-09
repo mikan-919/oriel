@@ -695,6 +695,10 @@ where
                     }
 
                     Some(Ok(Message::Text(text))) => {
+                        if text.starts_with("oriel-heartbeat:") {
+                            sender.send(Message::Text(text)).await?;
+                            continue;
+                        }
                         if let Some((cols, rows)) =
                             parse_resize(text.as_str())
                         {

@@ -11,7 +11,7 @@ import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
 import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 
-export interface AccountEnv extends IntegrationEnv {}
+export interface AccountEnv extends IntegrationEnv { RELAY: DurableObjectNamespace; }
 
 type User = { id: string; display_name: string };
 type Session = { hash: string; user: User };
@@ -365,9 +365,29 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           break;
         case "GET /api/devices": {
           const session = await this.requireSession(request);
-          response = json({ devices: this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
+          const devices = this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
             "SELECT device_id, name, repository FROM devices WHERE user_id = ? ORDER BY name, device_id", session.user.id,
-          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null") })) });
+          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null"), terminal_status: "unknown" }));
+          let cursor = 0;
+          await Promise.all(Array.from({ length: Math.min(8, devices.length) }, async () => {
+            while (cursor < devices.length) {
+              const device = devices[cursor++];
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const relay = this.env.RELAY.get(this.env.RELAY.idFromName(device.device_id));
+                const state = await Promise.race([
+                  relay.fetch(new Request("https://relay/internal/terminal-status")).then(async response => {
+                    if (!response.ok) throw new Error("State query failed");
+                    return response.text();
+                  }),
+                  new Promise<string>((_, reject) => { timer = setTimeout(() => reject(new Error("State query timeout")), 2000); }),
+                ]);
+                if (["online", "grace", "offline", "unknown"].includes(state)) device.terminal_status = state;
+              } catch { /* Keep unknown when the relay cannot be queried. */ }
+              finally { clearTimeout(timer); }
+            }
+          }));
+          response = json({ devices });
           break;
         }
         case "POST /api/auth/register/options":
