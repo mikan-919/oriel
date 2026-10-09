@@ -477,13 +477,21 @@ impl Session {
         }
     }
     async fn guard(&mut self, guard: &Guard) -> Result<Snapshot> {
+        self.guard_with_child(guard, false).await
+    }
+    async fn guard_with_child(&mut self, guard: &Guard, child_running: bool) -> Result<Snapshot> {
         self.checked().await?;
-        let snapshot = if guard.code {
+        let snapshot = if child_running && guard.code {
             // Never extend the uncertainty window of a source-writing child.
             let request = self.client.get(self.endpoint.clone());
             let response = tokio::select! {
-                response = request.send() => response.map_err(|_| {
-                    anyhow!("workflow discovery transport failed").context(Stop::Uncertain)
+                response = request.send() => response.map_err(|error| {
+                    let reason = if error.is_timeout() {
+                        "workflow discovery timed out after 12 seconds while a child was running"
+                    } else {
+                        "workflow discovery transport failed while a child was running"
+                    };
+                    anyhow!(reason).context(Stop::Uncertain)
                 })?,
                 _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
             };
@@ -559,7 +567,7 @@ impl Session {
             tokio::select! {
                 output = &mut completion => break (output.map_err(|_| anyhow!("workflow child completion is uncertain")), true),
                 _ = interval.tick() => {
-                    if let Err(error) = self.guard(guard).await { break (Err(error), false); }
+                    if let Err(error) = self.guard_with_child(guard, true).await { break (Err(error), false); }
                 }
                 _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
             }
@@ -1197,7 +1205,7 @@ async fn agent(
     let (result, finished) = loop {
         tokio::select! {
             status = &mut completion => break (status.map_err(|_| anyhow!("agent completion uncertain")), true),
-            _ = interval.tick() => if let Err(error) = session.guard(guard).await { break (Err(error), false); },
+            _ = interval.tick() => if let Err(error) = session.guard_with_child(guard, true).await { break (Err(error), false); },
             _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
         }
     };
@@ -1394,7 +1402,7 @@ async fn push(
         let (sent, finished) = loop {
             tokio::select! {
                 output = &mut completion => break (output.map_err(|_| anyhow!("CAS push send uncertain")), true),
-                _ = interval.tick() => if let Err(error) = session.guard(guard).await { break (Err(error), false); },
+                _ = interval.tick() => if let Err(error) = session.guard_with_child(guard, true).await { break (Err(error), false); },
                 _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
             }
         };
