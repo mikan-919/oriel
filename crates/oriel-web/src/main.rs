@@ -978,7 +978,7 @@ async function refreshWorkflow() {
         repositoryDetails.textContent += ` — ${label} → ${result.team.team_name}`;
         const items = document.createDocumentFragment();
         const phases = {
-            "waiting-how": "To request HOW planning, a human GitHub user must post a comment containing only @oriel-relay[bot] how. Implementation requires later approval in Linear Todo.",
+            "waiting-how": "To request HOW planning, a human GitHub user must post a comment containing only /oriel how. Implementation requires later approval in Linear Todo.",
             "needs-how": "Waiting for the daemon to propose HOW in Linear Triage.",
             triage: "Review or edit HOW in Linear. Move it to Todo to approve execution.",
             approved: "Human-approved; waiting for the daemon to begin implementation.",

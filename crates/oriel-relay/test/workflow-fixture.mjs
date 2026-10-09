@@ -13,7 +13,7 @@ export function workflowFixture() {
       { id: "done", name: "Done", type: "completed" }, { id: "canceled", name: "Canceled", type: "canceled" },
     ], base_branch: "main", target_oid: "1".repeat(40), repository_node_id: "R_501", autonomous: true, verification: [["true"]],
     config_source: undefined, configurations: new Map(), calls: [], grants: [], uncertainty: new Map(), failures: new Map(), allowFailureApprovalRestore: false, holdReads: undefined,
-    issuePageSize: 100, attachmentPageSize: 100, comments: new Map([[42, [{ id: 1, body: "@oriel-relay[bot] how", user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]]]), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
+    issuePageSize: 100, attachmentPageSize: 100, comments: new Map([[42, [{ id: 1, body: "/oriel how", user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]]]), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
     compare: undefined, sealSupported: true, trees: new Map(),
   });
   fixture.addHow = (state = "Todo", number = 42) => {
@@ -25,7 +25,7 @@ export function workflowFixture() {
     fixture.linears.push(how);
     return how;
   };
-  fixture.feedback = (number, body = "@oriel-relay[bot] Please fix this behavior") => {
+  fixture.feedback = (number, body = "/oriel Please fix this behavior") => {
     const comments = fixture.comments.get(number) ?? [];
     const comment = { id: comments.length + 1, body, user: { login: "human", type: "User" }, created_at: new Date().toISOString() };
     comments.push(comment); fixture.comments.set(number, comments); return comment;

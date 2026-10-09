@@ -42,14 +42,16 @@ import {
 // Control loss clears running claims. No progress history is stored; snapshots never
 // include prompts, stdout or tokens. Workflow offline is not terminal-host availability.
 // `orield workflow` starts read-only Codex HOW planning for GitHub issues with a
-// human comment containing only @oriel-relay[bot] how; `--once` scans once.
+// human comment containing only /oriel how; `--once` scans once.
+// GitHub commands are read from comment text. PR requests start with /oriel
+// followed by whitespace and the requested change.
 // HOW is created in native Linear Triage with the exact GitHub Issue attachment.
 // Linear create IDs are deterministic UUID-v4-format IDs for issues, links and
 // comments. Native INPUT_ERROR / "Entity not found: Issue" maps to an absent HOW
 // only for issue lookup; authorization, mixed errors and uncertain reads still block.
 // Review/edit HOW, then move it to native Todo to approve code. Oriel never sets Todo
 // or merges. Native mentions of the authenticated Linear app in Triage comments
-// request HOW refinement; @oriel-relay[bot] PR comments, reviews and failed checks drive verified fixes
+// request HOW refinement; /oriel PR comments, reviews and failed checks drive verified fixes
 // on the same canonical branch. Human merge is required before Linear Done,
 // including WHATs auto-closed by that merge.
 // Triage refinement replies contain the model's actual summary in the commenter's

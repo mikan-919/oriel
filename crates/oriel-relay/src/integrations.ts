@@ -39,7 +39,7 @@ type Auth = {
   json(data: unknown, status?: number): Response;
 };
 const SECRET = /^[a-f0-9]{64}$/;
-const GITHUB_MENTION = "@oriel-relay[bot]";
+const GITHUB_COMMAND = "/oriel";
 const PERMISSIONS = { contents: "write", issues: "write", pull_requests: "write", metadata: "read" };
 const TOKEN_ERRORS = ["incorrect_client_credentials", "bad_verification_code", "redirect_uri_mismatch", "access_denied", "invalid_grant", "invalid_client"];
 const now = () => Math.floor(Date.now() / 1000);
@@ -267,14 +267,14 @@ export class Integrations {
       // The entire comment must be the command; quotes, code and prose do not opt in.
       const initialComments = linked.length === 0 && issue.state === "open"
         ? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
-      const requests = initialComments.filter(comment => comment.user?.type === "User" && comment.body.trim().toLowerCase() === `${GITHUB_MENTION} how`)
+      const requests = initialComments.filter(comment => comment.user?.type === "User" && comment.body.trim().toLowerCase() === `${GITHUB_COMMAND} how`)
         .sort((a, b) => String(a.id).localeCompare(String(b.id)));
       const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
         fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : requests.length ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null,
         what_comments: [], how_comments: [] };
       if (linked.length === 0 && issue.state === "open") {
         row.version = await digest(["oriel/initial-how-request/v1", row.version, requests.map(comment => [String(comment.id), comment.body, comment.user.login])]);
-        if (!requests.length) row.blocked_reason = `Waiting for a human GitHub user to comment ${GITHUB_MENTION} how (entire comment); this requests planning only, not implementation`;
+        if (!requests.length) row.blocked_reason = `Waiting for a human GitHub user to comment ${GITHUB_COMMAND} how (entire comment); this requests planning only, not implementation`;
       }
       if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
         row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
@@ -422,7 +422,7 @@ export class Integrations {
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body, comments: notes.filter(note => note.line !== null || note.commit_id === pr.head_oid).map(note => ({ path: note.path, line: note.line, body: note.body })) };
     }
     for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at))) {
-      if (comment.user.type === "Bot" || !/(?:^|[^\w@-])@oriel-relay\[bot\](?![\w-])/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
+      if (comment.user.type === "Bot" || !/^\/oriel(?:\s|$)/i.test(comment.body.trimStart()) || /<!-- oriel:/.test(comment.body)) continue;
       const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
     }

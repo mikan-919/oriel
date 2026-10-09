@@ -2065,11 +2065,11 @@ mod tests {
     fn initial_how_request_is_planning_input_with_human_approval() {
         let row: Row = serde_json::from_value(json!({
             "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
-            "what_comments":[{"id":"10","body":"@oriel-relay[bot] how","author":"human","created_at":"2026-01-01T00:00:00Z"}],
+            "what_comments":[{"id":"10","body":"/oriel how","author":"human","created_at":"2026-01-01T00:00:00Z"}],
             "how_comments":[],"version":"requested","phase":"needs-how"
         })).unwrap();
         let prompt = agent_prompt(&row, true);
-        assert!(prompt.contains("@oriel-relay[bot] how"));
+        assert!(prompt.contains("/oriel how"));
         assert!(prompt.contains("unresolved WHAT goals"));
         assert!(prompt.contains("Human approval is a later Linear Todo transition"));
     }
