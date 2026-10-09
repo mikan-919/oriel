@@ -1190,7 +1190,9 @@ async fn agent(
         .arg(path)
         .args([
             "-c",
-            "approval_policy=\"never\"",
+            "approval_policy=\"on-request\"",
+            "-c",
+            "approvals_reviewer=\"auto_review\"",
             "-c",
             "project_root_markers=[\".git\"]",
             "-c",
