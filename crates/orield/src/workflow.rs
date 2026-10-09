@@ -1892,7 +1892,6 @@ async fn scan(
         .exchange(json!({"type":"heartbeat"}), "heartbeat")
         .await?;
     let snapshot = session.snapshot().await?;
-    print!("{}", console.snapshot(&snapshot));
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
         if row.phase == "triage" && row.how_feedback.is_none() && row.issue_feedback.is_none() {
@@ -1931,17 +1930,20 @@ async fn scan(
             resting_stage = "paused";
             continue;
         }
-        event(
-            "Starting",
-            format!("#{} · {kind} · {}", row.issue.number, row.issue.title),
-        );
         if let Err(error) = session.claim(row, kind).await {
             // A timed-out claim can still be granted by Relay. Reconnecting
             // discards that session instead of mixing its late reply with
             // another request or retaining an unconfirmed lease.
-            event("Claim", format!("Failed: {error:#}"));
+            event(
+                "Claim",
+                format!("#{} · Failed: {error:#}", row.issue.number),
+            );
             return Err(error);
         }
+        event(
+            "Starting",
+            format!("#{} · {kind} · {}", row.issue.number, row.issue.title),
+        );
         session
             .progress(if kind == "reconcile" {
                 "reconciling"
