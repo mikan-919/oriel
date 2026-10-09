@@ -258,6 +258,8 @@ function render() {
             const code = attempt.error;
             if (code === "incorrect_client_credentials" || code === "invalid_client") {
                 explanation = `${providerNames[provider]} rejected the app credentials. Check the Client ID and its matching Client secret in Relay.`;
+            } else if (code === "app_actor_required") {
+                explanation = "Reconnect Linear and authorize the Oriel app as a workspace administrator.";
             } else if (attempt.step === "targets") {
                 explanation = `${providerNames[provider]} authorization succeeded, but reading available targets failed (${code || "details unavailable"}).`;
             } else {
@@ -279,7 +281,9 @@ function render() {
         controls.details.textContent = target
             ? provider === "github"
                 ? `Connected to ${target.owner}/${target.name} (repository ${target.repository_id}, installation ${target.installation_id}).`
-                : `Connected to ${target.team_name} (team ${target.team_id}, workspace ${target.workspace_id}).`
+                : `Connected to ${target.team_name} (team ${target.team_id}, workspace ${target.workspace_id}). ` +
+                    (target.agent ? `In Linear Triage comments, type @ and choose ${target.agent.name} to discuss the HOW.`
+                        : "Reconnect Linear to enable Oriel in the mention picker; workspace administrator approval is required.")
             : integrations ? "No target connected." : busy ? "Loading connection…" : "Connection status unavailable. Refresh account to try again.";
         controls.connect.textContent = target ? `Reconnect ${providerNames[provider]}` : `Connect ${providerNames[provider]}`;
         controls.connect.disabled = busy || !user;
@@ -974,7 +978,7 @@ async function refreshWorkflow() {
         repositoryDetails.textContent += ` — ${label} → ${result.team.team_name}`;
         const items = document.createDocumentFragment();
         const phases = {
-            "waiting-how": "To request HOW planning, a human GitHub user must post a comment containing only @oriel how. Implementation requires later approval in Linear Todo.",
+            "waiting-how": "To request HOW planning, a human GitHub user must post a comment containing only @oriel-relay[bot] how. Implementation requires later approval in Linear Todo.",
             "needs-how": "Waiting for the daemon to propose HOW in Linear Triage.",
             triage: "Review or edit HOW in Linear. Move it to Todo to approve execution.",
             approved: "Human-approved; waiting for the daemon to begin implementation.",

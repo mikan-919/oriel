@@ -170,7 +170,8 @@ function githubFixture({ paginated = false } = {}) {
     linearToken: "private-linear-access",
     refreshCount: 0,
     pkce: undefined,
-    team: { team_id: "team", team_name: "Engineering", workspace_id: "workspace" },
+    team: { team_id: "team", team_name: "Engineering", workspace_id: "workspace",
+      agent: { id: "oriel-agent", name: "Oriel", url: "https://linear.app/example/profiles/oriel-agent" } },
     linkedIssues: [{
       id: "linked-42", identifier: "ENG-42", title: "Implement the GitHub request", url: "https://linear.app/example/issue/ENG-42",
       description: "HOW: implement the requested change; human approval remains separate.",
@@ -228,7 +229,7 @@ function githubFixture({ paginated = false } = {}) {
         assert.equal(request.headers.get("Authorization"), `Bearer ${fixture.linearToken}`);
         if (fixture.apiFailed) return Response.json({ errors: [{ message: "secret-provider-diagnostic" }] });
         const { query, variables } = await request.json();
-        if (query.includes("teams(")) return Response.json({ data: { organization: { id: "workspace" },
+        if (query.includes("teams(")) return Response.json({ data: { organization: { id: "workspace" }, viewer: { ...fixture.team.agent, app: true },
           teams: { nodes: [{ id: "team", name: "Engineering" }], pageInfo: { hasNextPage: false, endCursor: null } } } });
         if (query.includes("attachments(")) {
           fixture.linkedRequests.push({ query, variables });

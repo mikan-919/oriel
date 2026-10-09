@@ -131,7 +131,7 @@ test("Owner progress streams follow multiple devices, admitted task metadata, pa
   how.url += "/切断しても登録を保持して復帰後に再接続する";
   fixture.issues.push({ ...fixture.issues[0], number: 43, node_id: "I_43", title: "A second WHAT",
     html_url: "https://github.com/octocat/connected/issues/43" });
-  fixture.feedback(43, "@oriel how");
+  fixture.feedback(43, "@oriel-relay[bot] how");
   const { worker, owner, daemon, user } = await setup(fixture);
   try {
     await addDevice(owner, daemon, user, secondDevice, secondToken);

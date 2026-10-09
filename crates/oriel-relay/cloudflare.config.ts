@@ -41,14 +41,15 @@ import {
 // every 10s while watched; logout/expiry/revocation stop that session's delivery.
 // Control loss clears running claims. No progress history is stored; snapshots never
 // include prompts, stdout or tokens. Workflow offline is not terminal-host availability.
-// `orield workflow` explicitly starts read-only Codex HOW planning; `--once` scans
-// once. HOW is created in native Linear Triage with the exact GitHub Issue attachment.
+// `orield workflow` starts read-only Codex HOW planning for GitHub issues with a
+// human comment containing only @oriel-relay[bot] how; `--once` scans once.
+// HOW is created in native Linear Triage with the exact GitHub Issue attachment.
 // Linear create IDs are deterministic UUID-v4-format IDs for issues, links and
 // comments. Native INPUT_ERROR / "Entity not found: Issue" maps to an absent HOW
 // only for issue lookup; authorization, mixed errors and uncertain reads still block.
 // Review/edit HOW, then move it to native Todo to approve code. Oriel never sets Todo
-// or merges. Literal @oriel text (not a native account mention) in Triage comments
-// requests HOW refinement; PR reviews/comments and failed checks drive verified fixes
+// or merges. Native mentions of the authenticated Linear app in Triage comments
+// request HOW refinement; @oriel-relay[bot] PR comments, reviews and failed checks drive verified fixes
 // on the same canonical branch. Human merge is required before Linear Done,
 // including WHATs auto-closed by that merge.
 // Triage refinement replies contain the model's actual summary in the commenter's
@@ -80,7 +81,14 @@ import {
 // For local development supply these values in gitignored .dev.vars.
 // Linear: register an OAuth app with PUBLIC_ORIGIN +
 // /api/integrations/callback/linear as redirect URI and set LINEAR_CLIENT_ID.
-// PKCE requests read/write; no Linear client secret is required.
+// PKCE requests read/write/app:mentionable with actor=app; no client secret is required.
+// Reconnect existing user OAuth connections from Web as a workspace administrator,
+// then select and save the Linear team. The OAuth application's name and icon are
+// shown in the mention picker. Replies are authored by the app, not the installer.
+// The native app profile comes from viewer{id name url app} and is stored with the
+// selected team; matching names or literal @oriel text cannot identify the app.
+// The existing workflow poll reads native mentions as exact profile URLs in Markdown;
+// AgentSessionEvent webhooks are not required or enabled by this integration.
 // Enable the selected team's Team Settings > Triage before proposing HOWs.
 // Required native states: Triage (triage), Todo (unstarted), In Progress (started),
 // Done (completed). Oriel never substitutes Todo when Triage is unavailable.

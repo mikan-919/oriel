@@ -20,7 +20,8 @@ type LinkedIssue = {
 type Session = { hash: string; user: { id: string; display_name: string } };
 type Provider = "github" | "linear";
 type Repository = { installation_id: number; repository_id: number; owner: string; name: string };
-type Team = { team_id: string; team_name: string; workspace_id: string };
+type LinearAgent = { id: string; name: string; url: string };
+type Team = { team_id: string; team_name: string; workspace_id: string; agent?: LinearAgent };
 type Installation = { id: number; app_id: number; account: { id: number; login: string; type: string } | null };
 type Credential = { access_token: string; refresh_token?: string; expires_at?: number; refresh_expires_at?: number };
 type Connection = {
@@ -38,6 +39,7 @@ type Auth = {
   json(data: unknown, status?: number): Response;
 };
 const SECRET = /^[a-f0-9]{64}$/;
+const GITHUB_MENTION = "@oriel-relay[bot]";
 const PERMISSIONS = { contents: "write", issues: "write", pull_requests: "write", metadata: "read" };
 const TOKEN_ERRORS = ["incorrect_client_credentials", "bad_verification_code", "redirect_uri_mismatch", "access_denied", "invalid_grant", "invalid_client"];
 const now = () => Math.floor(Date.now() / 1000);
@@ -52,7 +54,7 @@ type GithubPull = {
   head: { ref: string; sha: string; repo: { id: number } | null }; base: { ref: string; repo: { id: number } };
 };
 type GithubComment = { id: number; body: string; user: { type: string; login: string }; created_at: string };
-type LinearComment = { id: string; body: string; createdAt: string; user: { name: string } | null };
+type LinearComment = { id: string; body: string; createdAt: string; user: { id: string; name: string; app: boolean } | null };
 type WorkflowFacts = { snapshot: WorkflowSnapshot; states: LinearState[]; hows: WorkflowHow[]; pulls: GithubPull[]; refs: Map<string, string>; recoveries: Map<number, string> };
 
 /** Only authenticated target metadata is plaintext; credentials and PKCE are AES-GCM ciphertext. */
@@ -265,14 +267,14 @@ export class Integrations {
       // The entire comment must be the command; quotes, code and prose do not opt in.
       const initialComments = linked.length === 0 && issue.state === "open"
         ? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
-      const requests = initialComments.filter(comment => comment.user?.type === "User" && comment.body.trim().toLowerCase() === "@oriel how")
+      const requests = initialComments.filter(comment => comment.user?.type === "User" && comment.body.trim().toLowerCase() === `${GITHUB_MENTION} how`)
         .sort((a, b) => String(a.id).localeCompare(String(b.id)));
       const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
         fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : requests.length ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null,
         what_comments: [], how_comments: [] };
       if (linked.length === 0 && issue.state === "open") {
         row.version = await digest(["oriel/initial-how-request/v1", row.version, requests.map(comment => [String(comment.id), comment.body, comment.user.login])]);
-        if (!requests.length) row.blocked_reason = "Waiting for a human GitHub user to comment @oriel how (entire comment); this requests planning only, not implementation";
+        if (!requests.length) row.blocked_reason = `Waiting for a human GitHub user to comment ${GITHUB_MENTION} how (entire comment); this requests planning only, not implementation`;
       }
       if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
         row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
@@ -366,7 +368,7 @@ export class Integrations {
     let after: string | null = null;
     do {
       const result: { issue: { comments: Page<LinearComment> } | null } = await this.workflowLinear(context,
-        "query($id:String!,$after:String){issue(id:$id){comments(first:100,after:$after,includeArchived:true){nodes{id body createdAt user{name}} pageInfo{hasNextPage endCursor}}}}", { id, after });
+        "query($id:String!,$after:String){issue(id:$id){comments(first:100,after:$after,includeArchived:true){nodes{id body createdAt user{id name app}} pageInfo{hasNextPage endCursor}}}}", { id, after });
       if (!result.issue) this.auth.fail(502, "HOW comments are unavailable");
       comments.push(...result.issue.comments.nodes);
       after = result.issue.comments.pageInfo.hasNextPage ? result.issue.comments.pageInfo.endCursor : null;
@@ -377,8 +379,14 @@ export class Integrations {
   }
 
   private async workflowHowFeedback(context: WorkflowContext, id: string, comments: LinearComment[]): Promise<{ key: string; body: string } | null> {
+    const agent = context.team.agent;
+    if (!agent) return null; // Existing user OAuth connections need app authorization before native mentions.
     for (const comment of [...comments].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
-      if (!/@oriel\b/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
+      if (!comment.user || comment.user.app || comment.user.id === agent.id || /<!-- oriel:/.test(comment.body)) continue;
+      // Linear exports native user mentions as profile URLs in Markdown. Match
+      // the authenticated app's exact profile, never its display name or @oriel.
+      const urls = comment.body.match(/https:\/\/linear\.app\/[^\s<>()[\]]+/g) ?? [];
+      if (!urls.some(url => url.replace(/[.,!?;:]+$/, "") === agent.url)) continue;
       const key = `how:${await digest([id, comment.id, comment.body])}`;
       const marker = await this.workflowMarker(context, "how-response", key);
       if (!comments.some(response => response.body.includes(marker))) return { key, body: comment.body };
@@ -414,7 +422,7 @@ export class Integrations {
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body, comments: notes.filter(note => note.line !== null || note.commit_id === pr.head_oid).map(note => ({ path: note.path, line: note.line, body: note.body })) };
     }
     for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at))) {
-      if (comment.user.type === "Bot" || !/@oriel\b/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
+      if (comment.user.type === "Bot" || !/(?:^|[^\w@-])@oriel-relay\[bot\](?![\w-])/i.test(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
       const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
     }
@@ -1059,7 +1067,8 @@ export class Integrations {
     authorization.searchParams.set("state", state);
     if (provider === "linear") {
       authorization.searchParams.set("response_type", "code");
-      authorization.searchParams.set("scope", "read,write");
+      authorization.searchParams.set("scope", "read,write,app:mentionable");
+      authorization.searchParams.set("actor", "app");
       authorization.searchParams.set("code_challenge_method", "S256");
       authorization.searchParams.set("code_challenge", challenge!);
     }
@@ -1219,9 +1228,12 @@ export class Integrations {
     const teams: Team[] = [];
     let after: string | null = null;
     do {
-      const result: { organization: { id: string }; teams: { nodes: { id: string; name: string }[]; pageInfo: { hasNextPage: boolean; endCursor: string } } } = await this.linear(token, "query($after:String){organization{id} teams(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}", { after });
+      const result: { organization: { id: string }; viewer: LinearAgent & { app: boolean }; teams: { nodes: { id: string; name: string }[]; pageInfo: { hasNextPage: boolean; endCursor: string } } } = await this.linear(token, "query($after:String){organization{id} viewer{id name url app} teams(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}", { after });
       check();
-      teams.push(...result.teams.nodes.map(team => ({ team_id: team.id, team_name: team.name, workspace_id: result.organization.id })));
+      if (result.viewer?.app !== true) throw Object.assign(new Error("Linear app authorization is required"), { providerCode: "app_actor_required" });
+      const { id, name, url } = result.viewer;
+      if (!id || !name || !/^https:\/\/linear\.app\/[^/]+\/profiles\/[^/?#]+$/.test(url)) throw new Error("Linear app profile is unavailable");
+      teams.push(...result.teams.nodes.map(team => ({ team_id: team.id, team_name: team.name, workspace_id: result.organization.id, agent: { id, name, url } })));
       after = result.teams.pageInfo.hasNextPage ? result.teams.pageInfo.endCursor : null;
       if (result.teams.pageInfo.hasNextPage && !after) throw new Error("Linear pagination failed");
     } while (after);

@@ -157,7 +157,7 @@ test("native Markdown formatting is acknowledged once without granting Todo", as
   const s = await setup();
   try {
     const how = s.fixture.addHow("Triage");
-    how.comments.push({ id: "request", body: "@Oriel revise the HOW", createdAt: "2026-01-01T00:00:00Z", user: { name: "Human" } });
+    how.comments.push({ id: "request", body: "https://linear.app/example/profiles/oriel-agent revise the HOW", createdAt: "2026-01-01T00:00:00Z", user: { name: "Human" } });
     s.fixture.normalizeDescription = body => body.replace("Questions:\n1.", "Questions:\n\n1.");
     const description = "Questions:\n1. Keep disconnected devices visible?";
     const lease = await s.claim("plan");
@@ -174,7 +174,7 @@ test("canonical update receipts do not hide intervening human edits", async () =
   const s = await setup();
   try {
     const how = s.fixture.addHow("Triage");
-    how.comments.push({ id: "request", body: "@oriel revise", createdAt: "2026-01-01T00:00:00Z" });
+    how.comments.push({ id: "request", body: "https://linear.app/example/profiles/oriel-agent revise", createdAt: "2026-01-01T00:00:00Z", user: { id: "human", name: "Human", app: false } });
     const lease = await s.claim("plan");
     s.fixture.holdReads = ({ provider, operation }) => {
       if (provider === "linear" && operation === "how" && s.fixture.calls.some(call => call.operation === "how-update")) how.description = "Human revision after the mutation";
@@ -191,7 +191,7 @@ test("HOW update receipts do not consume unanswered questions and reply retries 
   const s = await setup();
   try {
     const how = s.fixture.addHow("Triage");
-    const request = { id: "question", body: "@Oriel 見えてる？", createdAt: "2026-01-01T00:00:00Z" };
+    const request = { id: "question", body: "https://linear.app/example/profiles/oriel-agent 見えてる？", createdAt: "2026-01-01T00:00:00Z", user: { id: "human", name: "Human", app: false } };
     const key = `how:${createHash("sha256").update(JSON.stringify([how.id, request.id, request.body])).digest("hex")}`;
     const signature = createHmac("sha256", Buffer.from(s.fixture.env.INTEGRATION_ENCRYPTION_KEY, "hex"))
       .update(JSON.stringify(["oriel/workflow-cursor/v1", 501, "team", "how", key])).digest("base64url");
@@ -498,24 +498,24 @@ test("initial HOW requires a human command and invalidates edited or deleted req
   try {
     const row = async () => (await s.snapshot()).workflows.find(row => row.issue.number === 42);
     s.fixture.comments.set(42, []);
-    for (const body of ["", "@oriel", "@oriel how?", "> @oriel how", "```\n@oriel how\n```", "Do not @oriel how"]) {
+    for (const body of ["", "@oriel", "@oriel-relay[bot] how?", "> @oriel-relay[bot] how", "```\n@oriel-relay[bot] how\n```", "Do not @oriel-relay[bot] how"]) {
       s.fixture.comments.set(42, [{ id: 10, body, user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]);
       const waiting = await row();
       assert.equal(waiting.phase, "waiting-how");
       assert.equal((await s.message({ type: "claim", kind: "plan", issue_number: 42, version: waiting.version, branch: null })).type, "rejected");
     }
     const request = s.fixture.comments.get(42)[0];
-    request.body = "@oriel how"; request.user.type = "Bot";
+    request.body = "@oriel-relay[bot] how"; request.user.type = "Bot";
     assert.equal((await row()).phase, "waiting-how");
     request.user.type = "User";
     const ready = await row();
     assert.equal(ready.phase, "needs-how");
     assert.equal((await row()).version, ready.version);
     const lease = await s.claim("plan");
-    request.body = "@oriel how?";
+    request.body = "@oriel-relay[bot] how?";
     assert.notEqual((await row()).version, ready.version);
     assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan" })).status, 409);
-    request.body = "@oriel how";
+    request.body = "@oriel-relay[bot] how";
     assert.equal((await row()).version, ready.version);
     s.fixture.comments.set(42, []);
     assert.equal((await row()).phase, "waiting-how");
@@ -524,7 +524,7 @@ test("initial HOW requires a human command and invalidates edited or deleted req
     s.fixture.addHow("Triage");
     assert.equal((await row()).phase, "triage", "Existing HOW survives request deletion");
     s.fixture.linears = [];
-    s.fixture.comments.set(42, [request]); request.body = "@oriel how";
+    s.fixture.comments.set(42, [request]); request.body = "@oriel-relay[bot] how";
     s.fixture.issues[0].state = "closed";
     assert.equal((await row()).phase, "closed");
   } finally { await s.close(); }
