@@ -261,9 +261,19 @@ export class Integrations {
         const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/0*([0-9]+)(?:[/?#].*)?$/i.exec(attachment.url);
         return !!match && match[1].toLowerCase() === context.repository.owner.toLowerCase() && match[2].toLowerCase() === context.repository.name.toLowerCase() && Number(match[3]) === issue.number;
       }));
+      // Any human GitHub user may request planning, including before deployment.
+      // The entire comment must be the command; quotes, code and prose do not opt in.
+      const initialComments = linked.length === 0 && issue.state === "open"
+        ? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
+      const requests = initialComments.filter(comment => comment.user?.type === "User" && comment.body.trim().toLowerCase() === "@oriel how")
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)));
       const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
-        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : "needs-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null,
+        fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : requests.length ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, recovery: null,
         what_comments: [], how_comments: [] };
+      if (linked.length === 0 && issue.state === "open") {
+        row.version = await digest(["oriel/initial-how-request/v1", row.version, requests.map(comment => [String(comment.id), comment.body, comment.user.login])]);
+        if (!requests.length) row.blocked_reason = "Waiting for a human GitHub user to comment @oriel how (entire comment); this requests planning only, not implementation";
+      }
       if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
         row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
       }
@@ -322,8 +332,8 @@ export class Integrations {
           }
         }
       }
-      if (["needs-how", "triage", "approved", "running", "review"].includes(row.phase)) {
-        const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
+      if (["waiting-how", "needs-how", "triage", "approved", "running", "review"].includes(row.phase)) {
+        const comments = linked.length === 0 ? initialComments : await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
         row.what_comments = comments.map(comment => ({ id: String(comment.id), body: comment.body, author: comment.user?.login ?? null, created_at: comment.created_at }))
           .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
         if (row.linear) {
@@ -478,6 +488,7 @@ export class Integrations {
     if (!allowed) this.auth.fail(409, row.blocked_reason ?? "Workflow phase does not admit this operation");
     context.check();
     return { ...claim, linear_id: row.linear?.id ?? null,
+      ...(claim.kind === "plan" && !row.linear ? { initial_what_version: await digest(["oriel/what-version/v1", snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) } : {}),
       task: { issue_number: row.issue.number, title: row.issue.title, url: row.issue.url,
         how_identifier: row.linear?.identifier ?? null, how_url: row.linear?.url ?? null },
       ...(claim.kind === "respond" && row.feedback && row.pull_request ? { feedback: { key: row.feedback.key, head_oid: row.pull_request.head_oid, pr_number: row.pull_request.number } } : {}),
@@ -571,7 +582,7 @@ export class Integrations {
     const facts = await this.workflowFacts(context);
     const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
     if (!row || (row.linear?.id ?? null) !== grant.linear_id && !(grant.kind === "plan" && grant.linear_id === null && row.phase === "triage")) this.auth.fail(409, "Formal workflow identity changed");
-    const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === grant.version;
+    const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === (grant.initial_what_version ?? grant.version);
     if (!changed && !recoveredPlan && (row.version !== grant.version || row.branch !== grant.branch)) this.auth.fail(409, "Workflow approval content changed");
     if (phases && !phases.includes(row.phase)) this.auth.fail(409, row.blocked_reason ?? "Workflow native state no longer admits this operation");
     if (grant.execution && phases?.some(phase => ["approved", "running", "review"].includes(phase)) &&

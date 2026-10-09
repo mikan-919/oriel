@@ -492,3 +492,72 @@ test("a canonical head changed during final admission reads cannot create a read
     assert.equal(s.fixture.pulls.length, 0);
   } finally { await s.close(); }
 });
+
+test("initial HOW requires a human command and invalidates edited or deleted requests", async () => {
+  const s = await setup();
+  try {
+    const row = async () => (await s.snapshot()).workflows.find(row => row.issue.number === 42);
+    s.fixture.comments.set(42, []);
+    for (const body of ["", "@oriel", "@oriel how?", "> @oriel how", "```\n@oriel how\n```", "Do not @oriel how"]) {
+      s.fixture.comments.set(42, [{ id: 10, body, user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]);
+      const waiting = await row();
+      assert.equal(waiting.phase, "waiting-how");
+      assert.equal((await s.message({ type: "claim", kind: "plan", issue_number: 42, version: waiting.version, branch: null })).type, "rejected");
+    }
+    const request = s.fixture.comments.get(42)[0];
+    request.body = "@oriel how"; request.user.type = "Bot";
+    assert.equal((await row()).phase, "waiting-how");
+    request.user.type = "User";
+    const ready = await row();
+    assert.equal(ready.phase, "needs-how");
+    assert.equal((await row()).version, ready.version);
+    const lease = await s.claim("plan");
+    request.body = "@oriel how?";
+    assert.notEqual((await row()).version, ready.version);
+    assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan" })).status, 409);
+    request.body = "@oriel how";
+    assert.equal((await row()).version, ready.version);
+    s.fixture.comments.set(42, []);
+    assert.equal((await row()).phase, "waiting-how");
+    assert.equal((await s.action(lease, "proposal", { title: "HOW", description: "Plan" })).status, 409);
+    assert.deepEqual(s.fixture.linears, []);
+    s.fixture.addHow("Triage");
+    assert.equal((await row()).phase, "triage", "Existing HOW survives request deletion");
+    s.fixture.linears = [];
+    s.fixture.comments.set(42, [request]); request.body = "@oriel how";
+    s.fixture.issues[0].state = "closed";
+    assert.equal((await row()).phase, "closed");
+  } finally { await s.close(); }
+});
+
+test("initial HOW retries remain idempotent after the request is removed", async () => {
+  const s = await setup();
+  try {
+    const lease = await s.claim("plan");
+    const draft = { title: "HOW", description: "Resolve open WHAT questions before Todo." };
+    const proposal = await s.action(lease, "proposal", draft);
+    assert.equal(proposal.status, 200, JSON.stringify(proposal.data));
+    s.fixture.comments.set(42, []);
+    const retry = await s.action(lease, "proposal", draft);
+    assert.equal(retry.status, 200, JSON.stringify(retry.data));
+    assert.equal(retry.data.linear.id, proposal.data.linear.id);
+    assert.equal(s.fixture.linears.length, 1);
+    const row = (await s.snapshot()).workflows.find(row => row.issue.number === 42);
+    assert.equal(row.phase, "triage");
+    assert.equal((await s.message({ type: "claim", kind: "implement", issue_number: 42, version: row.version, branch: row.branch })).type, "rejected");
+  } finally { await s.close(); }
+});
+
+test("request deletion during final creation reads prevents initial HOW creation", async () => {
+  const s = await setup();
+  try {
+    const lease = await s.claim("plan");
+    let reads = 0;
+    s.fixture.holdReads = ({ operation }) => {
+      if (operation === "states" && ++reads === 2) s.fixture.comments.set(42, []);
+    };
+    const result = await s.action(lease, "proposal", { title: "HOW", description: "Plan for review." });
+    assert.equal(result.status, 409);
+    assert.deepEqual(s.fixture.linears, []);
+  } finally { await s.close(); }
+});
