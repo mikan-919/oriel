@@ -1357,6 +1357,7 @@ async fn remote_tip(
 
 async fn push(
     session: &mut Session,
+    root: &Path,
     path: &Path,
     branch: &str,
     head: &str,
@@ -1410,11 +1411,24 @@ async fn push(
         if !finished {
             let _ = completion.await;
         }
-        if let Err(error) = sent
-            && error.downcast_ref::<Stop>().is_some()
+        let sent = match sent {
+            Err(error) if error.downcast_ref::<Stop>().is_some() => return Err(error),
+            result => result,
+        };
+        let diagnostic = if let Ok(output) = &sent
+            && !output.status.success()
         {
-            return Err(error);
-        }
+            let logs = root.join("transport").join(random_hex::<12>()?);
+            git::private_directory(&logs)?;
+            git::private_file(&logs.join("stderr.log"), &output.stderr)?;
+            Some(format!(
+                "Git push exited with {}; private stderr at {}",
+                output.status,
+                logs.join("stderr.log").display()
+            ))
+        } else {
+            None
+        };
         drop(transport);
         session.progress("reconciling").await?;
         // The provider snapshot now legitimately contains our pushed OID. Check
@@ -1478,7 +1492,10 @@ async fn push(
         }
         ensure!(
             current == expected && attempt == 0,
-            "CAS push did not converge; local checkpoint preserved"
+            "CAS push did not converge; local checkpoint preserved{}",
+            diagnostic
+                .map(|detail| format!("; {detail}"))
+                .unwrap_or_default()
         );
     }
     bail!("CAS push did not converge")
@@ -1724,7 +1741,7 @@ async fn implement(
         .feedback
         .as_ref()
         .map(|feedback| feedback.key.clone());
-    push(session, &path, branch, &head, &mut guard).await?;
+    push(session, root, &path, branch, &head, &mut guard).await?;
     println!("  pushed: {branch} @ {head}");
     session.guard(&guard).await?;
     session.progress("publishing").await?;
