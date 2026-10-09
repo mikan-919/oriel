@@ -1877,9 +1877,10 @@ async fn scan(
                     let reason: String = format!("{error:#}").chars().take(1000).collect();
                     if let Err(reflection) = session.action("fail", json!({"reason":reason})).await
                     {
-                        println!(
-                            "  failure reflection uncertain: {reflection}; paused until human/provider state changes"
-                        );
+                        // A failed provider read/write cannot establish a permanent
+                        // task failure. Reconnect and read current facts instead.
+                        return Err(reflection
+                            .context(format!("could not record workflow failure: {reason}")));
                     }
                     suppressed.insert(identity, reason);
                 }
