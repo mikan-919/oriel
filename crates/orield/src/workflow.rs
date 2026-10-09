@@ -957,8 +957,19 @@ fn private_home_path(path: &std::ffi::OsStr, home: &Path) -> std::ffi::OsString 
         home.join(".local/share/vite-plus/bin"),
         home.join(".local/share/vite-plus/fallback-bin"),
     ];
-    std::env::join_paths(std::env::split_paths(path).filter(|entry| !shim_dirs.contains(entry)))
-        .unwrap_or_else(|_| path.to_owned())
+    let mut paths: Vec<_> = std::env::split_paths(path)
+        .filter(|entry| !shim_dirs.contains(entry))
+        .collect();
+    // Isolating CARGO_HOME keeps credentials private, but installed tools such
+    // as worker-build still live in the host's Cargo bin directory.
+    let cargo_bin = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cargo"))
+        .join("bin");
+    if cargo_bin.is_dir() && !paths.contains(&cargo_bin) {
+        paths.push(cargo_bin);
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| path.to_owned())
 }
 
 fn link_cache(source: &Path, target: &Path) -> Result<bool> {
