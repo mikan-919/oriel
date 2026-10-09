@@ -81,7 +81,20 @@ test("Passkeys, local pairing confirmation and ownership protect opaque terminal
 
     const host = await daemon.upgrade("host", { ...hostHeaders, Cookie: "" });
     assert.equal(host.status, 101);
+    const confirmed = new Promise(resolve => {
+      host.webSocket.addEventListener("message", event => {
+        if (typeof event.data === "string" && event.data.startsWith("oriel-heartbeat:")) {
+          host.webSocket.send(event.data);
+          resolve();
+        }
+      });
+    });
     host.webSocket.accept();
+    await confirmed;
+    for (let retry = 0; retry < 100; retry++) {
+      if ((await owner.api("/api/devices")).data.devices[0].terminal_status === "online") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     const terminal = await owner.upgrade("client");
     assert.equal(terminal.status, 101);
     assert.equal(terminal.headers.get("Sec-WebSocket-Protocol"), "oriel-client");
@@ -452,7 +465,7 @@ test("Only the paired host reports normalized repository metadata; existing devi
     const route = `/api/integrations/${device}/repository`;
     const repository = { owner: "octocat", name: "working" };
     const devices = () => owner.api("/api/devices");
-    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null }]);
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline" }]);
     assert.equal((await owner.api(route, { repository })).status, 401);
     assert.equal((await stranger.api(route, { repository })).status, 401);
     assert.equal((await stranger.api(route, { repository }, { Authorization: `Bearer ${"e".repeat(64)}` })).status, 403);
@@ -474,7 +487,7 @@ test("Only the paired host reports normalized repository metadata; existing devi
     await storage.exec("INSERT INTO devices SELECT device_id, name, user_id, host_hash FROM current_devices");
     await storage.exec("DROP TABLE current_devices");
     await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
-    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null }]);
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline" }]);
     assert.equal((await daemon.api(route, { repository }, hostHeaders)).status, 200);
     assert.deepEqual((await devices()).data.devices[0].repository, repository);
   } finally { await worker.dispose(); }
