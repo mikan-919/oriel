@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fmt, fs,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -1768,7 +1768,7 @@ async fn plan(session: &mut Session, root: &Path, snapshot: &Snapshot, row: &Row
 async fn scan(
     session: &mut Session,
     root: &Path,
-    suppressed: &mut HashSet<(u64, String, String)>,
+    suppressed: &mut HashMap<(u64, String, String), String>,
 ) -> Result<()> {
     session.progress("discovering").await?;
     session
@@ -1798,7 +1798,7 @@ async fn scan(
             println!("  blocked: {reason}");
         }
         if row.phase == "triage" && row.how_feedback.is_none() {
-            suppressed.retain(|(number, _, _)| *number != row.issue.number);
+            suppressed.retain(|(number, _, _), _| *number != row.issue.number);
         }
         let kind = match row.phase.as_str() {
             "needs-how" => "plan",
@@ -1820,8 +1820,8 @@ async fn scan(
             })
             .unwrap_or_else(|| kind.to_owned());
         let identity = (row.issue.number, row.version.clone(), cursor);
-        if suppressed.contains(&identity) {
-            println!("  paused after failure; human/provider state change required");
+        if let Some(reason) = suppressed.get(&identity) {
+            println!("  paused after failure: {reason}");
             resting_stage = "paused";
             continue;
         }
@@ -1874,14 +1874,14 @@ async fn scan(
                 Some(_) => {}
                 None => {
                     session.progress("reconciling").await?;
-                    let reason: String = error.to_string().chars().take(1000).collect();
+                    let reason: String = format!("{error:#}").chars().take(1000).collect();
                     if let Err(reflection) = session.action("fail", json!({"reason":reason})).await
                     {
                         println!(
                             "  failure reflection uncertain: {reflection}; paused until human/provider state changes"
                         );
                     }
-                    suppressed.insert(identity);
+                    suppressed.insert(identity, reason);
                 }
             }
             session.progress("paused").await?;
@@ -1900,7 +1900,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         .await?
         .context("workflow requires a GitHub origin in the current working directory")?;
     let root = git::state_root()?;
-    let mut suppressed = HashSet::new();
+    let mut suppressed = HashMap::new();
     println!(
         "Explicit workflow start enables read-only HOW planning. Code still requires human Todo and immutable target opt-in."
     );
