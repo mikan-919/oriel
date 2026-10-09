@@ -13,6 +13,7 @@ export type WorkflowTask = {
 };
 export type WorkflowAdmission = WorkflowClaim & {
   linear_id: string | null;
+  initial_what_version?: string;
   task: WorkflowTask;
   feedback?: { key: string; head_oid: string; pr_number: number };
   recovery?: { branch: string };
@@ -30,7 +31,7 @@ export type WorkflowRow = {
   issue: GithubWhat; linear: LinearHow | null; version: string; fingerprint: string | null;
   what_comments: DiscussionComment[]; how_comments: DiscussionComment[];
   branch: string | null; canonical_oid: string | null; pull_request: PullRequest | null;
-  phase: "needs-how" | "triage" | "approved" | "running" | "review" | "merged" | "done" | "closed" | "blocked";
+  phase: "waiting-how" | "needs-how" | "triage" | "approved" | "running" | "review" | "merged" | "done" | "closed" | "blocked";
   blocked_reason: string | null; feedback: Feedback | null; how_feedback: { key: string; body: string } | null;
   recovery: "invalidate" | null;
 };

@@ -923,7 +923,7 @@ fn agent_prompt(row: &Row, plan: bool) -> String {
             "implementation"
         },
         if plan {
-            "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. If how_feedback is present, answer that comment directly in the commenter's language in summary; explain relevant changes or blockers rather than emit a generic update notice. For a question-only request keep the current HOW title and description unchanged. Human approval is a later Linear Todo transition; you cannot approve or implement. No source writes."
+            "Inspect the repository read-only. Produce a concrete HOW title and description with bounded steps, acceptance criteria and questions. Explicitly state unresolved WHAT goals, scope and acceptance criteria, and identify decisions that block implementation for human review before Todo. If how_feedback is present, answer that comment directly in the commenter's language in summary; explain relevant changes or blockers rather than emit a generic update notice. For a question-only request keep the current HOW title and description unchanged. Human approval is a later Linear Todo transition; you cannot approve or implement. No source writes."
         } else {
             "Implement the approved HOW, or address the provided PR feedback, in this worktree. Preserve existing interrupted work. Make actual source changes. For each package directory with package.json and package-lock.json but no node_modules, run npm ci --offline --prefix <directory> before npm scripts. Use isolated offline package caches when available; do not stop only because tests could not run. The trusted host runs configured verification after your changes. Leave all changes uncommitted for the trusted host to verify and checkpoint. Put an honest concise summary in summary; title/description may be empty."
         },
@@ -2059,6 +2059,19 @@ mod tests {
             npm.join("_cacache")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn initial_how_request_is_planning_input_with_human_approval() {
+        let row: Row = serde_json::from_value(json!({
+            "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
+            "what_comments":[{"id":"10","body":"@oriel how","author":"human","created_at":"2026-01-01T00:00:00Z"}],
+            "how_comments":[],"version":"requested","phase":"needs-how"
+        })).unwrap();
+        let prompt = agent_prompt(&row, true);
+        assert!(prompt.contains("@oriel how"));
+        assert!(prompt.contains("unresolved WHAT goals"));
+        assert!(prompt.contains("Human approval is a later Linear Todo transition"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ export function workflowFixture() {
       { id: "done", name: "Done", type: "completed" }, { id: "canceled", name: "Canceled", type: "canceled" },
     ], base_branch: "main", target_oid: "1".repeat(40), repository_node_id: "R_501", autonomous: true, verification: [["true"]],
     config_source: undefined, configurations: new Map(), calls: [], grants: [], uncertainty: new Map(), failures: new Map(), allowFailureApprovalRestore: false, holdReads: undefined,
-    issuePageSize: 100, attachmentPageSize: 100, comments: new Map(), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
+    issuePageSize: 100, attachmentPageSize: 100, comments: new Map([[42, [{ id: 1, body: "@oriel how", user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]]]), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
     compare: undefined, sealSupported: true, trees: new Map(),
   });
   fixture.addHow = (state = "Todo", number = 42) => {
