@@ -1,3 +1,7 @@
+mod output;
+
+use output::{Console, event};
+
 use std::{
     collections::HashMap,
     fmt, fs,
@@ -1322,7 +1326,7 @@ async fn verify(
         &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
     );
     for argv in &configuration.verification {
-        println!("  verify: {}", argv[0]);
+        event("Verify", argv.join(" "));
         let logs = root.join("verification").join(random_hex::<12>()?);
         git::private_directory(&logs)?;
         let stdout = logs.join("stdout.log");
@@ -1596,7 +1600,7 @@ async fn implement(
     }
     let mut guard = Guard::new(&current, &active, true);
     let path = open_worktree(session, root, &current, &active, &guard, false).await?;
-    println!("  worktree: {}", path.display());
+    event("Worktree", path.display().to_string());
     let branch = active.branch.as_deref().context("missing branch")?;
     let clean = git::text(&path, &["status", "--porcelain", "--untracked-files=all"])
         .await?
@@ -1626,12 +1630,16 @@ async fn implement(
                         .as_str(),
                 ));
     let summary = if resume_checkpoint {
-        println!("  resume: committed local checkpoint; reverify before push");
+        event("Resume", "Local checkpoint found; verifying before push");
         "Resumed completed checkpoint and reran configured verification.".to_owned()
     } else {
-        println!(
-            "  {}: Codex workspace-write",
-            if respond { "respond" } else { "implement" }
+        event(
+            "Codex",
+            if respond {
+                "Applying PR feedback"
+            } else {
+                "Implementing approved HOW"
+            },
         );
         let result = agent(session, root, &path, &active, &guard, false).await?;
         result.summary
@@ -1789,7 +1797,10 @@ async fn implement(
         .as_ref()
         .map(|feedback| feedback.key.clone());
     push(session, root, &path, branch, &head, &mut guard).await?;
-    println!("  pushed: {branch} @ {head}");
+    event(
+        "Pushed",
+        format!("{branch} @ {}", head.chars().take(12).collect::<String>()),
+    );
     session.guard(&guard).await?;
     session.progress("publishing").await?;
     let result = if respond {
@@ -1803,7 +1814,7 @@ async fn implement(
             .await?
     };
     if let Some(url) = result["pull_request"]["url"].as_str() {
-        println!("  PR: {url} — awaiting human review/merge");
+        event("PR", format!("{url} · awaiting human review / merge"));
     }
     Ok(())
 }
@@ -1822,9 +1833,13 @@ async fn read_only(
         session.action("started", json!({})).await?;
     }
     let path = open_worktree(session, root, snapshot, row, &guard, true).await?;
-    println!(
-        "  {}: Codex read-only; no autonomous code permission is implied",
-        if discussion { "discuss" } else { "plan" }
+    event(
+        "Codex",
+        if discussion {
+            "Answering issue discussion (read-only)"
+        } else {
+            "Planning HOW (read-only)"
+        },
     );
     let result = agent(session, root, &path, row, &guard, true).await;
     let clean = git::text(&path, &["status", "--porcelain", "--untracked-files=all"])
@@ -1847,10 +1862,10 @@ async fn read_only(
         session.action("proposal", json!({"title":result.title,"description":result.description,"summary":result.summary})).await?
     };
     if discussion {
-        println!("  Replied: {}", row.issue.url);
+        event("Replied", &row.issue.url);
     }
     if let Some(url) = proposal["linear"]["url"].as_str() {
-        println!("  HOW: {url} — Triage; human must move to Todo");
+        event("HOW", format!("{url} · awaiting approval in Linear Todo"));
     }
     let repository = repository_root(root, snapshot.repository_id).await?;
     // Only this clean, immutable, remote-restorable planning worktree is removed.
@@ -1870,34 +1885,16 @@ async fn scan(
     session: &mut Session,
     root: &Path,
     suppressed: &mut HashMap<(u64, String, String), String>,
+    console: &mut Console,
 ) -> Result<()> {
     session.progress("discovering").await?;
     session
         .exchange(json!({"type":"heartbeat"}), "heartbeat")
         .await?;
     let snapshot = session.snapshot().await?;
-    println!(
-        "Workflow: {}/{} target {} @ {}",
-        snapshot.repository.owner,
-        snapshot.repository.name,
-        snapshot.base_branch,
-        snapshot.target_oid
-    );
-    if let Some(error) = &snapshot.configuration.error {
-        println!("  Code disabled: {error}; read-only HOW planning remains available.");
-    }
+    print!("{}", console.snapshot(&snapshot));
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
-        println!("#{} {} — {}", row.issue.number, row.phase, row.issue.url);
-        if let Some(how) = &row.linear {
-            println!("  {}: {}", how.identifier, how.url);
-        }
-        if let Some(pull) = &row.pull_request {
-            println!("  PR: {}", pull.url);
-        }
-        if let Some(reason) = &row.blocked_reason {
-            println!("  blocked: {reason}");
-        }
         if row.phase == "triage" && row.how_feedback.is_none() && row.issue_feedback.is_none() {
             suppressed.retain(|(number, _, _), _| *number != row.issue.number);
         }
@@ -1930,16 +1927,19 @@ async fn scan(
             })
             .unwrap_or_else(|| kind.to_owned());
         let identity = (row.issue.number, row.version.clone(), cursor);
-        if let Some(reason) = suppressed.get(&identity) {
-            println!("  paused after failure: {reason}");
+        if suppressed.contains_key(&identity) {
             resting_stage = "paused";
             continue;
         }
+        event(
+            "Starting",
+            format!("#{} · {kind} · {}", row.issue.number, row.issue.title),
+        );
         if let Err(error) = session.claim(row, kind).await {
             // A timed-out claim can still be granted by Relay. Reconnecting
             // discards that session instead of mixing its late reply with
             // another request or retaining an unconfirmed lease.
-            println!("  claim failed: {error:#}");
+            event("Claim", format!("Failed: {error:#}"));
             return Err(error);
         }
         session
@@ -1958,19 +1958,20 @@ async fn scan(
                 if row.recovery.as_deref() == Some("invalidate") && row.phase == "blocked" =>
             {
                 session.action("invalidate", json!({})).await.map(|_| {
-                    println!(
-                        "  Approval revoked: HOW returned to Triage; human reapproval required"
+                    event(
+                        "Approval",
+                        "Revoked; HOW returned to Triage for human approval",
                     )
                 })
             }
             "reconcile" => session
                 .action("done", json!({}))
                 .await
-                .map(|_| println!("  Done: confirmed human merge reflected in Linear")),
+                .map(|_| event("Done", "Human merge confirmed; Linear updated")),
             _ => unreachable!(),
         };
         if let Err(error) = result {
-            println!("  stopped: {error:#}");
+            event("Stopped", format!("#{} · {error:#}", row.issue.number));
             if matches!(
                 error.downcast_ref::<Stop>(),
                 Some(Stop::LeaseLost | Stop::Interrupted | Stop::Rejected | Stop::Uncertain)
@@ -2004,6 +2005,7 @@ async fn scan(
         session.release().await?;
     }
     session.progress(resting_stage).await?;
+    console.connected();
     Ok(())
 }
 
@@ -2013,8 +2015,19 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         .context("workflow requires a GitHub origin in the current working directory")?;
     let root = git::state_root()?;
     let mut suppressed = HashMap::new();
-    println!(
-        "Explicit workflow start enables read-only HOW planning. Code still requires human Todo and immutable target opt-in."
+    let mut console = Console::default();
+    println!("orield workflow");
+    event(
+        "Mode",
+        if once {
+            "Single scan"
+        } else {
+            "Watching every 15s · Ctrl-C to stop"
+        },
+    );
+    event(
+        "Policy",
+        "HOW planning is read-only; code requires human Todo approval and target opt-in",
     );
     loop {
         let connection = tokio::select! {
@@ -2030,7 +2043,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         };
         match connection {
             Ok(mut session) => loop {
-                let result = scan(&mut session, &root, &mut suppressed).await;
+                let result = scan(&mut session, &root, &mut suppressed, &mut console).await;
                 if once {
                     return match result {
                         Err(error)
@@ -2047,20 +2060,18 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
                         return Ok(());
                     }
                     if matches!(error.downcast_ref::<Stop>(), Some(Stop::Rejected)) {
-                        println!(
-                            "Workflow request rejected: {error:#}; reconnecting with local work preserved."
-                        );
+                        console.warning(format!(
+                            "Request rejected: {error:#}; retrying in 15s. Local work preserved."
+                        ));
                         let _ = session.socket.close(None).await;
                         break;
                     }
                     if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
-                        println!(
-                            "Workflow lease lost: {error:#}; reconnecting with local work preserved."
-                        );
+                        console.warning(format!(
+                            "Lease lost: {error:#}; retrying in 15s. Local work preserved."
+                        ));
                     } else {
-                        println!(
-                            "Workflow disconnected/uncertain: {error:#}; local work is preserved."
-                        );
+                        console.warning(format!("Connection interrupted: {error:#}; retrying in 15s. Local work preserved."));
                     }
                     break;
                 }
@@ -2073,7 +2084,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
                 if once {
                     return Err(error);
                 }
-                println!("Workflow connection unavailable: {error}");
+                console.warning(format!("Connection unavailable: {error}; retrying in 15s"));
             }
         }
         tokio::select! {
