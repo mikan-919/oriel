@@ -955,29 +955,57 @@ async fn open_worktree(
     .status
     .success()
     {
-        ensure!(
-            clean,
-            "target advanced while worktree is dirty; WIP preserved for human resolution"
-        );
         session.progress("integrating").await?;
-        let merge = git::local(
-            &path,
-            &[
-                "merge",
-                "--no-ff",
-                "--no-edit",
-                "--quiet",
-                &snapshot.target_oid,
-            ],
-        )
-        .await?;
-        if !merge.status.success() {
-            let _ = git::local(&path, &["merge", "--abort"]).await;
-            bail!("target integration conflicted; original work preserved");
-        }
+        session.guard(guard).await?;
+        integrate_target(&path, &snapshot.target_oid, row.issue.number).await?;
+        session.guard(guard).await?;
         session.progress("preparing").await?;
     }
     Ok(path)
+}
+
+async fn integrate_target(path: &Path, target: &str, issue: u64) -> Result<()> {
+    if !git::text(path, &["status", "--porcelain", "--untracked-files=all"])
+        .await?
+        .is_empty()
+    {
+        ensure!(
+            git::local(path, &["add", "--all"]).await?.status.success(),
+            "could not stage interrupted work before target integration"
+        );
+        ensure!(
+            git::local(
+                path,
+                &[
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    &format!("Oriel: WIP #{issue} before target integration")
+                ]
+            )
+            .await?
+            .status
+            .success(),
+            "could not checkpoint interrupted work before target integration"
+        );
+        // This saves source only. It must never carry a verified-completion trailer.
+        event(
+            "Checkpoint",
+            format!("#{issue} · saved unfinished work locally"),
+        );
+    }
+    let merge = git::local(path, &["merge", "--no-ff", "--no-edit", "--quiet", target]).await?;
+    if !merge.status.success() {
+        ensure!(
+            git::local(path, &["merge", "--abort"])
+                .await?
+                .status
+                .success(),
+            "target integration conflicted; local checkpoint retained, merge could not be aborted"
+        );
+        bail!("target integration conflicted; unfinished work retained in the local checkpoint");
+    }
+    Ok(())
 }
 
 fn source_changes(paths: &[u8]) -> bool {
@@ -2204,6 +2232,122 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn target_integration_preserves_unfinished_work_even_when_it_conflicts() {
+        for conflict in [false, true] {
+            let path =
+                std::env::temp_dir().join(format!("oriel-target-{}", random_hex::<12>().unwrap()));
+            git::private_directory(&path).unwrap();
+            assert!(
+                git::local(&path, &["init", "--quiet"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            fs::write(path.join("source.rs"), "original\n").unwrap();
+            assert!(
+                git::local(&path, &["add", "--all"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert!(
+                git::local(&path, &["commit", "--quiet", "-m", "base"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let base = git::text(&path, &["rev-parse", "HEAD"]).await.unwrap();
+            fs::write(
+                path.join(if conflict { "source.rs" } else { "target.rs" }),
+                "upstream change\n",
+            )
+            .unwrap();
+            assert!(
+                git::local(&path, &["add", "--all"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert!(
+                git::local(&path, &["commit", "--quiet", "-m", "advance target"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let target = git::text(&path, &["rev-parse", "HEAD"]).await.unwrap();
+            assert!(
+                git::local(&path, &["checkout", "--quiet", "-b", "task", &base])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            fs::write(path.join("source.rs"), "staged work\n").unwrap();
+            assert!(
+                git::local(&path, &["add", "source.rs"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            fs::write(path.join("source.rs"), "unfinished work\n").unwrap();
+            fs::write(path.join("added.rs"), "new source\n").unwrap();
+
+            let result = integrate_target(&path, &target, 83).await;
+            assert_eq!(result.is_err(), conflict);
+            assert_eq!(
+                fs::read_to_string(path.join("source.rs")).unwrap(),
+                "unfinished work\n"
+            );
+            assert_eq!(
+                fs::read_to_string(path.join("added.rs")).unwrap(),
+                "new source\n"
+            );
+            assert!(
+                git::text(&path, &["status", "--porcelain", "--untracked-files=all"])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                git::local(&path, &["ls-files", "--error-unmatch", "added.rs"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert!(
+                git::local(&path, &["merge-base", "--is-ancestor", &base, "HEAD"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert_eq!(
+                git::local(&path, &["merge-base", "--is-ancestor", &target, "HEAD"])
+                    .await
+                    .unwrap()
+                    .status
+                    .success(),
+                !conflict
+            );
+            assert!(!path.join(".git/MERGE_HEAD").exists());
+            let checkpoint = if conflict { "HEAD" } else { "HEAD^1" };
+            let message = git::text(&path, &["log", "-1", "--format=%B", checkpoint])
+                .await
+                .unwrap();
+            assert_eq!(message, "Oriel: WIP #83 before target integration");
+            assert!(!message.contains("Oriel-Completed:"));
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
 
     #[test]
     fn verification_repairs_are_bounded_and_never_retry_lost_authority() {
