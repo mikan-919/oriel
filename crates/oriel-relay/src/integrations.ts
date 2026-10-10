@@ -746,6 +746,11 @@ export class Integrations {
         const hash = await digest(["oriel/comment/v1", context.repository.repository_id, grant.linear_id, kind, key]);
         const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
         await this.workflowCurrent(context, grant, undefined, changed);
+        if (["failure", "invalidation"].includes(kind)) {
+          const how = await this.workflowHow(context, grant.linear_id!);
+          if (!how || how.team.id !== context.team.team_id || ["completed", "canceled", "triage"].includes(how.state.type)) this.auth.fail(409, "HOW no longer admits a return to Triage");
+        }
+        context.check();
         await this.workflowLinear(context, "mutation($input:CommentCreateInput!){commentCreate(input:$input){success}}", { input: { id, issueId: grant.linear_id, body: content } });
       } else await this.workflowGithub(context, `${context.path}/issues/${githubPr}/comments`, "POST", { body: content });
     } catch (error) { if (error instanceof Error && "status" in error && error.status !== 502) throw error; }
@@ -945,10 +950,21 @@ export class Integrations {
       if (!known || !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || state.type === "started" && /review/i.test(state.name))) this.auth.fail(409, "Native HOW state cannot be safely updated");
       if (action === "fail") {
         if (typeof body.reason !== "string" || !body.reason.trim()) this.auth.fail(400, "A failure reason is required");
-        let reason = body.reason.slice(0, 4000);
+        const category = body.category ?? "runtime";
+        if (!["needs-human", "verification", "runtime"].includes(category as string)) this.auth.fail(400, "Invalid failure category");
+        const label = category === "needs-human" ? "人の判断が必要" : category === "verification" ? "検証失敗" : "実行失敗";
+        const next = category === "needs-human" ? "不足している判断や情報をHOWに記載してください。" : category === "verification" ? "失敗した検証コマンドと修正結果を確認し、必要な修正をHOWに記載してください。" : "実行環境や停止原因を確認し、再開に必要な対応をHOWに記載してください。";
+        let reason = body.reason.trim();
         for (const secret of [context.github, context.linear, this.env.GITHUB_CLIENT_SECRET, this.env.INTEGRATION_ENCRYPTION_KEY, grant.binding.host_hash].filter((value): value is string => !!value)) reason = reason.replaceAll(secret, "[redacted]");
         reason = reason.replace(/Bearer\s+\S+|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+/gi, "[redacted]");
-        await this.workflowComment(context, grant, "failure", `${grant.version}:${await digest(reason)}`, `Oriel stopped without publishing: ${reason}`);
+        reason = reason.slice(0, 4000);
+        this.workflowState(current.facts.states, "Triage", "triage");
+        await this.workflowComment(context, grant, "failure", `${grant.version}:${await digest([category, reason])}`,
+          `Orielの処理を停止し、HOWをTriageへ差し戻します。\n\n差し戻し理由（${label}）:\n${reason}\n\n必要な対応:\n${next}\nHOWを見直し、人が再承認してから再開してください。保存済みの作業・ブランチを保持します。`);
+      } else {
+        this.workflowState(current.facts.states, "Triage", "triage");
+        await this.workflowComment(context, grant, "invalidation", `${grant.version}:${current.row.version}`,
+          "HOWをTriageへ差し戻します。\n\n差し戻し理由（承認内容の変更）:\n承認後にWHATまたはHOWの内容が変更され、以前の承認では実装を続けられなくなりました。\n\n必要な対応:\n変更内容を確認し、HOWを見直して再承認してください。以前の承認に対応するPRは閉じ、保存済みの作業・ブランチを保持します。", null, true);
       }
       const obsoleteBranch = grant.recovery?.branch ?? grant.branch;
       if (action === "invalidate" && obsoleteBranch) {
@@ -963,17 +979,7 @@ export class Integrations {
           if (!readback || readback.state !== "closed" || readback.merged_at) this.auth.fail(409, "Obsolete PR closure was not confirmed");
         }
       }
-      if (action === "fail") {
-        // An implementation lease proves this HOW was already approved. If it
-        // stopped before publication, restore that approval instead of revoking
-        // it by moving the HOW to Triage.
-        if (grant.kind === "implement" && current.row.phase === "running" && state.name === "In Progress" && state.type === "started") {
-          const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Todo", "unstarted").id }, ["running"]);
-          return { linear };
-        }
-        return { linear: current.row.linear };
-      }
-      const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Triage", "triage").id }, ["approved", "running", "review", "blocked"], true);
+      const linear = await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(current.facts.states, "Triage", "triage").id }, ["approved", "running", "review", "blocked"], action === "invalidate");
       return { linear };
     }
     this.auth.fail(400, "Unsupported workflow action");

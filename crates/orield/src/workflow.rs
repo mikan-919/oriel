@@ -140,6 +140,35 @@ struct AgentResult {
     summary: String,
 }
 
+#[derive(Debug)]
+struct AgentIntervention {
+    reason: String,
+    output: PathBuf,
+}
+
+impl fmt::Display for AgentIntervention {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "agent requires human intervention: {:.400}; private explanation at {}",
+            self.reason.trim(),
+            self.output.display()
+        )
+    }
+}
+impl std::error::Error for AgentIntervention {}
+
+fn failure_report(error: &anyhow::Error) -> Value {
+    let (category, reason) = if let Some(intervention) = error.downcast_ref::<AgentIntervention>() {
+        ("needs-human", intervention.reason.clone())
+    } else if error.downcast_ref::<VerificationFailure>().is_some() {
+        ("verification", format!("{error:#}"))
+    } else {
+        ("runtime", format!("{error:#}"))
+    };
+    json!({"category":category,"reason":reason})
+}
+
 const VERIFICATION_REPAIR_LIMIT: usize = 2;
 const VERIFICATION_LOG_TAIL: u64 = 16 * 1024;
 
@@ -1396,12 +1425,13 @@ async fn agent(
         !result.summary.trim().is_empty() && result.summary.encode_utf16().count() <= 12000,
         "agent completion summary is empty/oversized"
     );
-    ensure!(
-        result.status == "completed" || plan,
-        "agent requires human intervention: {:.400}; private explanation at {}",
-        result.summary.trim(),
-        output.display()
-    );
+    if result.status == "needs-human" && !plan {
+        return Err(AgentIntervention {
+            reason: result.summary,
+            output,
+        }
+        .into());
+    }
     if plan && !guard.discussion {
         ensure!(
             !result.title.trim().is_empty()
@@ -2122,15 +2152,14 @@ async fn scan(
                 Some(_) => {}
                 None => {
                     session.progress("reconciling").await?;
-                    let reason: String = format!("{error:#}").chars().take(1000).collect();
-                    if let Err(reflection) = session.action("fail", json!({"reason":reason})).await
-                    {
+                    let report = failure_report(&error);
+                    if let Err(reflection) = session.action("fail", report).await {
                         // A failed provider read/write cannot establish a permanent
                         // task failure. Reconnect and read current facts instead.
                         return Err(reflection
-                            .context(format!("could not record workflow failure: {reason}")));
+                            .context(format!("could not record workflow failure: {error:#}")));
                     }
-                    suppressed.insert(identity, reason);
+                    suppressed.insert(identity, format!("{error:#}"));
                 }
             }
             session.progress("paused").await?;
@@ -2233,6 +2262,37 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_reports_preserve_the_blocker_and_verification_attempts() {
+        let reason = "公開認証方式をHOWに指定してください。".repeat(80);
+        let intervention = anyhow::Error::new(AgentIntervention {
+            reason: reason.clone(),
+            output: PathBuf::from("/private/agent/result.json"),
+        })
+        .context("implementation stopped");
+        let report = failure_report(&intervention);
+        assert_eq!(report["category"], "needs-human");
+        assert_eq!(report["reason"], reason);
+        assert!(!report.to_string().contains("/private/agent"));
+
+        let failed_check = anyhow::Error::new(VerificationFailure {
+            command: vec!["npm".into(), "test".into()],
+            status: "exit status: 1".into(),
+            logs: PathBuf::from("/private/verification"),
+        })
+        .context("verification failed after 2 repair attempts");
+        let report = failure_report(&failed_check);
+        assert_eq!(report["category"], "verification");
+        let reason = report["reason"].as_str().unwrap();
+        assert!(reason.contains("after 2 repair attempts"));
+        assert!(reason.contains("npm test"));
+        assert!(reason.contains("exit status: 1"));
+        assert_eq!(
+            failure_report(&anyhow!("command could not start")),
+            json!({"category":"runtime","reason":"command could not start"})
+        );
+    }
 
     #[tokio::test]
     async fn target_integration_preserves_unfinished_work_even_when_it_conflicts() {
