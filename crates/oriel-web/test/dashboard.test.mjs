@@ -14,7 +14,7 @@ function screen(connectionRequest = {}) {
   const regions=pages.map(region=>element({region}));
   const buttons=pages.map(page=>element({page}));
   const elements=new Map();
-  const c=vm.createContext({connectionRequest,sessionLoading:false,devices:[],user:null,repositoryDeviceId:null,deviceListFailed:false,
+  const c=vm.createContext({connectionRequest,busy:false,sessionLoading:false,devices:[],user:null,repositoryDeviceId:null,deviceListFailed:false,
     workflowSnapshot:null,progressSnapshot:new Map(),progressStream:'connecting',progressStages:{implementing:'実装'},
     dashboard:{querySelectorAll(selector) {return selector==='[data-region]' ? regions : buttons;}},
     document:{getElementById(id) {if(!elements.has(id)) elements.set(id,element()); return elements.get(id);}}});
@@ -118,7 +118,12 @@ test('initial session loading does not claim the user is signed out',()=>{
   assert.match(elements.get('overview-target').textContent,/確認中/);
   assert.match(elements.get('overview-next').textContent,/お待ちください/);
   assert.equal(elements.get('overview-action').textContent,'確認中…');
+  assert.equal(elements.get('overview-action').disabled,true);
   c.sessionLoading=false;
   c.renderOverview();
   assert.match(elements.get('overview-next').textContent,/ログインしてください/);
+  assert.equal(elements.get('overview-action').disabled,false);
+  c.busy=true;
+  c.renderOverview();
+  assert.equal(elements.get('overview-action').disabled,true);
 });

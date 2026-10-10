@@ -88,11 +88,11 @@ const progressStages = {
 const encoder = new TextEncoder();
 
 function render() {
-    renderOverview();
     account.textContent = sessionLoading ? "ログイン状態を確認中…" : user ? `ログイン中: ${user.display_name} (${user.id})` : "未ログインです。";
     anonymousActions.hidden = !!user;
     sessionActions.hidden = !user;
     for (const button of dashboard.querySelectorAll("button")) button.disabled = busy;
+    renderOverview();
     for (const row of deviceRows.values()) row.open.disabled = busy || deviceListFailed || row.device.terminal_status !== "online";
     approvePair.disabled = busy || !user || !pairInfo || pairClaimed;
     pairSection.hidden = !pairing.token && !pairing.invalid && !pairInfo;
@@ -1131,6 +1131,7 @@ function workflowPhaseLabel(phase) {
 }
 
 function renderOverview() {
+    document.getElementById("overview-action").disabled = sessionLoading || busy;
     if (sessionLoading) {
         document.getElementById("overview-target").textContent = "ログイン状態を確認中…";
         document.getElementById("overview-progress").textContent = "runner: 未確認";
