@@ -533,6 +533,7 @@ async fn main() -> Result<()> {
                     "workflow: explicitly start GitHub WHAT → read-only Linear HOW planning;\n",
                     "human Todo plus immutable target .oriel.yaml autonomous worktree opt-in\n",
                     "and configured verification are required before code executes.\n",
+                    "Failed checks return diagnostics to Codex for up to two repairs; all checks rerun.\n",
                     "Verified canonical branches are pushed with CAS; PR review fixes resume\n",
                     "the same branch. Only an observed human merge moves Linear to Done.\n",
                     "--once scans once; continuous mode scans immediately, then every 15s.\n",
