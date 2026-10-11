@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("../src/main.rs", import.meta.url), "utf8");
+const source = readFileSync(new URL("../src/assets/dashboard.js", import.meta.url), "utf8");
 const refresh = source.slice(source.indexOf("async function refreshDevices()"), source.indexOf("async function inspectPair()"));
 function screen(api) {
   const context = vm.createContext({ api, clearTimeout, user: { id: "owner" }, accountEpoch: 1,
@@ -13,7 +13,7 @@ function screen(api) {
     repositoryDetails: {}, repositoryStatus: {}, deviceSummary: {}, deviceList: { append() {} },
     busy: false, pairClaimed: false, pairInfo: null, pairOwner: { id: "owner" }, pairing: {}, pairStatus: {},
     currentAccount(epoch) { return context.accountEpoch === epoch && !!context.user; },
-    renderProgressCards() {},
+    renderProgressCards() {}, renderOverview() {},
     createDeviceRow(device) { return { device, item: { remove() {} }, label: {}, repository: {}, open: {}, work: {} }; },
   });
   vm.runInContext(refresh, context);
@@ -81,5 +81,5 @@ test("shared refresh expires pending pairing", async () => {
   c.pairing.token = "pending";
   await c.refreshDevices();
   assert.equal(c.pairing.token, null);
-  assert.match(c.pairStatus.textContent, /expiry/);
+  assert.match(c.pairStatus.textContent, /期限/);
 });

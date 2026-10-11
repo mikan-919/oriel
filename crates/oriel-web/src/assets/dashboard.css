@@ -1,0 +1,26 @@
+:root { color-scheme: dark; --background:#0b1120; --card:#141e30; --border:#34435c; --text:#edf2fa; --muted:#b7c6da; --accent:#2563eb; --radius:12px; --space:1.25rem; }
+* { box-sizing:border-box; }
+html,body { margin:0; width:100%; height:100%; background:var(--background); color:var(--text); font:15px/1.7 system-ui,sans-serif; }
+#dashboard { display:grid; grid-template-columns:220px minmax(0,1fr); min-height:100%; }
+nav { padding:2rem 1rem; border-right:1px solid var(--border); background:#10192a; display:flex; flex-direction:column; gap:.6rem; }
+nav strong { font-size:1.6rem; padding:0 .75rem 1.5rem; }
+nav button { text-align:left; }
+nav button[aria-current="page"] { background:var(--accent); border-color:var(--accent); }
+.dashboard-content { padding:2rem; width:100%; max-width:1240px; min-width:0; }
+h1 { margin:0 0 1rem; font-size:1.8rem; } h2 { font-size:1.2rem; margin-top:0; } h3 { font-size:1rem; }
+section,article,#devices>li,#repository-issues>li { border:1px solid var(--border); border-radius:var(--radius); padding:var(--space); background:var(--card); margin:1rem 0; min-width:0; }
+section section { background:var(--background); }
+.overview-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
+.overview-grid article { margin:0; background:var(--background); }
+p,li,h3,summary { overflow-wrap:anywhere; } p { color:var(--muted); }
+button,select,input,textarea { font:inherit; color:var(--text); background:#1c2a42; border:1px solid var(--border); border-radius:8px; padding:.55rem .85rem; max-width:100%; }
+button { cursor:pointer; margin:.2rem; } button:hover { background:#28416a; } button:disabled { color:#acb6c7; background:#253046; cursor:not-allowed; }
+#register,#approve-pair,button[type="submit"],#overview-action { background:var(--accent); color:white; }
+:focus-visible { outline:3px solid #93c5fd; outline-offset:3px; }
+input,textarea { display:block; width:100%; background:var(--background); } label { display:block; margin:.75rem 0 .3rem; } fieldset { min-width:0; border:1px solid var(--border); border-radius:var(--radius); margin:1rem 0; }
+a { color:#93c5fd; } summary { cursor:pointer; } ul { padding-left:1.25rem; } #devices,#repository-issues { padding:0; list-style:none; }
+.execution-card { border-top:1px solid var(--border); margin-top:1rem; } .execution-state { color:var(--text); font-weight:600; } .how-description { white-space:pre-wrap; }
+#terminal-view { display:flex; flex-direction:column; height:100%; } #terminal-toolbar { padding:.5rem; } #terminal { flex:1; min-height:0; width:100%; }
+[hidden], [data-region].page-hidden { display:none !important; }
+@media(max-width:900px) { #dashboard { grid-template-columns:1fr; } nav { flex-direction:row; flex-wrap:wrap; padding:.75rem; border-right:0; border-bottom:1px solid var(--border); } nav strong { padding:0 .75rem; } .overview-grid { grid-template-columns:1fr; } }
+@media(max-width:480px) { .dashboard-content { padding:1rem; } section,article { padding:1rem; } nav { gap:.25rem; } nav strong { width:100%; } }
