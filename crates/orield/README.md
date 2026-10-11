@@ -40,13 +40,40 @@ formatting, Clippy, tests, packaging, a publishing dry run, and installation fro
 the unpacked package on relevant pull requests and main pushes. The existing
 Web/relay deployment workflow is independent.
 
-Automatic publication is pending the release decisions above. Its required
-behavior is to serialize main-push releases after successful validation, query
-the exact version immediately before publishing, skip an existing version, and
-fail on lookup errors rather than treating them as absence. A name conflict must
-stop the release for human review. After publication, verify registry installation
-and `--help` in an empty install root, allowing at most ten attempts separated by
-30 seconds for registry propagation. Re-run the same version to verify the skip
-path. Record publication failure, post-publication verification failure, and skip
-separately. Re-run validation through the workflow's manual trigger when needed;
-manual validation does not publish.
+## Enable automatic publication (release owner)
+
+First publication and CI execution are owner tasks after repository review.
+Confirm 0.1.0, MIT, supported OS/CPU and Rust version, and record the named
+release/version-update owner before enabling publication. CI currently validates
+Ubuntu x86_64 with stable Rust; no minimum Rust version is promised.
+
+Create the GitHub environment `crates-io`. Configure its secret
+`ORIELD_CRATES_IO_TOKEN` with a crates.io token scoped to publishing `orield`, and
+its variable `ORIELD_CRATES_IO_OWNER` with the exact crates.io owner login (user
+or team). Supply these settings through the hosting UI; never put the token in
+repository files or logs. This implementation uses a scoped token; rotate it
+according to the owner's policy. For automatic publication, permit main in the
+environment without a required reviewer. Finally set the repository variable
+`ORIELD_RELEASE_ENABLED` to `true`. Leaving it unset keeps validation active
+while publication is disabled.
+
+Every relevant main push then publishes after validation, serialized across
+release jobs. The script checks existing crate ownership and the exact version
+immediately before publishing. An ownership conflict, lookup failure, or yanked
+version fails the job; an existing version skips publication successfully. A
+404 does not reserve the name: a competing first publication can still make
+`cargo publish` fail, requiring owner review. Only `orield` is published.
+
+Both new and skipped versions undergo registry installation in an empty install
+root and `--help` verification. Installation is retried at most ten times, with
+30 seconds between attempts. Job summaries distinguish publication, publication
+failure, skip, and registry verification failure. Initial lookup errors also fail
+the job with their diagnostic. After the first enabled main push, check these
+results and rerun the publish job at the same version to confirm the skip path.
+A failed verification after successful publication cannot undo the release;
+rerun verification and investigate before changing the version.
+
+Manually update the workspace version for the next release through review.
+Use the workflow's manual trigger to rerun validation only; manual runs and pull
+requests never publish. Re-run failed main-push jobs from the hosting UI when
+needed, including to verify an already published version.
