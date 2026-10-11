@@ -1,0 +1,53 @@
+name: Validate orield package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/orield/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/orield.yml"
+  pull_request:
+    paths:
+      - "crates/orield/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/orield.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy -p orield --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test -p orield --locked
+      - name: List package contents
+        run: cargo package -p orield --list --locked
+      - name: Verify publishable package
+        run: cargo publish -p orield --dry-run --locked
+      - name: Install unpacked package and check help
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "orield"))')
+          package_dir=$(mktemp -d)
+          install_dir=$(mktemp -d)
+          trap 'rm -rf "$package_dir" "$install_dir"' EXIT
+          tar -xzf "target/package/orield-${version}.crate" -C "$package_dir"
+          test -f "$package_dir/orield-${version}/README.md"
+          test -f "$package_dir/orield-${version}/LICENSE"
+          cargo install --path "$package_dir/orield-${version}" --locked --root "$install_dir"
+          "$install_dir/bin/orield" --help
