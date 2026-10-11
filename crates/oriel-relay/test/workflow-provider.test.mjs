@@ -296,7 +296,7 @@ test("aliases, ambiguous links, unknown states and strict target configuration c
   } finally { await s.close(); }
 });
 
-test("changed approval is returned to Triage, failures are bounded, and Git grants are narrowed and revoked", { timeout: 60000 }, async () => {
+test("changed approvals and failures return to Triage with reasons and require human reapproval", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
     const how = s.fixture.addHow(); const initial = (await s.snapshot()).workflows[0];
@@ -307,6 +307,8 @@ test("changed approval is returned to Triage, failures are bounded, and Git gran
     assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease }, hostHeaders)).status, 409);
     assert.equal((await s.action(lease, "publish", { head_oid: initial.canonical_oid, verified: true, summary: "Stale" })).status >= 400, true);
     const invalidated = await s.action(lease, "invalidate"); assert.equal(invalidated.status, 200, JSON.stringify(invalidated.data)); assert.equal(how.state.name, "Triage");
+    assert.match(how.comments[0].body, /差し戻し理由（承認内容の変更）/);
+    assert.match(how.comments[0].body, /WHATまたはHOW/);
     await s.message({ type: "release", lease_id: lease });
     const plan = await s.claim("plan");
     const readonly = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: plan }, hostHeaders);
@@ -314,13 +316,75 @@ test("changed approval is returned to Triage, failures are bounded, and Git gran
     await s.message({ type: "release", lease_id: plan }); how.state = { ...s.fixture.states.find(state => state.id === "todo") };
     const broken = await s.claim("implement"); assert.equal((await s.action(broken, "begin")).status, 200);
     s.fixture.uncertainty.set("how-comment", true); s.fixture.uncertainty.set("how-update", true);
-    s.fixture.allowFailureApprovalRestore = true;
-    const failure = await s.action(broken, "fail", { reason: "Configured verification failed: private-linear-access" });
-    assert.equal(failure.status, 200, JSON.stringify(failure.data)); assert.equal(how.state.name, "Todo");
-    assert.equal((await s.snapshot()).workflows[0].phase, "approved", "runtime failures restore, but do not revoke, human approval");
-    assert.equal(how.comments[0].body.includes("private-linear-access"), false);
+    const beforeFailure = (await s.snapshot()).workflows[0];
+    const reason = "npm test failed after 2 repair attempts: private-linear-access";
+    const failure = await s.action(broken, "fail", { reason, category: "verification" });
+    assert.equal(failure.status, 200, JSON.stringify(failure.data)); assert.equal(how.state.name, "Triage");
+    assert.equal((await s.snapshot()).workflows[0].phase, "triage");
+    assert.match(how.comments.at(-1).body, /差し戻し理由（検証失敗）/);
+    assert.match(how.comments.at(-1).body, /npm test failed after 2 repair attempts/);
+    assert.match(how.comments.at(-1).body, /必要な対応:[\s\S]*再承認/);
+    assert.equal(how.comments.at(-1).body.includes("private-linear-access"), false);
+    assert.equal(s.fixture.refs.get(beforeFailure.branch), beforeFailure.canonical_oid, "Existing source checkpoint is retained");
+    const count = how.comments.length;
+    assert.equal((await s.action(broken, "fail", { reason, category: "verification" })).status, 200);
+    assert.equal(how.comments.length, count, "An uncertain return is not reported twice");
+    assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: broken }, hostHeaders)).status, 409);
+    await s.message({ type: "release", lease_id: broken });
+    const returned = (await s.snapshot()).workflows[0];
+    assert.equal((await s.message({ type: "claim", kind: "implement", issue_number: 42, version: returned.version, branch: returned.branch })).type, "rejected");
+    how.state = { ...s.fixture.states.find(state => state.id === "todo") };
+    const reapproved = await s.claim("implement");
+    assert.equal((await s.action(reapproved, "begin")).status, 200);
+    assert.equal((await s.snapshot()).workflows[0].canonical_oid, beforeFailure.canonical_oid);
     await s.owner.api("/api/integrations/github/disconnect", {});
-    const revoked = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: broken }, hostHeaders); assert.equal(revoked.status, 409);
+    const revoked = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: reapproved }, hostHeaders); assert.equal(revoked.status, 409);
+  } finally { await s.close(); }
+});
+
+test("a failed review returns to Triage with the required decision while retaining the PR", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow(); const row = (await s.snapshot()).workflows[0];
+    const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    assert.equal((await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified implementation" })).status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    s.fixture.checks.push({ id: 1, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2026-01-01T00:00:01.000Z", output: { title: "Failure", summary: "Fix actual behavior", text: null } });
+    const response = await s.claim("respond");
+    const reason = "公開認証方式が未確定です。トークン認証か信頼された発行元を選び、HOWに記載してください。";
+    const failure = await s.action(response, "fail", { category: "needs-human", reason });
+    assert.equal(failure.status, 200, JSON.stringify(failure.data));
+    assert.equal(how.state.name, "Triage");
+    assert.match(how.comments.at(-1).body, /差し戻し理由（人の判断が必要）/);
+    assert.ok(how.comments.at(-1).body.includes(reason));
+    assert.equal(s.fixture.pulls[0].state, "open");
+    assert.equal(s.fixture.refs.get(row.branch), head);
+    assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: response }, hostHeaders)).status, 409);
+  } finally { await s.close(); }
+});
+
+test("failure return preserves terminal human states and accepts legacy reasons", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow(); const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    assert.equal((await s.action(implementation, "fail", { category: "unknown", reason: "Unknown category" })).status, 400);
+    assert.equal(how.state.name, "In Progress");
+    for (const id of ["done", "canceled"]) {
+      how.state = { ...s.fixture.states.find(state => state.id === id) };
+      assert.equal((await s.action(implementation, "fail", { reason: "Command could not start" })).status, 200);
+      assert.equal(how.state.id, id); assert.equal(how.comments.length, 0);
+    }
+    how.state = { ...s.fixture.states.find(state => state.id === "progress") };
+    const reason = `Command could not start ${"x".repeat(3966)}private-linear-access UNBOUNDEDTAIL`;
+    assert.equal((await s.action(implementation, "fail", { reason })).status, 200);
+    assert.equal(how.state.name, "Triage");
+    assert.match(how.comments.at(-1).body, /差し戻し理由（実行失敗）:[\s\S]*Command could not start/);
+    assert.ok(how.comments.at(-1).body.includes("[redacted]"));
+    assert.ok(!how.comments.at(-1).body.includes("private-linear"));
+    assert.ok(!how.comments.at(-1).body.includes("UNBOUNDEDTAIL"));
   } finally { await s.close(); }
 });
 
@@ -475,6 +539,7 @@ test("human completion during invalidation reads is never returned to Triage", {
     const result = await s.action(lease, "invalidate");
     assert.equal(result.status, 409);
     assert.equal(how.state.name, "Done");
+    assert.equal(how.comments.length, 0, "Do not announce a return after human completion");
   } finally { await s.close(); }
 });
 

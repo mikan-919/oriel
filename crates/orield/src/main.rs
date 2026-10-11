@@ -534,6 +534,8 @@ async fn main() -> Result<()> {
                     "human Todo plus immutable target .oriel.yaml autonomous worktree opt-in\n",
                     "and configured verification are required before code executes.\n",
                     "Failed checks return diagnostics to Codex for up to two repairs; all checks rerun.\n",
+                    "Unresolved failures return HOW to Triage with reasons and require human review.\n",
+                    "Target updates checkpoint unfinished local work before merging; conflicts retain that checkpoint.\n",
                     "Verified canonical branches are pushed with CAS; PR review fixes resume\n",
                     "the same branch. Only an observed human merge moves Linear to Done.\n",
                     "--once scans once; continuous mode scans immediately, then every 15s.\n",
