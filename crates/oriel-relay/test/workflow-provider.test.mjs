@@ -254,6 +254,9 @@ test("exact human approval seals atomically, publishes only verified source, res
     s.fixture.feedback(pr.number);
     const reviewing = (await s.snapshot()).workflows[0]; assert.equal(reviewing.feedback.kind, "comment");
     const responding = await s.claim("respond");
+    const responseToken = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: responding }, hostHeaders);
+    assert.equal(responseToken.status, 200, JSON.stringify(responseToken.data));
+    assert.deepEqual(s.fixture.grants.at(-1), { contents: "write", metadata: "read", workflows: "write" });
     const nextHead = "3".repeat(40); s.fixture.refs.set(approved.branch, nextHead);
     s.fixture.uncertainty.set("pr-comment", true);
     const responded = await s.action(responding, "responded", { head_oid: nextHead, verified: true, feedback_key: reviewing.feedback.key, summary: "Fixed and verified review request" });
@@ -301,8 +304,15 @@ test("changed approvals and failures return to Triage with reasons and require h
   try {
     const how = s.fixture.addHow(); const initial = (await s.snapshot()).workflows[0];
     const lease = await s.claim("implement"); assert.equal((await s.action(lease, "begin")).status, 200);
+    s.fixture.failures.set("workflow-token", 422);
+    const denied = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease }, hostHeaders);
+    assert.equal(denied.status, 502);
+    assert.match(denied.data.error, /workflows=write/);
+    assert.match(denied.data.error, /approve updated permissions/);
+    assert.doesNotMatch(JSON.stringify(denied.data), /private-provider-diagnostic|must-not-leak-token/);
+    s.fixture.failures.delete("workflow-token");
     const token = await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease }, hostHeaders);
-    assert.equal(token.status, 200, JSON.stringify(token.data)); assert.deepEqual(s.fixture.grants.at(-1), { contents: "write", metadata: "read" });
+    assert.equal(token.status, 200, JSON.stringify(token.data)); assert.deepEqual(s.fixture.grants.at(-1), { contents: "write", metadata: "read", workflows: "write" });
     how.description += " Human changed the HOW.";
     assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease }, hostHeaders)).status, 409);
     assert.equal((await s.action(lease, "publish", { head_oid: initial.canonical_oid, verified: true, summary: "Stale" })).status >= 400, true);

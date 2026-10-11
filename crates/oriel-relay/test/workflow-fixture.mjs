@@ -70,11 +70,15 @@ export function workflowFixture() {
       assert.deepEqual(body.repository_ids, [501]);
       assert.equal(body.permissions.metadata, "read");
       for (const [permission, value] of Object.entries(body.permissions)) {
-        assert.ok(["contents", "issues", "pull_requests", "metadata", "checks", "statuses"].includes(permission));
+        assert.ok(["contents", "issues", "pull_requests", "metadata", "checks", "statuses", "workflows"].includes(permission));
         assert.ok(["read", "write"].includes(value));
         if (["metadata", "checks", "statuses"].includes(permission)) assert.equal(value, "read");
       }
       fixture.grants.push(structuredClone(body.permissions));
+      if (body.permissions.workflows === "write") {
+        const failure = await record("github", "workflow-token", request, body);
+        if (failure) return failure;
+      }
       const normalized = new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify({ repository_ids: [501], permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" } }) });
       return original(normalized);
     }

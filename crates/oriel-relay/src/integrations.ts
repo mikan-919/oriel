@@ -564,7 +564,10 @@ export class Integrations {
           }
         }
         leased();
-        return this.auth.json(await this.installationToken(device.user_id, leased, { contents: ["plan", "discuss"].includes(grant.kind) ? "read" : "write", metadata: "read" }));
+        const permissions: Record<string, string> = ["plan", "discuss"].includes(grant.kind)
+          ? { contents: "read", metadata: "read" }
+          : { contents: "write", metadata: "read", workflows: "write" };
+        return this.auth.json(await this.installationToken(device.user_id, leased, permissions));
       }
       return this.auth.json(await this.workflowAction(context, grant, body));
     } catch (error) {
