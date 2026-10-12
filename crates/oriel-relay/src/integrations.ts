@@ -443,10 +443,13 @@ export class Integrations {
   }
 
   private async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[]): Promise<Feedback | null> {
-    const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`);
+    const [comments, reviews, inline] = await Promise.all([
+      this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`),
+      this.workflowList<{ id: number; state: string; body: string | null; submitted_at: string | null; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`),
+      this.workflowList<{ id: number; pull_request_review_id: number; path: string; line: number | null; original_line?: number | null; body: string; commit_id: string }>(context, `${context.path}/pulls/${pr.number}/comments`),
+    ]);
+    context.check();
     const cursors = await this.workflowCursors(context, comments, "response");
-    const reviews = await this.workflowList<{ id: number; state: string; body: string | null; submitted_at: string | null; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`);
-    const inline = await this.workflowList<{ id: number; pull_request_review_id: number; path: string; line: number | null; original_line?: number | null; body: string; commit_id: string }>(context, `${context.path}/pulls/${pr.number}/comments`);
     const submitted = reviews.filter(review => review.state !== "PENDING" && review.submitted_at)
       .sort((a, b) => a.submitted_at!.localeCompare(b.submitted_at!) || a.id - b.id);
     const latest = new Map<string, typeof reviews[number]>();

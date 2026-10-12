@@ -565,6 +565,15 @@ test("submitted PR reviews and inline replies resume while pending reviews and e
     const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" }); assert.equal(published.status, 200);
     await s.message({ type: "release", lease_id: implementation });
     const pr = published.data.pull_request;
+    let release, timer;
+    const pending = new Promise(resolve => { release = resolve; });
+    s.fixture.holdReads = async ({operation}) => {
+      if(operation === "reviews") await pending;
+      if(operation === "review-comments") release();
+    };
+    try {
+      await Promise.race([s.snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("PR review reads were serialized")),3000);})]);
+    } finally {clearTimeout(timer);release();s.fixture.holdReads=undefined;}
     const reviews = [
       { id: 0, state: "CHANGES_REQUESTED", body: "Superseded request", submitted_at: "2025-12-31T23:59:59Z", user: { login: "reviewer" } },
       { id: 1, state: "COMMENTED", body: "Please explain this boundary.", submitted_at: "2026-01-01T00:00:00Z", user: { login: "reviewer" } },
