@@ -295,6 +295,17 @@ fn remote_params(method: &str, params: &Value, cwd: &Path, automatic: bool) -> R
     Ok(result)
 }
 
+fn rpc_error(message: &Value) -> anyhow::Error {
+    let text = message["error"]["message"]
+        .as_str()
+        .unwrap_or("Codex request failed");
+    if text == "Selected model is at capacity. Please try a different model." {
+        workflow::Stop::ModelCapacity.into()
+    } else {
+        anyhow!("{text}")
+    }
+}
+
 pub(super) struct Engine {
     pub client: Client,
     cancel: watch::Sender<bool>,
@@ -424,7 +435,7 @@ impl Engine {
                                             process_hub.changed();
                                         }
                                     }
-                                    let result = if message.get("error").is_some() { Err(anyhow!("{}", message["error"]["message"].as_str().unwrap_or("Codex request failed"))) } else { Ok(message["result"].clone()) };
+                                    let result = if message.get("error").is_some() { Err(rpc_error(&message)) } else { Ok(message["result"].clone()) };
                                     if method == "initialize" && result.is_ok() { stdin.write_all(b"{\"method\":\"initialized\"}\n").await?; }
                                     let _ = reply.send(result);
                                 }
@@ -765,6 +776,20 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_before_turn_start_keeps_native_approval() {
+        let error = rpc_error(
+            &json!({"error":{"message":"Selected model is at capacity. Please try a different model."}}),
+        );
+        assert!(matches!(
+            error.downcast_ref::<workflow::Stop>(),
+            Some(workflow::Stop::ModelCapacity)
+        ));
+        let error =
+            rpc_error(&json!({"error":{"message":"Unrelated capacity configuration error"}}));
+        assert!(error.downcast_ref::<workflow::Stop>().is_none());
+    }
 
     #[test]
     fn web_requests_cannot_override_execution_authority() {
