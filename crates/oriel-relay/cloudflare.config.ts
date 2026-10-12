@@ -41,6 +41,20 @@ import {
 // every 10s while watched; logout/expiry/revocation stop that session's delivery.
 // Control loss clears running claims. No progress history is stored; snapshots never
 // include prompts, stdout or tokens. Workflow offline is not terminal-host availability.
+// Codex page: run `orield codex` for read-only conversation/review, or `orield workflow`
+// for native-approved implementation too. The paired owner's same-Origin session
+// controls conversation history/resume/fork/archive, models/effort, live output/diffs,
+// steering/interrupt, one-turn command/file/permission approvals and questions.
+// Skills are discovered in the project. Manual conversations can configure HTTPS
+// MCP servers/OAuth in their private Codex home; autonomous runs import neither.
+// Codex app-server uses JSON-RPC on private stdio, not a network listener. Model
+// credentials stay on the device. Relay forwards authenticated frames without SQL
+// transcript storage; the host replays pending approvals on browser reconnect.
+// Logout/expiry, ownership/host changes and repository generation revoke control.
+// Code approval still requires native Linear Todo and target opt-in. Web cannot
+// override cwd/sandbox/approval configuration or start new automatic write turns.
+// Web pause cancels active automation and prevents new admission until resume;
+// resume rechecks native authority. Model selection applies to the next execution.
 // `orield workflow` answers human Issue comments starting with /oriel using
 // read-only Codex. /oriel how followed by optional instructions starts HOW
 // planning with a start notification and a result reply linking the Linear HOW.
@@ -58,6 +72,14 @@ import {
 // with @oriel, request HOW refinement in Triage; /oriel PR comments, reviews and failed checks drive verified fixes
 // on the same canonical branch. Human merge is required before Linear Done,
 // including WHATs auto-closed by that merge.
+// Failed PR checks automatically resume with native annotations and, for Actions,
+// failed job/step details and a bounded log excerpt. Diagnostics are downloaded only
+// at repair start, require the current PR head/check identity, and never forward
+// GitHub credentials to signed log storage. Actions: read is requested only for
+// diagnostics; missing permission falls back to check output/annotations. Grant it
+// on the GitHub App and approve installation updates to enable private job logs.
+// The host reruns every configured verification before pushing. Signed responses
+// bound retries to three since the last successful check, including prior heads.
 // Triage refinement replies contain the model's actual summary in the commenter's
 // language, not a fixed HOW-update notice. Read-only questions/blockers may be posted
 // without approving code; question-only replies leave the canonical HOW unchanged.

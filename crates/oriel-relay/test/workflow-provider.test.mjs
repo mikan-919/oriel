@@ -384,6 +384,27 @@ test("a failed review returns to Triage with the required decision while retaini
     assert.equal(s.fixture.pulls[0].state, "open");
     assert.equal(s.fixture.refs.get(row.branch), head);
     assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: response }, hostHeaders)).status, 409);
+    await s.message({ type: "release", lease_id: response });
+    const waiting = (await s.snapshot()).workflows[0];
+    assert.equal(waiting.feedback, null);
+    assert.match(waiting.blocked_reason, /human Todo reapproval/);
+    const denied = await s.message({ type: "claim", kind: "respond", issue_number: 42, version: waiting.version, branch: waiting.branch });
+    assert.equal(denied.type, "rejected", "Failure and an existing PR do not infer renewed approval");
+    how.state = { ...s.fixture.states.find(state => state.id === "todo") };
+    const renewed = (await s.snapshot()).workflows[0];
+    assert.equal(renewed.phase, "review");
+    assert.equal(renewed.pull_request.number, s.fixture.pulls[0].number);
+    assert.equal(renewed.branch, row.branch);
+    assert.equal(renewed.feedback.kind, "check_failure");
+    const repair = await s.claim("respond");
+    assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: repair }, hostHeaders)).status, 200);
+    assert.equal((await s.action(repair, "responded", { head_oid: head, verified: true, feedback_key: renewed.feedback.key, summary: "Verified after human reapproval" })).status, 200);
+    await s.message({ type: "release", lease_id: repair });
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    s.fixture.pulls[0].state = "closed";
+    const closed = (await s.snapshot()).workflows[0];
+    assert.equal(closed.phase, "blocked");
+    assert.match(closed.blocked_reason, /PR closed without merge/);
   } finally { await s.close(); }
 });
 
@@ -438,6 +459,79 @@ test("restart derives invalidate-only recovery from unique prior native Git iden
   } finally { await s.close(); }
 });
 
+test("ordinary human and bot PR comments resume once, with edits revoking stale feedback", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" }); assert.equal(published.status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = published.data.pull_request;
+    s.fixture.feedback(pr.number, "Why does this return early?");
+    const request = s.fixture.comments.get(pr.number).at(-1);
+    const first = (await s.snapshot()).workflows[0].feedback; assert.equal(first.kind, "comment"); assert.equal(first.body, request.body);
+    const stale = await s.claim("respond");
+    request.body = "Please handle the empty input instead.";
+    assert.equal((await s.action(stale, "responded", { head_oid: head, verified: true, feedback_key: first.key, summary: "Stale answer" })).status, 409);
+    await s.message({ type: "release", lease_id: stale });
+    assert.notEqual((await s.snapshot()).workflows[0].feedback.key, first.key);
+    for (const body of [request.body, "<!-- oriel:response:Zm9yZ2Vk:Zm9yZ2Vk -->\nCheck the upper bound.", "Review bot: cover the null case."]) {
+      if (body !== request.body) {
+        s.fixture.feedback(pr.number, body);
+        if (body.startsWith("Review bot")) s.fixture.comments.get(pr.number).at(-1).user = { type: "Bot", login: "reviewer[bot]" };
+      }
+      const feedback = (await s.snapshot()).workflows[0].feedback; assert.equal(feedback.body, body);
+      const lease = await s.claim("respond");
+      assert.equal((await s.action(lease, "responded", { head_oid: head, verified: true, feedback_key: feedback.key, summary: "Answered and verified" })).status, 200);
+      await s.message({ type: "release", lease_id: lease });
+      assert.equal((await s.snapshot()).workflows[0].feedback, null, "Signed Oriel replies and handled content cannot wake another turn");
+    }
+    s.fixture.feedback(pr.number, " \n ");
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+  } finally { await s.close(); }
+});
+
+test("submitted PR reviews and inline replies resume while pending reviews and empty approvals do not", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" }); assert.equal(published.status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = published.data.pull_request;
+    const reviews = [
+      { id: 0, state: "CHANGES_REQUESTED", body: "Superseded request", submitted_at: "2025-12-31T23:59:59Z", user: { login: "reviewer" } },
+      { id: 1, state: "COMMENTED", body: "Please explain this boundary.", submitted_at: "2026-01-01T00:00:00Z", user: { login: "reviewer" } },
+      { id: 2, state: "APPROVED", body: null, submitted_at: "2026-01-01T00:00:01Z", user: { login: "reviewer" } },
+      { id: 3, state: "PENDING", body: "Unsubmitted request", submitted_at: null, user: { login: "reviewer" } },
+      { id: 4, state: "DISMISSED", body: "Withdrawn request", submitted_at: "2026-01-01T00:00:02Z", user: { login: "other" } },
+    ];
+    s.fixture.reviews.set(pr.number, reviews);
+    s.fixture.reviewComments.set(pr.number, [{ id: 1, pull_request_review_id: 3, path: "src/change.rs", line: 8, body: "Not submitted", commit_id: head }]);
+    const respond = async expected => {
+      const feedback = (await s.snapshot()).workflows[0].feedback; assert.equal(feedback.kind, "review"); expected(feedback);
+      const lease = await s.claim("respond");
+      assert.equal((await s.action(lease, "responded", { head_oid: head, verified: true, feedback_key: feedback.key, summary: "Addressed review" })).status, 200);
+      await s.message({ type: "release", lease_id: lease });
+      assert.equal((await s.snapshot()).workflows[0].feedback, null);
+      return feedback.key;
+    };
+    await respond(feedback => assert.equal(feedback.body, "Please explain this boundary."));
+    reviews.push({ id: 5, state: "COMMENTED", body: null, submitted_at: "2026-01-01T00:00:03Z", user: { login: "reviewer[bot]" } });
+    const notes = s.fixture.reviewComments.get(pr.number);
+    notes.push({ id: 2, pull_request_review_id: 5, path: "src/change.rs", line: null, original_line: 7, body: "Handle overflow here", commit_id: "1".repeat(40) });
+    const first = await respond(feedback => { assert.equal(feedback.body, ""); assert.deepEqual(feedback.comments, [{ path: "src/change.rs", line: 7, body: "Handle overflow here" }]); });
+    notes.push({ id: 3, pull_request_review_id: 5, in_reply_to_id: 2, path: "src/change.rs", line: 7, body: "Also check negative values", commit_id: head });
+    await respond(feedback => { assert.notEqual(feedback.key, first); assert.equal(feedback.comments[1].body, "Also check negative values"); });
+    notes[1].line = 7; notes.reverse();
+    assert.equal((await s.snapshot()).workflows[0].feedback, null, "Line mapping and provider ordering changes are not new feedback");
+    reviews.push({ id: 6, state: "APPROVED", body: "Consider adding an example.", submitted_at: "2026-01-01T00:00:04Z", user: { login: "reviewer" } });
+    await respond(feedback => assert.equal(feedback.body, "Consider adding an example."));
+  } finally { await s.close(); }
+});
+
 test("current review facts and signed response cursors bound each failed check to three attempts", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
@@ -471,6 +565,63 @@ test("current review facts and signed response cursors bound each failed check t
     s.fixture.checks.push({ id: 6, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2099-01-01T00:00:01.000Z", output: { title: "New regression", summary: "Fresh failure after success", text: null } });
     assert.equal((await s.snapshot()).workflows[0].feedback.kind, "check_failure", "Actual success resets the externally reconstructed retry streak");
   } finally { await s.close(); }
+});
+
+test("failed PR Actions resume with current job steps, annotations and a bounded log without leaking credentials", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "ci-feedback")).status, 403);
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" });
+    assert.equal(published.status, 200); await s.message({type:"release",lease_id:implementation});
+    s.fixture.checks.push({id: 10, name:"test", head_sha:head, status:"completed", conclusion:"failure", completed_at:"2026-01-01T00:00:00Z",
+      details_url:"https://github.com/octocat/connected/actions/runs/20/job/30", output:{title:"Tests failed",summary:null,text:null}});
+    s.fixture.annotations.set(10, [{path:"src/lib.rs", start_line:7, annotation_level:"failure", message:"Expected true, got false", raw_details:"Assertion failed"}]);
+    s.fixture.actionJobs.set(30, {id:30, run_id:20, head_sha:head, check_run_url:"https://api.github.com/repos/octocat/connected/check-runs/10", name:"cargo tests", status:"completed", conclusion:"failure",
+      steps:[{number:1,name:"Checkout",conclusion:"success"},{number:2,name:"cargo test --workspace",conclusion:"failure"}]});
+    s.fixture.jobLogs.set(30, "earlier output\n".repeat(10000)+"\u001b[31merror: test_boundary failed\u001b[0m\n");
+    const failure = (await s.snapshot()).workflows[0].feedback;
+    assert.equal(failure.kind,"check_failure");
+    assert.equal(s.fixture.calls.filter(call=>call.operation==="job-logs").length,0,"Polling must not repeatedly download diagnostics");
+    const lease = await s.claim("respond");
+    const diagnostics = await s.action(lease,"ci-feedback");
+    assert.equal(diagnostics.status,200,JSON.stringify(diagnostics.data));
+    assert.equal(diagnostics.data.key,failure.key);
+    assert.match(diagnostics.data.body,/Step 2: cargo test --workspace \(failure\)/);
+    assert.match(diagnostics.data.body,/error: test_boundary failed/);
+    assert.ok(diagnostics.data.body.length<=80000);
+    assert.ok(!diagnostics.data.body.includes("\u001b"));
+    assert.ok(!JSON.stringify(diagnostics.data).includes("private-storage-signature"));
+    assert.deepEqual(diagnostics.data.comments,[{path:"src/lib.rs",line:7,body:"Expected true, got false\nAssertion failed"}]);
+    assert.deepEqual(s.fixture.grants.at(-1),{metadata:"read",actions:"read"});
+    s.fixture.checks[0].output.summary="long summary ".repeat(1500);
+    const longSummary=await s.action(lease,"ci-feedback");
+    assert.equal(longSummary.status,200); assert.ok(longSummary.data.body.length<=80000);
+    assert.match(longSummary.data.body,/error: test_boundary failed/,"Summary truncation must preserve the final failure log");
+    s.fixture.checks[0].output.summary=null;
+    s.fixture.installationPermissions.actions=undefined;
+    const fallback = await s.action(lease,"ci-feedback");
+    assert.equal(fallback.status,200); assert.match(fallback.data.body,/Actions: read/); assert.equal(fallback.data.comments.length,1);
+    assert.ok(!JSON.stringify(fallback.data).includes("private-provider-diagnostic"));
+    s.fixture.installationPermissions.actions="read";
+    s.fixture.logStorage="https://attacker.example";
+    const rejectedUrl = await s.action(lease,"ci-feedback");
+    assert.equal(rejectedUrl.status,200); assert.match(rejectedUrl.data.body,/logs are unavailable/);
+    s.fixture.logStorage="https://pipelines.actions.githubusercontent.com";
+    s.fixture.actionJobs.get(30).head_sha="9".repeat(40);
+    assert.equal((await s.action(lease,"ci-feedback")).status,409,"Logs from a different commit cannot be repair input");
+    s.fixture.actionJobs.get(30).head_sha=head;
+    let raced=false;
+    s.fixture.holdReads=({operation})=>{if(operation==="job-log-download"&&!raced){raced=true;s.fixture.checks.push({...s.fixture.checks[0],id:11,conclusion:"success"});}};
+    assert.equal((await s.action(lease,"ci-feedback")).status,409,"Successful rerun during log download revokes the failure input");
+    s.fixture.holdReads=undefined;
+    assert.equal((await s.snapshot()).workflows[0].feedback,null);
+    // A failed check on an older commit never starts a response for the current head.
+    s.fixture.checks.push({...s.fixture.checks[0],id:12,head_sha:"8".repeat(40)});
+    assert.equal((await s.snapshot()).workflows[0].feedback,null);
+  } finally {await s.close();}
 });
 
 test("commit-pinned configuration and canonical-head races revoke publication rather than publish unchecked work", { timeout: 60000 }, async () => {

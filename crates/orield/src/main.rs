@@ -25,6 +25,7 @@ use tokio_tungstenite::{
 use tracing::{error, info, warn};
 use url::Url;
 
+mod codex;
 mod integrations;
 mod repository;
 mod workflow;
@@ -520,7 +521,7 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 concat!(
-                    "Usage: orield [--help | integrations | workflow [--once]]\n\n",
+                    "Usage: orield [--help | integrations | codex | workflow [--once]]\n\n",
                     "Pair this device with a Passkey account, then run Codex in a PTY.\n",
                     "First start opens a browser and requires explicit local account confirmation.\n",
                     "Already paired devices reconnect automatically without a pairing prompt.\n",
@@ -539,11 +540,12 @@ async fn main() -> Result<()> {
                     "Verified canonical branches are pushed with CAS; PR review fixes resume\n",
                     "the same branch. Only an observed human merge moves Linear to Done.\n",
                     "--once scans once; continuous mode scans immediately, then every 15s.\n",
-                    "Only one workflow process may run per device; a second start exits before connecting.\n",
+                    "Only one workflow/codex process may run per device; a second start exits before connecting.\n",
                     "Interrupted/unpushed work is preserved under $XDG_STATE_HOME/oriel/workflow\n",
                     "(fallback $HOME/.local/state/oriel/workflow); transcripts remain private.\n",
-                    "Codex uses automatic approval reviews for commands outside its sandbox.\n",
-                    "It must support exec structured output, config/rules isolation and auto-review.\n\n",
+                    "codex: connect Codex app-server to the Codex page in Oriel Web.\n",
+                    "The Web page manages conversations, models, reviews, questions and approvals.\n",
+                    "workflow also exposes its active Codex execution through that page.\n\n",
                     "Identity: $XDG_CONFIG_HOME/oriel/device.json, falling back to\n",
                     "$HOME/.config/oriel/device.json; ORIEL_IDENTITY_FILE overrides the path.\n",
                     "Created files are mode 0600 and new directories private. Invalid identities are never reset.\n",
@@ -556,13 +558,14 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         [arg] if arg == "integrations" => "integrations",
+        [arg] if arg == "codex" => "codex",
         [arg] if arg == "workflow" => "workflow",
         [arg, once] if arg == "workflow" && once == "--once" => "once",
-        _ => bail!("usage: orield [--help | integrations | workflow [--once]]"),
+        _ => bail!("usage: orield [--help | integrations | codex | workflow [--once]]"),
     };
     let identity_file = identity_path()?;
     let identity = load_identity(&identity_file)?;
-    let _workflow_owner = if mode == "workflow" || mode == "once" {
+    let _workflow_owner = if matches!(mode, "workflow" | "once" | "codex") {
         Some(lock_workflow_identity(&identity_file)?)
     } else {
         None
@@ -585,10 +588,25 @@ async fn main() -> Result<()> {
     if mode == "integrations" {
         return integrations::run(&relay_url, &identity).await;
     }
-    if mode == "workflow" || mode == "once" {
-        return workflow::run(&relay_url, &identity, mode == "once").await;
-    }
     repository::report_current(&relay_url, &identity).await?;
+    if matches!(mode, "codex" | "workflow" | "once") {
+        let cwd = std::env::current_dir()?;
+        let project = match workflow_git::text(&cwd, &["rev-parse", "--show-toplevel"]).await {
+            Ok(path) => PathBuf::from(path),
+            Err(error) if mode != "codex" => return Err(error),
+            Err(_) => cwd,
+        };
+        let mut codex_control = codex::start(&relay_url, &identity, &project).await?;
+        if mode == "codex" {
+            println!("Codex is available from the Codex page in Oriel Web. Ctrl-C to stop.");
+            tokio::select! { _ = &mut codex_control.task => return Ok(()), _ = tokio::signal::ctrl_c() => {} }
+            codex_control.stop().await;
+            return Ok(());
+        }
+        let result = workflow::run(&relay_url, &identity, mode == "once").await;
+        codex_control.stop().await;
+        return result;
+    }
 
     let terminal = spawn_terminal("codex")?;
 
