@@ -13,6 +13,7 @@ export function workflowFixture() {
       { id: "done", name: "Done", type: "completed" }, { id: "canceled", name: "Canceled", type: "canceled" },
     ], base_branch: "main", target_oid: "1".repeat(40), repository_node_id: "R_501", autonomous: true, verification: [["true"]],
     config_source: undefined, configurations: new Map(), calls: [], grants: [], uncertainty: new Map(), failures: new Map(), holdReads: undefined,
+    installationPermissions: { contents: "write", metadata: "read", workflows: "write", issues: "write", pull_requests: "write", checks: "write", statuses: "read" },
     issuePageSize: 100, attachmentPageSize: 100, comments: new Map([[42, [{ id: 1, body: "/oriel how", user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]]]), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
     compare: undefined, sealSupported: true, trees: new Map(),
   });
@@ -65,16 +66,24 @@ export function workflowFixture() {
   const pullNode = pr => ({ ...structuredClone(pr), head: { ...structuredClone(pr.head), sha: fixture.refs.get(pr.head.ref) ?? pr.head.sha } });
   fixture.fetch = async request => {
     const url = new URL(request.url);
+    if (url.origin === "https://api.github.com" && url.pathname === "/app/installations/101") {
+      const failure = await record("github", "installation-permissions", request);
+      return failure ?? Response.json({ id: 101, app_id: 123, permissions: fixture.installationPermissions });
+    }
     if (url.origin === "https://api.github.com" && url.pathname === "/app/installations/101/access_tokens") {
       const body = await request.clone().json();
       assert.deepEqual(body.repository_ids, [501]);
       assert.equal(body.permissions.metadata, "read");
       for (const [permission, value] of Object.entries(body.permissions)) {
-        assert.ok(["contents", "issues", "pull_requests", "metadata", "checks", "statuses"].includes(permission));
+        assert.ok(["contents", "issues", "pull_requests", "metadata", "checks", "statuses", "workflows"].includes(permission));
         assert.ok(["read", "write"].includes(value));
         if (["metadata", "checks", "statuses"].includes(permission)) assert.equal(value, "read");
       }
       fixture.grants.push(structuredClone(body.permissions));
+      if (body.permissions.workflows === "write") {
+        const failure = await record("github", "workflow-token", request, body);
+        if (failure) return failure;
+      }
       const normalized = new Request(request.url, { method: request.method, headers: request.headers, body: JSON.stringify({ repository_ids: [501], permissions: { contents: "write", issues: "write", pull_requests: "write", metadata: "read" } }) });
       return original(normalized);
     }

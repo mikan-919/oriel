@@ -564,7 +564,10 @@ export class Integrations {
           }
         }
         leased();
-        return this.auth.json(await this.installationToken(device.user_id, leased, { contents: ["plan", "discuss"].includes(grant.kind) ? "read" : "write", metadata: "read" }));
+        const permissions: Record<string, string> = ["plan", "discuss"].includes(grant.kind)
+          ? { contents: "read", metadata: "read" }
+          : { contents: "write", metadata: "read", workflows: "write" };
+        return this.auth.json(await this.installationToken(device.user_id, leased, permissions));
       }
       return this.auth.json(await this.workflowAction(context, grant, body));
     } catch (error) {
@@ -1401,18 +1404,35 @@ export class Integrations {
       const key = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
       const signingInput = `${base64url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })))}.${base64url(encoder.encode(JSON.stringify({ iat: now() - 60, exp: now() + 540, iss: this.env.GITHUB_APP_ID })))}`;
       const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(signingInput));
+      const jwt = `${signingInput}.${base64url(new Uint8Array(signature))}`;
       guard();
       step = "request";
       const response = await fetch(`https://api.github.com/app/installations/${repository.installation_id}/access_tokens`, {
-        method: "POST", headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${signingInput}.${base64url(new Uint8Array(signature))}`, "Content-Type": "application/json", "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" },
+        method: "POST", headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" },
         body: JSON.stringify({ repository_ids: [repository.repository_id], permissions }), redirect: "manual",
       });
       if (!response.ok) {
-        const hint = response.status === 401
+        let hint = response.status === 401
           ? "Check GITHUB_APP_ID and the matching GitHub App private key."
           : response.status === 422
             ? `Check the GitHub App permissions requested (${Object.entries(permissions).map(([permission, access]) => `${permission}=${access}`).join(", ")}), then approve updated permissions on this installation.`
             : "Check the GitHub App installation status and granted permissions.";
+        if (response.status === 422) {
+          let grants = "permission readback unavailable";
+          try {
+            const installation = await this.api<{ id: number; app_id: number; permissions?: Record<string, unknown> }>(jwt, `/app/installations/${repository.installation_id}`);
+            guard();
+            if (installation.id === repository.installation_id && String(installation.app_id) === this.env.GITHUB_APP_ID &&
+              installation.permissions && typeof installation.permissions === "object" && !Array.isArray(installation.permissions)) {
+              const granted = installation.permissions;
+              grants = Object.keys(permissions).map(permission => {
+                const value = granted[permission];
+                return `${permission}=${typeof value === "string" && ["read", "write", "admin"].includes(value) ? value : "not granted"}`;
+              }).join(", ");
+            }
+          } catch { guard(); /* Keep the token rejection when diagnostic readback fails. */ }
+          hint += ` Installation ${repository.installation_id} (App ${this.env.GITHUB_APP_ID}) grants: ${grants}.`;
+        }
         this.auth.fail(502, `GitHub installation token request rejected (HTTP ${response.status}). ${hint}`);
       }
       step = "response";

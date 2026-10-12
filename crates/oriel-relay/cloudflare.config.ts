@@ -77,7 +77,7 @@ import {
 // outside a recognized GitHub checkout clears it. Browser ownership and the device
 // bearer protect discovery/reporting. No local OAuth or Secret Service is required.
 // GitHub: register a GitHub App, enable user OAuth, and install it on the chosen
-// repository. Repository permissions: Contents, Issues, Pull requests = read/write;
+// repository. Repository permissions: Contents, Issues, Pull requests, Workflows = read/write;
 // Checks, Commit statuses, Metadata = read. Approve new installation permissions
 // after changing the App. Organization installations also need Members = read to
 // verify that the consenting GitHub user is an active organization admin.
@@ -108,8 +108,10 @@ import {
 // require the original live browser session. Legacy device-scoped integrations are
 // discarded at cutover: reconnect in Web. Historical .old credential guidance no
 // longer applies. Disconnect blocks new access; issued GitHub installation tokens
-// can remain valid until expiry (up to 1 hour). Git tokens are contents-only,
-// repository-scoped and require a current account-owned device's live workflow lease.
+// can remain valid until expiry (up to 1 hour). Git tokens are repository-scoped
+// and require a current account-owned device's live workflow lease. Planning and
+// discussion tokens have Contents = read; implementation and review response
+// tokens have Contents and Workflows = write so verified Actions changes can push.
 // Browser session cookies are Lax for top-level OAuth callbacks; all browser
 // mutations require exact Origin and callbacks require the approved live session.
 // GET /api/integrations includes each provider's durable authorization outcome.
