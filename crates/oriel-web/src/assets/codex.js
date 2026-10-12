@@ -7,6 +7,7 @@ export function mountCodex() {
     let owner = null, devices = [], socket = null, generation = 0, engines = [], engineId = "", threadId = "", turnId = "";
     let models = [], active = false, busy = 0, requests = new Map(), answered = new Set(), calls = new Map(), retry;
     const items = new Map();
+    let keepalive, expiry;
     ui.skillList = ui["skill-list"]; ui.mcpList = ui["mcp-list"]; ui.mcpForm = ui["mcp-form"];
     const node = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
     const button = (text, action) => { const element = node("button", text); element.type = "button"; element.addEventListener("click", () => attempt(action)); return element; };
@@ -33,6 +34,7 @@ export function mountCodex() {
     }
     function disconnect(clear = true) {
         generation++; clearTimeout(retry);
+        clearInterval(keepalive); clearTimeout(expiry);
         const previous = socket; socket = null; previous?.close();
         rejectCalls("接続が切れました。送信済みの操作を自動で再送しません。");
         engines = []; engineId = ""; threadId = ""; turnId = ""; active = false;
@@ -71,9 +73,20 @@ export function mountCodex() {
         status("Codexに接続中です。");
         const url = new URL(`/api/codex/${device}/browser`, location.origin); url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
         socket = new WebSocket(url);
-        socket.addEventListener("open", () => { if (current === generation) status("端末のCodex接続を確認しています。"); });
+        const connection = socket;
+        const expire = () => { if (current === generation) connection.close(); };
+        expiry = setTimeout(expire, 60000);
+        socket.addEventListener("open", () => {
+            if (current !== generation) return;
+            status("端末のCodex接続を確認しています。");
+            keepalive = setInterval(() => {
+                if (current === generation && connection.readyState === WebSocket.OPEN) connection.send("oriel:ping");
+            }, 15000);
+        });
         socket.addEventListener("message", event => {
             if (current !== generation) return;
+            clearTimeout(expiry); expiry = setTimeout(expire, 60000);
+            if (event.data === "oriel:pong") return;
             try { receive(JSON.parse(event.data)); } catch (error) { status(error.message || "Codexの応答を読み取れません。"); }
         });
         socket.addEventListener("close", () => {

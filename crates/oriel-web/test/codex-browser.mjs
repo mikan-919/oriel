@@ -5,6 +5,7 @@ import {chromium} from "../../oriel-relay/node_modules/playwright/index.mjs";
 const browser = await chromium.launch({headless:true});
 try {
   const page = await browser.newPage(); const errors = [];
+  await page.clock.install();
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(new URL("../build/review/codex.html", import.meta.url).href);
   await page.getByText("今回だけ許可", {exact:true}).waitFor();
@@ -67,6 +68,20 @@ try {
   assert.equal(await page.locator("#codex-new").isDisabled(), true);
   assert.equal(await page.locator("#codex-send").isDisabled(), true);
   await page.waitForFunction(() => !document.getElementById("codex-interrupt").disabled);
+  await page.waitForTimeout(50);
+  const callsBeforeIdle = await page.evaluate(() => {
+    window.beforeIdleConnection = window.fixtureCodex;
+    return window.fixtureRPCs.length;
+  });
+  await page.clock.runFor(90000);
+  assert.equal(await page.evaluate(() => window.fixtureCodex === window.beforeIdleConnection && window.fixtureCodex.readyState === 1), true);
+  assert.equal(await page.evaluate(() => window.fixtureRPCs.length), callsBeforeIdle, "Idle keepalive must not issue Codex RPCs");
+  await page.evaluate(() => {
+    const send = window.fixtureCodex.send.bind(window.fixtureCodex);
+    window.fixtureCodex.send = raw => {if (raw !== "oriel:ping") send(raw);};
+  });
+  await page.clock.runFor(61000);
+  assert.equal(await page.locator("#codex-interrupt").isDisabled(), true, "Missing pongs must disconnect the control channel");
   assert.deepEqual(errors, []);
   console.log("Codex browser: approvals, questions, conversations, models, steering, interrupt, fork, pause/resume, skills, MCP and authority passed");
 } finally { await browser.close(); }

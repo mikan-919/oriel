@@ -35,7 +35,7 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
     constructor(url){this.codex=String(url).includes('/api/codex/');if(this.codex)window.fixtureCodex=this;setTimeout(()=>{this.listeners.open?.({});if(this.codex)this.deliver(codexState);else if(fixtureState!=='reconnecting')this.deliver({type:'workflow-progress',devices:[{device_id:'fixture',state:'running',stage:'implementing',updated_at:new Date().toISOString()}]});else this.listeners.error?.({});},100);}
     addEventListener(name,fn){this.listeners[name]=fn;}
     deliver(message){this.listeners.message?.({data:JSON.stringify(message)});}
-    send(raw){if(!this.codex)return;const m=JSON.parse(raw);window.fixtureRPCs.push(m);let result={};
+    send(raw){if(raw==='oriel:ping'){this.listeners.message?.({data:'oriel:pong'});return;}if(!this.codex)return;const m=JSON.parse(raw);window.fixtureRPCs.push(m);let result={};
       if(m.method==='model/list')result={data:[{model:'test-model',displayName:'検証用モデル',supportedReasoningEfforts:[{reasoningEffort:'high'}]}]};
       if(m.method==='thread/list')result={data:[{id:'saved',name:'保存した会話'}]};
       if(['thread/start','thread/fork','thread/resume','thread/read'].includes(m.method))result={thread:{id:m.params.threadId||'new',name:'保存した会話',turns:[{status:'completed',items:[{id:'message',type:'agentMessage',text:'保存済みの回答です。'}]}]}};
@@ -49,7 +49,7 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
       if(m.method==='workflow/resume')codexState.workflowPaused=false;
       setTimeout(()=>{this.deliver({type:'response',request_id:m.request_id,result});if(m.method==='turn/interrupt')this.deliver({type:'event',engine:m.engine,message:{method:'turn/completed',params:{turn:{id:'running',status:'interrupted'}}}});if(m.method.startsWith('workflow/'))this.deliver(codexState);},10);
     }
-    close(){this.readyState=3;}
+    close(){if(this.readyState===3)return;this.readyState=3;this.listeners.close?.({});}
   };
   `;
   const fixture=html.replace(/<link[^>]*>/g,'').replace(/<script[\s\S]*?<\/script>/g,'')

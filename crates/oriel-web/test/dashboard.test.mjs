@@ -4,6 +4,53 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../src/assets/dashboard.js', import.meta.url), 'utf8');
 
+test('runtime pongs keep unchanged progress live; missing pongs or an initial snapshot expire', () => {
+  for (const baseline of [true, false]) {
+    let now = 0, serial = 0, connection, answer = true;
+    const timers = new Map();
+    const add = (callback, delay, repeat = false) => {const id = ++serial; timers.set(id, {callback, delay, repeat, due: now + delay}); return id;};
+    const advance = milliseconds => {
+      const end = now + milliseconds;
+      for (;;) {
+        const next = [...timers].sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next || next[1].due > end) break;
+        const [id, timer] = next; now = timer.due;
+        if (timer.repeat) timer.due += timer.delay; else timers.delete(id);
+        timer.callback();
+      }
+      now = end;
+    };
+    class Socket {
+      static OPEN = 1; readyState = 1; listeners = {}; sent = [];
+      constructor() {connection = this;}
+      addEventListener(name, callback) {this.listeners[name] = callback;}
+      send(raw) {this.sent.push(raw); if (raw === 'oriel:ping' && answer) this.listeners.message({data: 'oriel:pong'});}
+      close() {this.readyState = 3; this.listeners.close?.();}
+    }
+    const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, progressSocket: undefined,
+      progressRetry: undefined, progressExpiry: undefined, progressKeepalive: undefined,
+      progressReceivedAt: 0, progressRetryDelay: 5000, progressSnapshot: new Map(), progressStream: 'connecting',
+      currentAccount: epoch => !!c.user && c.accountEpoch === epoch,
+      setProgressStream: state => {c.progressStream = state;}, WebSocket: Socket, URL,
+      location: {origin: 'https://fixture.invalid', protocol: 'https:'}, Date: {now: () => now},
+      setTimeout: (callback, delay) => add(callback, delay), clearTimeout: id => timers.delete(id),
+      setInterval: (callback, delay) => add(callback, delay, true), clearInterval: id => timers.delete(id)});
+    vm.runInContext(source.slice(source.indexOf('function stopProgress()'), source.indexOf('function updateProgressLink(')), c);
+    c.connectProgress(); connection.listeners.open();
+    if (baseline) connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', devices: [{device_id: 'device', state: 'idle'}]})});
+    advance(baseline ? 90000 : 60000);
+    assert.equal(c.progressStream, baseline ? 'live' : 'stale');
+    if (baseline) {
+      assert.equal(c.progressSocket, connection, 'Unchanged state does not force a reconnect');
+      assert.equal(c.progressSnapshot.get('device').state, 'idle');
+      assert.equal(connection.sent.filter(raw => raw === 'oriel:ping').length, 6);
+      answer = false; advance(60000);
+      assert.equal(c.progressStream, 'stale');
+      assert.equal(connection.readyState, 3);
+    }
+  }
+});
+
 test('background polling stops for hidden tabs and resumes device discovery when visible', async () => {
   let deviceRequests = 0;
   let workflowRequests = 0;
