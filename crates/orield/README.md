@@ -8,7 +8,7 @@ GitHub and Linear integrations to be configured.
 Once a version has been published to crates.io, install without a checkout:
 
 ```sh
-cargo install orield --locked --version 0.1.0
+cargo install orield --locked --version '=0.1.0'
 orield --help
 ```
 
@@ -65,7 +65,9 @@ version fails the job; an existing version skips publication successfully. A
 `cargo publish` fail, requiring owner review. Only `orield` is published.
 
 Both new and skipped versions undergo registry installation in an empty install
-root and `--help` verification. Installation is retried at most ten times, with
+root with an exact version requirement and `--help` verification. This prevents
+verification from installing a newer release instead of the version just checked.
+Installation is retried at most ten times, with
 30 seconds between attempts. Job summaries distinguish publication, publication
 failure, skip, and registry verification failure. Initial lookup errors also fail
 the job with their diagnostic. After the first enabled main push, check these

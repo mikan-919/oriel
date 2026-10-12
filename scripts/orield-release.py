@@ -64,7 +64,7 @@ def main():
     for attempt in range(10):
         with tempfile.TemporaryDirectory(prefix="orield-registry-install-") as root:
             result = subprocess.run([
-                "cargo", "install", "orield", "--locked", "--version", version,
+                "cargo", "install", "orield", "--locked", "--version", "=" + version,
                 "--root", root,
             ], env=install_env)
             if result.returncode == 0:

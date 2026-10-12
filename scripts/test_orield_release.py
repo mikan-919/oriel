@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -50,6 +51,8 @@ class ReleaseTests(unittest.TestCase):
             release.main()
             self.assertEqual(command.call_count, 2)
             self.assertEqual(command.call_args_list[0].args[0][:2], ["cargo", "install"])
+            install_args = command.call_args_list[0].args[0]
+            self.assertEqual(install_args[install_args.index("--version") + 1], "=0.1.0")
             for call in command.call_args_list:
                 self.assertNotIn("CARGO_REGISTRY_TOKEN", call.kwargs["env"])
             self.assertIn("Skipped", summary.call_args_list[0].args[0])
@@ -85,6 +88,41 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(command.call_count, 10)
             self.assertEqual(sleep.call_count, 9)
             sleep.assert_called_with(30)
+
+    def test_yanked_version_stops_before_publish_or_install(self):
+        env, registry, metadata, run, report = self.run_release([
+            {}, {"users": [{"login": "owner"}]}, {"version": {"yanked": True}},
+        ])
+        with env, registry, metadata, run as command, report:
+            with self.assertRaisesRegex(RuntimeError, "yanked"):
+                release.main()
+            command.assert_not_called()
+
+    def test_publish_failure_does_not_attempt_install(self):
+        env, registry, metadata, run, report = self.run_release([None, None])
+        with env, registry, metadata, run as command, report as summary:
+            command.side_effect = subprocess.CalledProcessError(1, "cargo publish")
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.main()
+            self.assertEqual(command.call_count, 1)
+            self.assertIn("Publication failed", summary.call_args.args[0])
+
+    def test_help_failure_is_reported_without_retrying_install(self):
+        env, registry, metadata, run, report = self.run_release([
+            {}, {"users": [{"login": "owner"}]}, {"version": {"yanked": False}},
+        ])
+        with env, registry, metadata, run as command, report as summary, patch.object(
+            release.time, "sleep"
+        ) as sleep:
+            command.side_effect = [
+                subprocess.CompletedProcess("cargo install", 0),
+                subprocess.CalledProcessError(1, "orield --help"),
+            ]
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.main()
+            self.assertEqual(command.call_count, 2)
+            sleep.assert_not_called()
+            self.assertIn("Registry verification failed", summary.call_args.args[0])
 
 
 if __name__ == "__main__":
