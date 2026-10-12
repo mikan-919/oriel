@@ -3,6 +3,41 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../src/assets/dashboard.js', import.meta.url), 'utf8');
+
+test('background polling stops for hidden tabs and resumes device discovery when visible', async () => {
+  let deviceRequests = 0;
+  let workflowRequests = 0;
+  let periodic;
+  let visibility;
+  let timer;
+  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null,
+    progressStream: 'connecting', progressReceivedAt: 0, busy: false, workflowRefreshing: false,
+    repositoryDeviceId: 'device', dashboard: {hidden: false}, status: {},
+    document: {hidden: false, addEventListener(type, callback) {if (type === 'visibilitychange') visibility = callback;}},
+    currentAccount: epoch => !!c.user && epoch === c.accountEpoch,
+    refreshDevices: async () => {deviceRequests++;}, refreshWorkflow: async () => {workflowRequests++;},
+    setInterval(callback, delay) {assert.equal(delay, 60000); periodic = callback;},
+    setTimeout(callback, delay) {assert.equal(delay, 60000); timer = callback; return 1;}, clearTimeout() {},
+    staleProgress() {throw new Error('Unexpected progress expiry');}, errorText: String});
+  vm.runInContext(source.slice(source.indexOf('document.addEventListener("visibilitychange"'),
+    source.indexOf('\nrender();\nperform(async () =>')), c);
+  c.scheduleDevices();
+  await timer();
+  await periodic();
+  assert.equal(deviceRequests, 1);
+  assert.equal(workflowRequests, 1);
+  c.document.hidden = true;
+  await timer();
+  await periodic();
+  assert.equal(deviceRequests, 1);
+  assert.equal(workflowRequests, 1);
+  c.document.hidden = false;
+  visibility();
+  assert.equal(deviceRequests, 2, 'Returning to the tab refreshes devices immediately');
+  c.accountEpoch++;
+  await timer();
+  assert.equal(deviceRequests, 2, 'An old account timer cannot refresh a new account');
+});
 function element(dataset = {}) {
   return {dataset, textContent: '', attributes: {}, hidden: false, focused: false,
     classList: {values: new Set(), toggle(key, value) {value ? this.values.add(key) : this.values.delete(key);}},

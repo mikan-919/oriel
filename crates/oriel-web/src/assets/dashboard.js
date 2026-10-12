@@ -1067,6 +1067,10 @@ document.getElementById("close-terminal").addEventListener("click", () => {
 window.addEventListener("offline", staleProgress);
 document.addEventListener("visibilitychange", () => {
     if (!document.hidden && progressStream === "live" && Date.now() - progressReceivedAt >= 60000) staleProgress();
+    if (!document.hidden && user) {
+        refreshDevices().catch(() => {});
+        scheduleDevices();
+    }
 });
 setInterval(async () => {
     if (!user || busy || workflowRefreshing || !repositoryDeviceId || dashboard.hidden || document.hidden) return;
@@ -1079,15 +1083,18 @@ setInterval(async () => {
     } finally {
         workflowRefreshing = false;
     }
-}, 15000);
+}, 60000);
 
 function scheduleDevices() {
     clearTimeout(deviceTimer);
     const epoch = accountEpoch;
     deviceTimer = setTimeout(async () => {
-        try { await refreshDevices(); } catch (_) {}
+        if (!currentAccount(epoch)) return;
+        if (!document.hidden) {
+            try { await refreshDevices(); } catch (_) {}
+        }
         if (currentAccount(epoch)) scheduleDevices();
-    }, 5000);
+    }, 60000);
 }
 render();
 perform(async () => {
