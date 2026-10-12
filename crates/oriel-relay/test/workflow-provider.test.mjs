@@ -57,6 +57,70 @@ test("discovery failures identify the provider without exposing upstream bodies 
   } finally { await s.close(); }
 });
 
+test("Discovery overlaps independent reads and bounded HOW and issue batches without dropping facts", {timeout:10000}, async () => {
+  const s = await setup();
+  const releases = [];
+  let timer;
+  try {
+    for (let number = 43; number < 50; number++) {
+      s.fixture.issues.push({...s.fixture.issues[0],number,node_id:`I_${number}`,html_url:`https://github.com/octocat/connected/issues/${number}`});
+    }
+    for (let number = 42; number < 46; number++) {
+      const how = s.fixture.addHow("Todo", number);
+      how.id = `11111111-1111-5111-a111-${String(number).padStart(12,"0")}`;
+      how.identifier = `ENG-${number}`;
+    }
+    const gate = () => {let release;const ready = new Promise(resolve=>{release=resolve;});releases.push(release);return {ready,release};};
+    const reference = gate(), how = gate(), comment = gate();
+    let howReads = 0, commentReads = 0;
+    s.fixture.holdReads = async ({operation}) => {
+      if(operation==="ref") await reference.ready;
+      if(operation==="whats") reference.release();
+      if(operation==="how") {if(++howReads===1) await how.ready;else how.release();}
+      if(operation==="pr-comments") {if(++commentReads===1) await comment.ready;else comment.release();}
+    };
+    const snapshot = await Promise.race([s.snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("Independent discovery reads were serialized")),3000);})]);
+    assert.deepEqual(snapshot.workflows.map(row=>row.issue.number), [42,43,44,45,46,47,48,49]);
+    assert.equal(howReads,8); // Four HOWs and their four discussion collections.
+    assert.equal(commentReads,8);
+    for(const row of snapshot.workflows.slice(0,4)) assert.equal(row.phase,"approved");
+  } finally {
+    clearTimeout(timer);s.fixture.holdReads=undefined;for(const release of releases)release();await s.close();
+  }
+});
+
+test("Read tokens are reused within expiry while provider facts and access generations stay live", async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow("Todo");
+    await s.snapshot();
+    const minted = s.fixture.grants.length;
+    s.fixture.issues[0].title = "Human changed the WHAT";
+    assert.equal((await s.snapshot()).workflows[0].issue.title, "Human changed the WHAT");
+    assert.equal(s.fixture.grants.length, minted, "Fresh facts must not mint a new read token each time");
+    s.fixture.failures.set("repository",503);
+    assert.equal((await s.daemon.api(`/api/workflows/${device}`,undefined,hostHeaders)).status,502);
+    s.fixture.failures.delete("repository");
+    await connect(s.owner,s.fixture,"github");
+    await s.snapshot();
+    assert.equal(s.fixture.grants.length,minted+1,"A new authorization generation cannot reuse the old token");
+    const provider = s.fixture.fetch.bind(s.fixture);
+    s.fixture.fetch = async request => {
+      const response = await provider(request);
+      if (new URL(request.url).pathname.endsWith("/access_tokens") &&
+          (await request.clone().json()).permissions.issues === "read") {
+        return Response.json({...await response.json(),expires_at:new Date(Date.now()+60000).toISOString()});
+      }
+      return response;
+    };
+    await connect(s.owner,s.fixture,"github");
+    await s.snapshot();
+    const shortLived = s.fixture.grants.length;
+    await s.snapshot();
+    assert.equal(s.fixture.grants.length,shortLived+1,"Tokens near expiry must be replaced");
+  } finally {await s.close();}
+});
+
 test("HOW planning waits for native Triage and resumes when the team enables it", async () => {
   const s = await setup();
   try {
