@@ -50,7 +50,7 @@ async function socket(worker, id = device, token = hostToken, headers = {}) {
   let closeEvent;
   const ended = new Promise(resolve => { closeEvent = resolve; });
   ws.addEventListener("message", event => {
-    const message = JSON.parse(event.data);
+    const message = event.data === "oriel:pong" ? { type: "keepalive" } : JSON.parse(event.data);
     const resolve = pending.get(message.request_id);
     if (resolve) { pending.delete(message.request_id); resolve(message); }
     else if (unmatched) { const receive = unmatched; unmatched = null; receive(message); }
@@ -87,11 +87,13 @@ async function watch(worker, owner) {
   assert.equal(response.status, 101);
   const ws = response.webSocket;
   const frames = [];
+  const history = [];
   let receive;
   let finish;
   const ended = new Promise(resolve => { finish = resolve; });
   ws.addEventListener("message", event => {
     const frame = JSON.parse(event.data);
+    history.push(frame);
     assert.deepEqual(Object.keys(frame).sort(), ["devices", "type"]);
     assert.equal(frame.type, "workflow-progress");
     for (const device of frame.devices) {
@@ -106,7 +108,7 @@ async function watch(worker, owner) {
   ws.accept();
   ws.send("ready");
   return {
-    ws, frames, ended,
+    ws, frames, history, ended,
     snapshot(matches = () => true, milliseconds = 10_000) {
       return bounded((async () => {
         for (;;) {
@@ -123,6 +125,83 @@ function progressDevice(frame, id = device) {
   assert.ok(current, "Owned paired devices must remain visible");
   return current;
 }
+
+test("Unchanged progress stays silent through control heartbeats and hibernation", {timeout: 60000}, async () => {
+  const fixture = workflowFixture();
+  const { worker, owner, daemon } = await setup(fixture);
+  try {
+    const host = await socket(worker);
+    const granted = await host.rpc(claim(await row(daemon)));
+    const observer = await watch(worker, owner);
+    await observer.snapshot();
+    host.ws.send("oriel:ping");
+    assert.equal((await host.receive()).type, "keepalive");
+    await host.rpc({type:"heartbeat"});
+    await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", {name:"accounts"});
+    await host.rpc({type:"heartbeat"});
+    await host.rpc({type:"progress", stage:"preparing", lease_id:granted.lease_id});
+    await host.rpc({type:"progress", stage:"planning", lease_id:granted.lease_id});
+    await observer.snapshot(devices => devices[0]?.stage === "planning");
+    assert.equal(observer.history.filter(frame => frame.devices[0]?.stage === "preparing").length, 1);
+    const changed = observer.history.length;
+    await host.rpc({type:"progress", stage:"planning", lease_id:granted.lease_id});
+    await host.rpc({type:"progress", stage:"verifying", lease_id:granted.lease_id});
+    await observer.snapshot(devices => devices[0]?.stage === "verifying");
+    assert.equal(observer.history.slice(changed).filter(frame => frame.devices[0]?.stage === "planning").length, 0);
+  } finally {await worker.dispose();}
+});
+
+test("Workflow snapshots reuse control ownership and report provider failures without revoking approval", { timeout: 60_000 }, async () => {
+  const fixture = workflowFixture();
+  fixture.addHow("Todo");
+  const { worker, daemon } = await setup(fixture);
+  let unblock;
+  try {
+    const host = await socket(worker);
+    const initial = await host.rpc({ type: "snapshot" });
+    assert.equal(initial.type, "snapshot");
+    assert.deepEqual(initial.snapshot, (await daemon.api(`/api/workflows/${device}`, undefined, hostHeaders)).data);
+    const granted = await host.rpc(claim(initial.snapshot.workflows[0], "implement"));
+    assert.equal(granted.type, "granted");
+    for (const lease_id of [undefined, randomUUID()]) {
+      const rejected = await host.rpc({ type: "snapshot", lease_id });
+      assert.equal(rejected.type, "error");
+      assert.equal(rejected.status, 409);
+    }
+    fixture.failures.set("repository", 503);
+    const failed = await host.rpc({ type: "snapshot", lease_id: granted.lease_id });
+    assert.equal(failed.type, "error");
+    assert.equal(failed.status, 502);
+    assert.match(failed.error, /HTTP 503/);
+    assert.equal((await host.rpc({ type: "check", lease_id: granted.lease_id })).type, "checked");
+    fixture.failures.delete("repository");
+    assert.equal((await host.rpc({ type: "snapshot", lease_id: granted.lease_id })).snapshot.workflows[0].phase, "approved");
+    assert.equal((await host.rpc({ type: "release", lease_id: granted.lease_id })).type, "released");
+    // A snapshot must not outlive its original grant, even when provider reads are delayed.
+    const next = await host.rpc(claim(initial.snapshot.workflows[0], "implement"));
+    let reached;
+    const waiting = new Promise(resolve => { reached = resolve; });
+    const paused = new Promise(resolve => { unblock = resolve; });
+    fixture.holdReads = async ({ provider, operation }) => {
+      if (provider === "github" && operation === "repository") { reached(); await paused; }
+    };
+    const pending = host.rpc({ type: "snapshot", lease_id: next.lease_id });
+    await bounded(waiting);
+    assert.equal((await host.rpc({ type: "heartbeat" })).type, "heartbeat");
+    assert.equal((await host.rpc({ type: "release", lease_id: next.lease_id })).type, "released");
+    fixture.holdReads = null;
+    unblock();
+    const stale = await pending;
+    assert.equal(stale.type, "error");
+    assert.equal(stale.status, 409);
+    assert.equal((await host.rpc({ type: "snapshot" })).type, "snapshot");
+    host.close();
+  } finally {
+    fixture.holdReads = null;
+    unblock?.();
+    await worker.dispose();
+  }
+});
 
 test("Owner progress streams follow multiple devices, admitted task metadata, pauses and reconnects", { timeout: 60_000 }, async () => {
   const fixture = workflowFixture();
@@ -233,7 +312,7 @@ test("Progress upgrades isolate foreign owners and browser frames cannot acquire
     const granted = await host.rpc(claim(await row(daemon)));
     assert.equal(granted.type, "granted");
     assert.equal(progressDevice(await observer.snapshot(devices => devices[0]?.task?.issue_number === 42)).state, "running");
-    assert.deepEqual((await other.snapshot()).devices,
+    assert.deepEqual(other.history.at(-1).devices,
       [{ device_id: secondDevice, state: "offline", stage: null, task: null, updated_at: null }]);
     other.ws.send(JSON.stringify({ type: "claim", request_id: randomUUID(), issue_number: 42, kind: "plan" }));
     assert.equal((await bounded(other.ended)).code, 1008);

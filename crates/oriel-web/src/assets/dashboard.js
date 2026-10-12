@@ -76,6 +76,7 @@ let socket;
 let progressSocket;
 let progressRetry;
 let progressExpiry;
+let progressKeepalive;
 let progressRetryDelay = 5000;
 let progressReceivedAt = 0;
 let progressStream = "signed-out";
@@ -326,6 +327,7 @@ function setProgressStream(state) {
 function stopProgress() {
     clearTimeout(progressRetry);
     clearTimeout(progressExpiry);
+    clearInterval(progressKeepalive);
     progressRetry = undefined;
     const connection = progressSocket;
     progressSocket = undefined;
@@ -354,6 +356,7 @@ function retryProgress(epoch) {
 function staleProgress() {
     if (!user) return;
     clearTimeout(progressExpiry);
+    clearInterval(progressKeepalive);
     const connection = progressSocket;
     progressSocket = undefined;
     connection?.close();
@@ -378,9 +381,14 @@ function connectProgress() {
     progressSocket = connection;
     const current = () => currentAccount(epoch) && progressSocket === connection;
     connection.addEventListener("open", () => {
-        if (current()) connection.send("ready");
+        if (!current()) return;
+        connection.send("ready");
+        progressKeepalive = setInterval(() => {
+            if (current() && connection.readyState === WebSocket.OPEN) connection.send("oriel:ping");
+        }, 15000);
     });
-    // Relay sends fresh snapshots at least every 10 seconds, even without stage changes.
+    // State arrives on changes. Runtime keepalive checks transport without waking Relay.
+    let receivedSnapshot = false;
     const expire = () => {
         if (!current()) return;
         staleProgress();
@@ -389,6 +397,14 @@ function connectProgress() {
     connection.addEventListener("message", (event) => {
         if (!current()) return;
         try {
+            if (event.data === "oriel:pong") {
+                if (receivedSnapshot) {
+                    progressReceivedAt = Date.now();
+                    clearTimeout(progressExpiry);
+                    progressExpiry = setTimeout(expire, 60000);
+                }
+                return;
+            }
             const frame = JSON.parse(event.data);
             if (frame.type !== "workflow-progress" || !Array.isArray(frame.devices)) throw new Error("Invalid progress snapshot");
             const snapshot = new Map();
@@ -399,6 +415,7 @@ function connectProgress() {
                 snapshot.set(device.device_id, device);
             }
             progressSnapshot = snapshot;
+            receivedSnapshot = true;
             progressReceivedAt = Date.now();
             progressRetryDelay = 5000;
             clearTimeout(progressExpiry);
@@ -415,6 +432,7 @@ function connectProgress() {
     connection.addEventListener("close", () => {
         if (!current()) return;
         clearTimeout(progressExpiry);
+        clearInterval(progressKeepalive);
         progressSocket = undefined;
         setProgressStream("stale");
         retryProgress(epoch);
@@ -1067,6 +1085,10 @@ document.getElementById("close-terminal").addEventListener("click", () => {
 window.addEventListener("offline", staleProgress);
 document.addEventListener("visibilitychange", () => {
     if (!document.hidden && progressStream === "live" && Date.now() - progressReceivedAt >= 60000) staleProgress();
+    if (!document.hidden && user) {
+        refreshDevices().catch(() => {});
+        scheduleDevices();
+    }
 });
 setInterval(async () => {
     if (!user || busy || workflowRefreshing || !repositoryDeviceId || dashboard.hidden || document.hidden) return;
@@ -1079,15 +1101,18 @@ setInterval(async () => {
     } finally {
         workflowRefreshing = false;
     }
-}, 15000);
+}, 60000);
 
 function scheduleDevices() {
     clearTimeout(deviceTimer);
     const epoch = accountEpoch;
     deviceTimer = setTimeout(async () => {
-        try { await refreshDevices(); } catch (_) {}
+        if (!currentAccount(epoch)) return;
+        if (!document.hidden) {
+            try { await refreshDevices(); } catch (_) {}
+        }
         if (currentAccount(epoch)) scheduleDevices();
-    }, 5000);
+    }, 60000);
 }
 render();
 perform(async () => {

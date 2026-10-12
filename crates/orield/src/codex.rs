@@ -29,6 +29,8 @@ use tokio_tungstenite::{
 use url::Url;
 
 const MAX_MESSAGE: usize = 512 * 1024;
+const KEEPALIVE_PING: &str = "oriel:ping";
+const KEEPALIVE_PONG: &str = "oriel:pong";
 static HUB: OnceLock<Hub> = OnceLock::new();
 #[derive(Clone)]
 pub(super) struct Hub {
@@ -44,6 +46,7 @@ pub(super) fn paused() -> bool {
 pub(super) fn pause() {
     if let Some(hub) = HUB.get() {
         hub.paused.store(true, Ordering::SeqCst);
+        hub.changed();
     }
 }
 impl Hub {
@@ -333,7 +336,14 @@ impl Engine {
         self.client.request("turn/start", json!({"threadId":thread_id,"effort":model["effort"],"input":[{"type":"text","text":"Carry out the task in the developer instructions and return the required structured result."}],"outputSchema":schema})).await?;
         let mut text = String::new();
         loop {
-            let event = events.recv().await.context("Codex progress ended")?;
+            let event = events.recv().await.map_err(|error| {
+                if matches!(error, broadcast::error::RecvError::Lagged(_)) {
+                    anyhow!(workflow::Stop::Uncertain)
+                        .context("Codex progress buffer overflowed; local work preserved for retry")
+                } else {
+                    anyhow!(error).context("Codex progress ended")
+                }
+            })?;
             if event["method"] == "item/completed"
                 && event["params"]["item"]["type"] == "agentMessage"
                 && let Some(value) = event["params"]["item"]["text"].as_str()
@@ -455,7 +465,11 @@ impl Engine {
                                     }
                                     process_hub.changed();
                                 }
-                                let _ = events.send(message.clone());
+                                // Completion waits can pause during provider checks. Keep
+                                // streaming deltas on Web/transcript, out of their bounded queue.
+                                if !message["method"].as_str().is_some_and(|method| method.ends_with("Delta") || method.ends_with("/delta")) {
+                                    let _ = events.send(message.clone());
+                                }
                                 if !message["method"].as_str().is_some_and(|m| m.starts_with("account/") || m.starts_with("item/reasoning/")) {
                                     let _ = outgoing.send(json!({"type":"event","engine":engine_id,"message":message}));
                                 }
@@ -722,10 +736,12 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 let (mut socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
                 socket.send(Message::Text(hub.state().to_string().into())).await?;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+                let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
                 loop {
                     tokio::select! {
                         _ = stopping.changed() => return Ok(()),
-                        _ = heartbeat.tick() => { socket.send(Message::Text(json!({"type":"heartbeat"}).to_string().into())).await?; socket.send(Message::Text(hub.state().to_string().into())).await?; },
+                        _ = heartbeat.tick() => { socket.send(Message::Text(KEEPALIVE_PING.into())).await?; },
+                        _ = tokio::time::sleep_until(deadline) => bail!("Codex Relay keepalive timed out"),
                         event = events.recv() => { match event {
                             Ok(event) => socket.send(Message::Text(event.to_string().into())).await?,
                             Err(broadcast::error::RecvError::Lagged(_)) => socket.send(Message::Text(hub.state().to_string().into())).await?,
@@ -734,6 +750,8 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                         frame = socket.next() => {
                             match frame.context("Codex Relay ended")?? {
                                 Message::Text(text) => {
+                                    deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+                                    if text.as_str() == KEEPALIVE_PONG { continue; }
                                     ensure!(text.len() <= MAX_MESSAGE, "Relay message too large");
                                     let message: Value = serde_json::from_str(&text)?;
                                     if message["type"] == "snapshot" {
@@ -908,6 +926,8 @@ mod tests {
               if(m.method==='model/list'){send({id:m.id,result:{initialized}});return;}
               if(m.method==='thread/start'){
                 if(m.params.developerInstructions && m.params.sandbox!==null)process.exit(3);
+                if(m.params.developerInstructions)for(let i=0;i<600;i++)send({method:'item/commandExecution/outputDelta',params:{delta:'compiling\n'}});
+                if(m.params.developerInstructions==='overflow')for(let i=0;i<600;i++)send({method:'configWarning',params:{message:'notice'}});
                 send({id:m.id,result:{thread:{id:'owned'}}});
                 send({id:'approval',method:'item/fileChange/requestApproval',params:{threadId:'owned'}});return;
               }
@@ -972,6 +992,14 @@ mod tests {
                 .unwrap(),
             "{\"summary\":\"done\"}"
         );
+        let overflow = engine
+            .run("overflow", json!({"type":"object"}), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            overflow.downcast_ref::<workflow::Stop>(),
+            Some(workflow::Stop::Uncertain)
+        ));
         engine.stop().await;
         assert!(engine.hub.engines.lock().unwrap().is_empty());
         assert!(

@@ -3,6 +3,88 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../src/assets/dashboard.js', import.meta.url), 'utf8');
+
+test('runtime pongs keep unchanged progress live; missing pongs or an initial snapshot expire', () => {
+  for (const baseline of [true, false]) {
+    let now = 0, serial = 0, connection, answer = true;
+    const timers = new Map();
+    const add = (callback, delay, repeat = false) => {const id = ++serial; timers.set(id, {callback, delay, repeat, due: now + delay}); return id;};
+    const advance = milliseconds => {
+      const end = now + milliseconds;
+      for (;;) {
+        const next = [...timers].sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next || next[1].due > end) break;
+        const [id, timer] = next; now = timer.due;
+        if (timer.repeat) timer.due += timer.delay; else timers.delete(id);
+        timer.callback();
+      }
+      now = end;
+    };
+    class Socket {
+      static OPEN = 1; readyState = 1; listeners = {}; sent = [];
+      constructor() {connection = this;}
+      addEventListener(name, callback) {this.listeners[name] = callback;}
+      send(raw) {this.sent.push(raw); if (raw === 'oriel:ping' && answer) this.listeners.message({data: 'oriel:pong'});}
+      close() {this.readyState = 3; this.listeners.close?.();}
+    }
+    const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, progressSocket: undefined,
+      progressRetry: undefined, progressExpiry: undefined, progressKeepalive: undefined,
+      progressReceivedAt: 0, progressRetryDelay: 5000, progressSnapshot: new Map(), progressStream: 'connecting',
+      currentAccount: epoch => !!c.user && c.accountEpoch === epoch,
+      setProgressStream: state => {c.progressStream = state;}, WebSocket: Socket, URL,
+      location: {origin: 'https://fixture.invalid', protocol: 'https:'}, Date: {now: () => now},
+      setTimeout: (callback, delay) => add(callback, delay), clearTimeout: id => timers.delete(id),
+      setInterval: (callback, delay) => add(callback, delay, true), clearInterval: id => timers.delete(id)});
+    vm.runInContext(source.slice(source.indexOf('function stopProgress()'), source.indexOf('function updateProgressLink(')), c);
+    c.connectProgress(); connection.listeners.open();
+    if (baseline) connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', devices: [{device_id: 'device', state: 'idle'}]})});
+    advance(baseline ? 90000 : 60000);
+    assert.equal(c.progressStream, baseline ? 'live' : 'stale');
+    if (baseline) {
+      assert.equal(c.progressSocket, connection, 'Unchanged state does not force a reconnect');
+      assert.equal(c.progressSnapshot.get('device').state, 'idle');
+      assert.equal(connection.sent.filter(raw => raw === 'oriel:ping').length, 6);
+      answer = false; advance(60000);
+      assert.equal(c.progressStream, 'stale');
+      assert.equal(connection.readyState, 3);
+    }
+  }
+});
+
+test('background polling stops for hidden tabs and resumes device discovery when visible', async () => {
+  let deviceRequests = 0;
+  let workflowRequests = 0;
+  let periodic;
+  let visibility;
+  let timer;
+  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null,
+    progressStream: 'connecting', progressReceivedAt: 0, busy: false, workflowRefreshing: false,
+    repositoryDeviceId: 'device', dashboard: {hidden: false}, status: {},
+    document: {hidden: false, addEventListener(type, callback) {if (type === 'visibilitychange') visibility = callback;}},
+    currentAccount: epoch => !!c.user && epoch === c.accountEpoch,
+    refreshDevices: async () => {deviceRequests++;}, refreshWorkflow: async () => {workflowRequests++;},
+    setInterval(callback, delay) {assert.equal(delay, 60000); periodic = callback;},
+    setTimeout(callback, delay) {assert.equal(delay, 60000); timer = callback; return 1;}, clearTimeout() {},
+    staleProgress() {throw new Error('Unexpected progress expiry');}, errorText: String});
+  vm.runInContext(source.slice(source.indexOf('document.addEventListener("visibilitychange"'),
+    source.indexOf('\nrender();\nperform(async () =>')), c);
+  c.scheduleDevices();
+  await timer();
+  await periodic();
+  assert.equal(deviceRequests, 1);
+  assert.equal(workflowRequests, 1);
+  c.document.hidden = true;
+  await timer();
+  await periodic();
+  assert.equal(deviceRequests, 1);
+  assert.equal(workflowRequests, 1);
+  c.document.hidden = false;
+  visibility();
+  assert.equal(deviceRequests, 2, 'Returning to the tab refreshes devices immediately');
+  c.accountEpoch++;
+  await timer();
+  assert.equal(deviceRequests, 2, 'An old account timer cannot refresh a new account');
+});
 function element(dataset = {}) {
   return {dataset, textContent: '', attributes: {}, hidden: false, focused: false,
     classList: {values: new Set(), toggle(key, value) {value ? this.values.add(key) : this.values.delete(key);}},

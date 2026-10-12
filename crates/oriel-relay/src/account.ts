@@ -206,9 +206,12 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private readonly integrations: Integrations;
   private readonly workflows: WorkflowLeases;
   private readonly codex: CodexConnections;
+  private scheduledAlarm: number | null | undefined;
 
   constructor(ctx: DurableObjectState, env: AccountEnv) {
     super(ctx, env);
+    // Keepalive is answered by the runtime without waking this object.
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("oriel:ping", "oriel:pong"));
     const origin = new URL(env.PUBLIC_ORIGIN);
     const loopback = LOOPBACK_HOSTS.includes(origin.hostname);
     if (origin.origin !== env.PUBLIC_ORIGIN ||
@@ -298,13 +301,13 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           sessionHash, userId, now(),
         ).toArray()[0];
         return session ? session.expires_at * 1000 : null;
-      });
+      }, () => this.scheduleSockets());
     this.codex = new CodexConnections(this.ctx,
       id => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0],
       (hash, user) => {
         const session = this.sql.exec<{ expires_at: number }>("SELECT expires_at FROM sessions WHERE hash = ? AND user_id = ? AND expires_at > ?", hash, user, now()).toArray()[0];
         return session ? session.expires_at * 1000 : null;
-      });
+      }, () => this.scheduleSockets());
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -469,6 +472,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     }
     if (clearChallenge) response.headers.append("Set-Cookie", this.setCookie(this.challengeCookie, "", 0));
     this.workflows.publish();
+    this.scheduleSockets();
     return response;
   }
 
@@ -488,8 +492,26 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   }
 
   async alarm(): Promise<void> {
+    this.scheduledAlarm = undefined;
     await this.workflows.alarm();
     await this.codex.alarm();
+    this.scheduleSockets();
+  }
+
+  private scheduleSockets(): void {
+    // One alarm is shared by all account sockets. Never overwrite another
+    // protocol's earlier authentication or ownership deadline.
+    const deadlines = [this.workflows.deadline(), this.codex.deadline()].filter((value): value is number => value !== null);
+    const deadline = deadlines.length ? Math.min(...deadlines) : null;
+    // Keep an earlier alarm; it rechecks renewed liveness when it fires.
+    // This cache may be lost on hibernation without changing authority.
+    if (deadline === this.scheduledAlarm || deadline !== null && this.scheduledAlarm != null && this.scheduledAlarm <= deadline) return;
+    this.scheduledAlarm = deadline;
+    const scheduled = deadline === null ? this.ctx.storage.deleteAlarm() : this.ctx.storage.setAlarm(deadline);
+    this.ctx.waitUntil(scheduled.catch(() => {
+      this.scheduledAlarm = undefined;
+      for (const ws of this.ctx.getWebSockets()) try { ws.close(1008, "Connection deadline unavailable"); } catch { /* Already closed. */ }
+    }));
   }
 
   private requireOrigin(request: Request): void {

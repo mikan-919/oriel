@@ -16,7 +16,7 @@ type Attachment = {
 /** Authenticated control only. Transcripts and Codex credentials remain on the device. */
 export class CodexConnections {
   constructor(private ctx: DurableObjectState, private device: (id: string) => Device | undefined,
-    private sessionExpiry: (hash: string, user: string) => number | null) {}
+    private sessionExpiry: (hash: string, user: string) => number | null, private schedule: () => void) {}
 
   owns(ws: WebSocket): boolean { return (ws.deserializeAttachment() as Attachment | null)?.protocol === PROTOCOL; }
   private close(ws: WebSocket): void {
@@ -25,11 +25,12 @@ export class CodexConnections {
   private live(ws: WebSocket): Attachment {
     const a = ws.deserializeAttachment() as Attachment | null;
     const d = a && this.device(a.device_id);
-    const expiry = a?.role === "browser" ? this.sessionExpiry(a.session_hash, a.user_id) : a?.expires_at;
+    const expiry = a?.role === "browser" ? this.sessionExpiry(a.session_hash, a.user_id) : a &&
+      Math.max(a.expires_at, (this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0) + 45_000);
     if (!a || a.protocol !== PROTOCOL || ws.readyState !== WebSocket.OPEN || !d ||
       d.user_id !== a.user_id || d.host_hash !== a.host_hash || d.repository_generation !== a.repository_generation ||
       !expiry || expiry <= Date.now()) { this.close(ws); throw new Error("Codex connection is unavailable"); }
-    return a;
+    return { ...a, expires_at: expiry };
   }
   private sockets(): WebSocket[] { return this.ctx.getWebSockets(TAG).filter(ws => { try { this.live(ws); return true; } catch { return false; } }); }
   private host(deviceId: string): WebSocket | undefined {
@@ -54,7 +55,7 @@ export class CodexConnections {
       this.send(pair[1], host ? { type: "state", engines: [] } : { type: "offline" });
       if (host) this.send(host, { type: "snapshot" });
     }
-    this.ctx.waitUntil(this.schedule());
+    this.schedule();
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
   private send(ws: WebSocket, message: unknown): void { try { ws.send(JSON.stringify(message)); } catch { this.close(ws); } }
@@ -86,6 +87,7 @@ export class CodexConnections {
           }
         } else throw new Error();
         ws.serializeAttachment(a);
+        if (message.type === "heartbeat" || message.type === "state") this.schedule();
       } else {
         if (message.type !== "rpc" || !UUID.test(message.request_id) || !METHODS.has(message.method) ||
           typeof message.engine !== "string" || message.engine.length > 80 || !message.params ||
@@ -109,12 +111,9 @@ export class CodexConnections {
       } } catch { /* Revoked peer closed. */ }
     }
   }
-  private async schedule(): Promise<void> {
+  deadline(): number | null {
     const live = this.sockets().flatMap(ws => { try { return [this.live(ws)]; } catch { return []; } });
-    if (!live.length) return;
-    const deadline = Math.min(Date.now() + 10_000, ...live.map(a => a.role === "browser" ? this.sessionExpiry(a.session_hash, a.user_id) ?? Date.now() : a.expires_at));
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > deadline) await this.ctx.storage.setAlarm(deadline);
+    return live.length ? Math.min(...live.map(a => a.expires_at)) : null;
   }
-  async alarm(): Promise<void> { for (const ws of this.ctx.getWebSockets(TAG)) { try { this.live(ws); } catch { this.ended(ws); } } await this.schedule(); }
+  async alarm(): Promise<void> { for (const ws of this.ctx.getWebSockets(TAG)) { try { this.live(ws); } catch { this.ended(ws); } } }
 }
