@@ -29,6 +29,8 @@ use tokio_tungstenite::{
 use url::Url;
 
 const MAX_MESSAGE: usize = 512 * 1024;
+const KEEPALIVE_PING: &str = "oriel:ping";
+const KEEPALIVE_PONG: &str = "oriel:pong";
 static HUB: OnceLock<Hub> = OnceLock::new();
 #[derive(Clone)]
 pub(super) struct Hub {
@@ -44,6 +46,7 @@ pub(super) fn paused() -> bool {
 pub(super) fn pause() {
     if let Some(hub) = HUB.get() {
         hub.paused.store(true, Ordering::SeqCst);
+        hub.changed();
     }
 }
 impl Hub {
@@ -733,10 +736,12 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 let (mut socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
                 socket.send(Message::Text(hub.state().to_string().into())).await?;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+                let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
                 loop {
                     tokio::select! {
                         _ = stopping.changed() => return Ok(()),
-                        _ = heartbeat.tick() => { socket.send(Message::Text(json!({"type":"heartbeat"}).to_string().into())).await?; socket.send(Message::Text(hub.state().to_string().into())).await?; },
+                        _ = heartbeat.tick() => { socket.send(Message::Text(KEEPALIVE_PING.into())).await?; },
+                        _ = tokio::time::sleep_until(deadline) => bail!("Codex Relay keepalive timed out"),
                         event = events.recv() => { match event {
                             Ok(event) => socket.send(Message::Text(event.to_string().into())).await?,
                             Err(broadcast::error::RecvError::Lagged(_)) => socket.send(Message::Text(hub.state().to_string().into())).await?,
@@ -745,6 +750,8 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                         frame = socket.next() => {
                             match frame.context("Codex Relay ended")?? {
                                 Message::Text(text) => {
+                                    deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+                                    if text.as_str() == KEEPALIVE_PONG { continue; }
                                     ensure!(text.len() <= MAX_MESSAGE, "Relay message too large");
                                     let message: Value = serde_json::from_str(&text)?;
                                     if message["type"] == "snapshot" {

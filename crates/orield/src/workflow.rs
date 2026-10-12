@@ -2091,10 +2091,6 @@ async fn scan(
     suppressed: &mut HashMap<(u64, String, String), String>,
     console: &mut Console,
 ) -> Result<()> {
-    session.progress("discovering").await?;
-    session
-        .exchange(json!({"type":"heartbeat"}), "heartbeat")
-        .await?;
     if crate::codex::paused() {
         session.progress("paused").await?;
         return Ok(());
