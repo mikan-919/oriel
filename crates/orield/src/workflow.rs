@@ -452,10 +452,10 @@ impl Session {
     async fn exchange(&mut self, mut request: Value, expected: &str) -> Result<Value> {
         let id = random_hex::<16>()?;
         let operation = request["type"].as_str().unwrap_or("control").to_owned();
-        // Admission rechecks provider facts, just like a long HTTP action.
+        // Admission and discovery recheck provider facts, like a long HTTP action.
         // Keep the control connection alive while those reads are in flight.
-        let claiming = operation == "claim";
-        let wait = Duration::from_secs(if claiming { 90 } else { 8 });
+        let provider_read = matches!(operation.as_str(), "claim" | "snapshot");
+        let wait = Duration::from_secs(if provider_read { 90 } else { 8 });
         request["request_id"] = json!(id);
         let response = async {
             self.socket
@@ -477,6 +477,16 @@ impl Session {
                             Message::Text(text) => {
                                 let value: Value = serde_json::from_str(&text)?;
                                 if value["request_id"] == id {
+                                    if value["type"] == "error" {
+                                        let detail = value["error"].as_str()
+                                            .filter(|message| !message.is_empty() && message.len() <= 1024 && !message.chars().any(char::is_control))
+                                            .unwrap_or("Relay error details unavailable");
+                                        let status = value["status"].as_u64().filter(|status| (400..=599).contains(status));
+                                        let stop = if status == Some(409) && detail == "Workflow lease is unavailable" {
+                                            Stop::LeaseLost
+                                        } else { Stop::Uncertain };
+                                        return Err(anyhow!("workflow {operation} status {}: {detail}", status.unwrap_or(502)).context(stop));
+                                    }
                                     if value["type"] == "rejected" {
                                         let reason = value["error"].as_str()
                                             .filter(|message| !message.is_empty() && message.len() <= 1024 && !message.chars().any(char::is_control))
@@ -488,7 +498,7 @@ impl Session {
                                     if heartbeat.is_none() {
                                         return Ok(value);
                                     }
-                                    // A heartbeat acknowledgement may follow the grant;
+                                    // A heartbeat acknowledgement may follow the provider reply;
                                     // consume it before starting another exchange.
                                     reply = Some(value);
                                 } else if heartbeat.as_ref().is_some_and(|(id, _)| value["request_id"] == *id) {
@@ -506,7 +516,7 @@ impl Session {
                             _ => bail!("invalid workflow ownership message"),
                         }
                     }
-                    _ = interval.tick(), if claiming && reply.is_none() => {
+                    _ = interval.tick(), if provider_read && reply.is_none() => {
                         if heartbeat.is_none() {
                             let id = random_hex::<16>()?;
                             self.socket.send(Message::Text(json!({"type":"heartbeat", "request_id":id}).to_string().into())).await?;
@@ -578,17 +588,12 @@ impl Session {
         Ok(())
     }
     async fn snapshot(&mut self) -> Result<Snapshot> {
-        let request = self.client.get(self.endpoint.clone());
-        let response = self.owned_response(request).await?;
-        self.snapshot_body(response).await
-    }
-    async fn snapshot_body(&self, response: reqwest::Response) -> Result<Snapshot> {
-        if !response.status().is_success() {
-            return Err(Self::http_failure(response, "discovery").await);
+        let mut request = json!({"type":"snapshot"});
+        if let Some(lease) = &self.lease {
+            request["lease_id"] = json!(lease);
         }
-        let snapshot: Snapshot = response
-            .json()
-            .await
+        let response = self.exchange(request, "snapshot").await?;
+        let snapshot: Snapshot = serde_json::from_value(response["snapshot"].clone())
             .map_err(|_| anyhow!("invalid workflow discovery response"))?;
         ensure!(
             snapshot
@@ -654,22 +659,17 @@ impl Session {
         if crate::codex::paused() {
             return Err(Stop::WebPaused.into());
         }
-        self.checked().await?;
+        self.lease.as_deref().context("no active workflow lease")?;
         let snapshot = if child_running && guard.code {
             // Never extend the uncertainty window of a source-writing child.
-            let request = self.client.get(self.endpoint.clone());
-            let response = tokio::select! {
-                response = request.send() => response.map_err(|error| {
-                    let reason = if error.is_timeout() {
+            tokio::time::timeout(Duration::from_secs(12), self.snapshot())
+                .await
+                .map_err(|_| {
+                    anyhow!(
                         "workflow discovery timed out after 12 seconds while a child was running"
-                    } else {
-                        "workflow discovery transport failed while a child was running"
-                    };
-                    anyhow!(reason).context(Stop::Uncertain)
-                })?,
-                _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
-            };
-            self.snapshot_body(response).await
+                    )
+                    .context(Stop::Uncertain)
+                })?
         } else {
             self.snapshot().await
         }
@@ -2728,6 +2728,14 @@ mod tests {
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             while let Some(Ok(Message::Text(text))) = socket.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
+                if request["type"] == "snapshot" {
+                    assert_eq!(request["lease_id"], "lease");
+                    socket.send(Message::Text(json!({
+                        "type":"error", "request_id":request["request_id"], "status":502,
+                        "error":"Linear workflow request failed (http_503); provider state could not be confirmed"
+                    }).to_string().into())).await.unwrap();
+                    continue;
+                }
                 socket.send(Message::Text(json!({
                     "type": if request["type"] == "check" { "checked" } else { "heartbeat" },
                     "request_id": request["request_id"], "lease_id": "lease"
@@ -2737,8 +2745,6 @@ mod tests {
         let provider = tokio::spawn(async move {
             let reason = r#"{"error":"Linear workflow request failed (http_503); provider state could not be confirmed"}"#;
             for body in [
-                reason.to_owned(),
-                reason.to_owned(),
                 reason.to_owned(),
                 "<html>private-upstream-payload</html>".to_owned(),
                 json!({"error": "private-upstream-payload".repeat(300)}).to_string(),
@@ -2797,7 +2803,11 @@ mod tests {
         ));
         assert!(format!("{publication:#}").contains("http_503"));
         for _ in 0..3 {
-            let error = session.snapshot().await.err().unwrap();
+            let error = session
+                .post("actions", json!({"action":"publish"}))
+                .await
+                .err()
+                .unwrap();
             let diagnostic = format!("{error:#}");
             assert!(diagnostic.contains("502"));
             assert!(!diagnostic.contains("private-upstream-payload"));
@@ -2806,6 +2816,72 @@ mod tests {
         session.socket.close(None).await.unwrap();
         provider.await.unwrap();
         ownership.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writing_child_stops_when_websocket_discovery_exceeds_twelve_seconds() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut discovery = false;
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                if request["type"] == "snapshot" {
+                    assert_eq!(request["lease_id"], "lease");
+                    discovery = true;
+                    // Provider reads never finish; ownership heartbeats still succeed.
+                } else {
+                    assert_eq!(request["type"], "heartbeat");
+                    socket
+                        .send(Message::Text(
+                            json!({"type":"heartbeat", "request_id":request["request_id"]})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+            assert!(discovery);
+        });
+        let (socket, _) = connect_async(url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://localhost/").unwrap(),
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: Some("lease".into()),
+        };
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "repository":{"owner":"octocat","name":"connected"},
+            "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+            "target_oid":"1111111111111111111111111111111111111111",
+            "configuration":{"autonomous":true,"verification":[["true"]],"error":null},
+            "workflows":[{"issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
+                "what_comments":[],"how_comments":[],"version":"approved","phase":"running"}]
+        })).unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(15),
+            session.guard_with_child(&Guard::new(&snapshot, &snapshot.workflows[0], true), true),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<Stop>(),
+            Some(Stop::Uncertain)
+        ));
+        assert!(format!("{error:#}").contains("12 seconds"));
+        session.socket.close(None).await.unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -2830,6 +2906,19 @@ mod tests {
             while let Some(Ok(Message::Text(text))) = socket.next().await {
                 let request: Value = serde_json::from_str(&text).unwrap();
                 let kind = request["type"].as_str().unwrap();
+                if kind == "snapshot" {
+                    assert!(request.get("lease_id").is_none());
+                    socket.send(Message::Text(json!({
+                        "type":"snapshot", "request_id":request["request_id"],
+                        "snapshot":{
+                            "repository":{"owner":"octocat","name":"connected"},
+                            "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+                            "target_oid":"1111111111111111111111111111111111111111",
+                            "configuration":{"autonomous":false,"verification":[],"error":null},"workflows":[]
+                        }
+                    }).to_string().into())).await.unwrap();
+                    continue;
+                }
                 if kind == "heartbeat" {
                     control_renewed.store(started.elapsed().as_secs(), Ordering::Relaxed);
                 }
@@ -2848,10 +2937,7 @@ mod tests {
             }
         });
         let provider = tokio::spawn(async move {
-            for body in [
-                r#"{"repository":{"owner":"octocat","name":"connected"},"repository_id":1,"repository_node_id":"repo","base_branch":"main","target_oid":"1111111111111111111111111111111111111111","configuration":{"autonomous":false,"verification":[],"error":null},"workflows":[]}"#,
-                r#"{"updated":true}"#,
-            ] {
+            for body in [r#"{"updated":true}"#] {
                 let (mut stream, _) = http.accept().await.unwrap();
                 let mut buffer = [0; 4096];
                 assert!(stream.read(&mut buffer).await.unwrap() > 0);

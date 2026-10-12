@@ -124,6 +124,58 @@ function progressDevice(frame, id = device) {
   return current;
 }
 
+test("Workflow snapshots reuse control ownership and report provider failures without revoking approval", { timeout: 60_000 }, async () => {
+  const fixture = workflowFixture();
+  fixture.addHow("Todo");
+  const { worker, daemon } = await setup(fixture);
+  let unblock;
+  try {
+    const host = await socket(worker);
+    const initial = await host.rpc({ type: "snapshot" });
+    assert.equal(initial.type, "snapshot");
+    assert.deepEqual(initial.snapshot, (await daemon.api(`/api/workflows/${device}`, undefined, hostHeaders)).data);
+    const granted = await host.rpc(claim(initial.snapshot.workflows[0], "implement"));
+    assert.equal(granted.type, "granted");
+    for (const lease_id of [undefined, randomUUID()]) {
+      const rejected = await host.rpc({ type: "snapshot", lease_id });
+      assert.equal(rejected.type, "error");
+      assert.equal(rejected.status, 409);
+    }
+    fixture.failures.set("repository", 503);
+    const failed = await host.rpc({ type: "snapshot", lease_id: granted.lease_id });
+    assert.equal(failed.type, "error");
+    assert.equal(failed.status, 502);
+    assert.match(failed.error, /HTTP 503/);
+    assert.equal((await host.rpc({ type: "check", lease_id: granted.lease_id })).type, "checked");
+    fixture.failures.delete("repository");
+    assert.equal((await host.rpc({ type: "snapshot", lease_id: granted.lease_id })).snapshot.workflows[0].phase, "approved");
+    assert.equal((await host.rpc({ type: "release", lease_id: granted.lease_id })).type, "released");
+    // A snapshot must not outlive its original grant, even when provider reads are delayed.
+    const next = await host.rpc(claim(initial.snapshot.workflows[0], "implement"));
+    let reached;
+    const waiting = new Promise(resolve => { reached = resolve; });
+    const paused = new Promise(resolve => { unblock = resolve; });
+    fixture.holdReads = async ({ provider, operation }) => {
+      if (provider === "github" && operation === "repository") { reached(); await paused; }
+    };
+    const pending = host.rpc({ type: "snapshot", lease_id: next.lease_id });
+    await bounded(waiting);
+    assert.equal((await host.rpc({ type: "heartbeat" })).type, "heartbeat");
+    assert.equal((await host.rpc({ type: "release", lease_id: next.lease_id })).type, "released");
+    fixture.holdReads = null;
+    unblock();
+    const stale = await pending;
+    assert.equal(stale.type, "error");
+    assert.equal(stale.status, 409);
+    assert.equal((await host.rpc({ type: "snapshot" })).type, "snapshot");
+    host.close();
+  } finally {
+    fixture.holdReads = null;
+    unblock?.();
+    await worker.dispose();
+  }
+});
+
 test("Owner progress streams follow multiple devices, admitted task metadata, pauses and reconnects", { timeout: 60_000 }, async () => {
   const fixture = workflowFixture();
   const how = fixture.addHow("Todo");

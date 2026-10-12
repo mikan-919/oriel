@@ -216,6 +216,33 @@ export class WorkflowLeases {
           typeof request.request_id !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(request.request_id)) throw new Error();
       requestId = request.request_id;
       let attachment = this.live(ws);
+      if (request.type === "snapshot") {
+        if (Object.keys(request).some(key => !["type", "request_id", "lease_id"].includes(key))) throw new Error();
+        const binding = attachment.binding;
+        const leaseId = attachment.grant?.lease_id;
+        const check = () => {
+          const current = this.live(ws);
+          if (!sameBinding(binding, current.binding) || current.grant?.lease_id !== leaseId ||
+              request.lease_id !== leaseId) throw new WorkflowLeaseError();
+        };
+        try {
+          check();
+          attachment.expires_at = Date.now() + EXPIRY_MS;
+          ws.serializeAttachment(attachment);
+          this.schedule();
+          const device = this.device(binding.device_id);
+          if (!device) throw new WorkflowLeaseError();
+          const snapshot = await this.integrations.workflowSnapshot(device, check);
+          check();
+          this.send(ws, { type: "snapshot", request_id: requestId, snapshot });
+        } catch (error) {
+          const known = error instanceof Error && "status" in error;
+          this.send(ws, { type: "error", request_id: requestId,
+            status: known ? error.status : 502,
+            error: known ? error.message : "Workflow provider state could not be confirmed; no approval was inferred" });
+        }
+        return;
+      }
       if (request.type === "heartbeat") {
         attachment.expires_at = Date.now() + EXPIRY_MS;
         ws.serializeAttachment(attachment);

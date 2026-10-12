@@ -580,6 +580,10 @@ export class Integrations {
     return `${truncated ? "[Download limited to 4 MiB; excerpt may omit later output]\n" : ""}${excerpt.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")}`;
   }
 
+  async workflowSnapshot(device: Device, check: () => void): Promise<WorkflowSnapshot> {
+    return (await this.workflowFacts(await this.workflowContext(device, check))).snapshot;
+  }
+
   async workflowAdmission(device: Device, claim: WorkflowClaim, check: () => void): Promise<WorkflowAdmission> {
     if (!["plan", "discuss", "implement", "respond", "reconcile"].includes(claim.kind) || !Number.isSafeInteger(claim.issue_number) || claim.issue_number <= 0 || !SECRET.test(claim.version) || claim.branch !== null && typeof claim.branch !== "string") this.auth.fail(400, "Invalid workflow claim");
     const context = await this.workflowContext(device, check);
@@ -626,7 +630,7 @@ export class Integrations {
     const check = () => { if (session) this.auth.liveSession(session); this.liveDevice(device); };
     check();
     try {
-      if (!route[2]) return this.auth.json((await this.workflowFacts(await this.workflowContext(device, check))).snapshot);
+      if (!route[2]) return this.auth.json(await this.workflowSnapshot(device, check));
       const body = await this.auth.body(request);
       check();
       if (route[2] === "issues") return this.auth.json({ issue: await this.workflowCreateWhat(await this.workflowContext(device, check, true), body) });
