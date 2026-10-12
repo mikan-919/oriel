@@ -1,3 +1,5 @@
+import {mountCodex} from "./codex.js";
+const codexPanel = mountCodex();
 const pairing = window.orielPairing;
 delete window.orielPairing;
 const connectionRequest = window.orielConnection;
@@ -152,6 +154,7 @@ function render() {
     repositoryWork.hidden = !user || !devices.length;
     refreshRepositoryButton.disabled = busy || !user || !repositoryDeviceId;
     whatFields.disabled = busy || !user || !repositoryDeviceId || !workflowSnapshot;
+    codexPanel.setContext(user, devices);
 }
 
 function disconnect() {
@@ -1098,7 +1101,7 @@ perform(async () => {
 });
 
 let currentPage = "overview";
-const pageNames = {overview: "概要", workflow: "ワークフロー", devices: "端末", settings: "設定"};
+const pageNames = {overview: "概要", workflow: "ワークフロー", codex: "Codex", devices: "端末", settings: "設定"};
 function showPage(page, focus = true) {
     if (!Object.hasOwn(pageNames, page)) return;
     currentPage = page;

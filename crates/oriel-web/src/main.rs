@@ -8,6 +8,7 @@ const STYLE: &str = include_str!("assets/dashboard.css");
 // Capture before external modules; pairing secrets never enter storage.
 const PAIR_CAPTURE_JS: &str = include_str!("assets/pairing.js");
 const TERMINAL_JS: &str = include_str!("assets/dashboard.js");
+const CODEX_JS: &str = include_str!("assets/codex.js");
 // Build once; Cloudflare Workers Static Assets serves the generated files.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -17,6 +18,7 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&output)?;
     fs::write(output.join("index.html"), html)?;
     fs::write(output.join("terminal.js"), TERMINAL_JS)?;
+    fs::write(output.join("codex.js"), CODEX_JS)?;
     fs::write(output.join("dashboard.css"), STYLE)?;
     println!("oriel-web assets: {}", output.display());
     Ok(())
