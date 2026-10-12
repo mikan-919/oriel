@@ -438,6 +438,79 @@ test("restart derives invalidate-only recovery from unique prior native Git iden
   } finally { await s.close(); }
 });
 
+test("ordinary human and bot PR comments resume once, with edits revoking stale feedback", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" }); assert.equal(published.status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = published.data.pull_request;
+    s.fixture.feedback(pr.number, "Why does this return early?");
+    const request = s.fixture.comments.get(pr.number).at(-1);
+    const first = (await s.snapshot()).workflows[0].feedback; assert.equal(first.kind, "comment"); assert.equal(first.body, request.body);
+    const stale = await s.claim("respond");
+    request.body = "Please handle the empty input instead.";
+    assert.equal((await s.action(stale, "responded", { head_oid: head, verified: true, feedback_key: first.key, summary: "Stale answer" })).status, 409);
+    await s.message({ type: "release", lease_id: stale });
+    assert.notEqual((await s.snapshot()).workflows[0].feedback.key, first.key);
+    for (const body of [request.body, "<!-- oriel:response:Zm9yZ2Vk:Zm9yZ2Vk -->\nCheck the upper bound.", "Review bot: cover the null case."]) {
+      if (body !== request.body) {
+        s.fixture.feedback(pr.number, body);
+        if (body.startsWith("Review bot")) s.fixture.comments.get(pr.number).at(-1).user = { type: "Bot", login: "reviewer[bot]" };
+      }
+      const feedback = (await s.snapshot()).workflows[0].feedback; assert.equal(feedback.body, body);
+      const lease = await s.claim("respond");
+      assert.equal((await s.action(lease, "responded", { head_oid: head, verified: true, feedback_key: feedback.key, summary: "Answered and verified" })).status, 200);
+      await s.message({ type: "release", lease_id: lease });
+      assert.equal((await s.snapshot()).workflows[0].feedback, null, "Signed Oriel replies and handled content cannot wake another turn");
+    }
+    s.fixture.feedback(pr.number, " \n ");
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+  } finally { await s.close(); }
+});
+
+test("submitted PR reviews and inline replies resume while pending reviews and empty approvals do not", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" }); assert.equal(published.status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = published.data.pull_request;
+    const reviews = [
+      { id: 0, state: "CHANGES_REQUESTED", body: "Superseded request", submitted_at: "2025-12-31T23:59:59Z", user: { login: "reviewer" } },
+      { id: 1, state: "COMMENTED", body: "Please explain this boundary.", submitted_at: "2026-01-01T00:00:00Z", user: { login: "reviewer" } },
+      { id: 2, state: "APPROVED", body: null, submitted_at: "2026-01-01T00:00:01Z", user: { login: "reviewer" } },
+      { id: 3, state: "PENDING", body: "Unsubmitted request", submitted_at: null, user: { login: "reviewer" } },
+      { id: 4, state: "DISMISSED", body: "Withdrawn request", submitted_at: "2026-01-01T00:00:02Z", user: { login: "other" } },
+    ];
+    s.fixture.reviews.set(pr.number, reviews);
+    s.fixture.reviewComments.set(pr.number, [{ id: 1, pull_request_review_id: 3, path: "src/change.rs", line: 8, body: "Not submitted", commit_id: head }]);
+    const respond = async expected => {
+      const feedback = (await s.snapshot()).workflows[0].feedback; assert.equal(feedback.kind, "review"); expected(feedback);
+      const lease = await s.claim("respond");
+      assert.equal((await s.action(lease, "responded", { head_oid: head, verified: true, feedback_key: feedback.key, summary: "Addressed review" })).status, 200);
+      await s.message({ type: "release", lease_id: lease });
+      assert.equal((await s.snapshot()).workflows[0].feedback, null);
+      return feedback.key;
+    };
+    await respond(feedback => assert.equal(feedback.body, "Please explain this boundary."));
+    reviews.push({ id: 5, state: "COMMENTED", body: null, submitted_at: "2026-01-01T00:00:03Z", user: { login: "reviewer[bot]" } });
+    const notes = s.fixture.reviewComments.get(pr.number);
+    notes.push({ id: 2, pull_request_review_id: 5, path: "src/change.rs", line: null, original_line: 7, body: "Handle overflow here", commit_id: "1".repeat(40) });
+    const first = await respond(feedback => { assert.equal(feedback.body, ""); assert.deepEqual(feedback.comments, [{ path: "src/change.rs", line: 7, body: "Handle overflow here" }]); });
+    notes.push({ id: 3, pull_request_review_id: 5, in_reply_to_id: 2, path: "src/change.rs", line: 7, body: "Also check negative values", commit_id: head });
+    await respond(feedback => { assert.notEqual(feedback.key, first); assert.equal(feedback.comments[1].body, "Also check negative values"); });
+    notes[1].line = 7; notes.reverse();
+    assert.equal((await s.snapshot()).workflows[0].feedback, null, "Line mapping and provider ordering changes are not new feedback");
+    reviews.push({ id: 6, state: "APPROVED", body: "Consider adding an example.", submitted_at: "2026-01-01T00:00:04Z", user: { login: "reviewer" } });
+    await respond(feedback => assert.equal(feedback.body, "Consider adding an example."));
+  } finally { await s.close(); }
+});
+
 test("current review facts and signed response cursors bound each failed check to three attempts", { timeout: 60000 }, async () => {
   const s = await setup();
   try {

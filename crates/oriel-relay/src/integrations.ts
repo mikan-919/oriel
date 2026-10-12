@@ -425,20 +425,22 @@ export class Integrations {
   private async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[]): Promise<Feedback | null> {
     const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`);
     const cursors = await this.workflowCursors(context, comments, "response");
-    const reviews = await this.workflowList<{ id: number; state: string; body: string; submitted_at: string; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`);
-    const inline = await this.workflowList<{ id: number; pull_request_review_id: number; path: string; line: number | null; body: string; commit_id: string }>(context, `${context.path}/pulls/${pr.number}/comments`);
+    const reviews = await this.workflowList<{ id: number; state: string; body: string | null; submitted_at: string | null; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`);
+    const inline = await this.workflowList<{ id: number; pull_request_review_id: number; path: string; line: number | null; original_line?: number | null; body: string; commit_id: string }>(context, `${context.path}/pulls/${pr.number}/comments`);
+    const submitted = reviews.filter(review => review.state !== "PENDING" && review.submitted_at)
+      .sort((a, b) => a.submitted_at!.localeCompare(b.submitted_at!) || a.id - b.id);
     const latest = new Map<string, typeof reviews[number]>();
-    for (const review of [...reviews].sort((a, b) => a.submitted_at.localeCompare(b.submitted_at))) {
-      if (review.state !== "PENDING") latest.set(review.user.login, review);
-    }
-    for (const review of [...latest.values()].sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))) {
-      if (review.state !== "CHANGES_REQUESTED") continue;
-      const notes = inline.filter(comment => comment.pull_request_review_id === review.id);
+    for (const review of submitted) latest.set(review.user.login, review);
+    for (const review of [...submitted].reverse()) {
+      if (!["CHANGES_REQUESTED", "COMMENTED", "APPROVED"].includes(review.state)) continue;
+      if (review.state === "CHANGES_REQUESTED" && latest.get(review.user.login)?.id !== review.id) continue;
+      const notes = inline.filter(comment => comment.pull_request_review_id === review.id && comment.body.trim()).sort((a, b) => a.id - b.id);
+      if (review.state !== "CHANGES_REQUESTED" && !review.body?.trim() && !notes.length) continue;
       const key = `review:${await digest([pr.number, review.id, review.body, notes.map(note => [note.id, note.path, note.body])])}`;
-      if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body, comments: notes.filter(note => note.line !== null || note.commit_id === pr.head_oid).map(note => ({ path: note.path, line: note.line, body: note.body })) };
+      if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body ?? "", comments: notes.map(note => ({ path: note.path, line: note.line ?? note.original_line ?? null, body: note.body })) };
     }
-    for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at))) {
-      if (comment.user.type !== "User" || !githubCommand(comment.body) || /<!-- oriel:/.test(comment.body)) continue;
+    for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id)) {
+      if (!comment.body.trim() || (await this.workflowCursors(context, [comment], "response")).size) continue;
       const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
     }
@@ -1011,7 +1013,7 @@ export class Integrations {
       const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`);
       if (!valid && !comments.some(comment => comment.body.includes(marker))) this.auth.fail(409, "Feedback identity is no longer actionable");
       const headMarker = body.feedback_key.startsWith("check:") ? `\n\n${await this.workflowMarker(context, "response-head", `${body.feedback_key}:${body.head_oid}`)}` : "";
-      await this.workflowComment(context, grant, "response", body.feedback_key, `Oriel verified review fixes at ${body.head_oid}.\n\n${body.summary}${headMarker}`, pr.number, false, body.head_oid);
+      await this.workflowComment(context, grant, "response", body.feedback_key, `Oriel verified PR feedback at ${body.head_oid}.\n\n${body.summary}${headMarker}`, pr.number, false, body.head_oid);
       return { pull_request: (await this.workflowCurrent(context, grant, ["review"])).row.pull_request };
     }
     if (action === "done") {
