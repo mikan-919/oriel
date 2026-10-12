@@ -10,6 +10,7 @@ import {
 import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
 import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
+import { CodexConnections } from "./codex";
 
 export interface AccountEnv extends IntegrationEnv { RELAY: DurableObjectNamespace; }
 
@@ -204,6 +205,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private readonly challengeCookie: string;
   private readonly integrations: Integrations;
   private readonly workflows: WorkflowLeases;
+  private readonly codex: CodexConnections;
 
   constructor(ctx: DurableObjectState, env: AccountEnv) {
     super(ctx, env);
@@ -297,6 +299,12 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         ).toArray()[0];
         return session ? session.expires_at * 1000 : null;
       });
+    this.codex = new CodexConnections(this.ctx,
+      id => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0],
+      (hash, user) => {
+        const session = this.sql.exec<{ expires_at: number }>("SELECT expires_at FROM sessions WHERE hash = ? AND user_id = ? AND expires_at > ?", hash, user, now()).toArray()[0];
+        return session ? session.expires_at * 1000 : null;
+      });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -308,6 +316,22 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         fail(403, "HTTPS is required outside loopback development");
       }
       const websocket = /^\/device\/([a-f0-9]{32})\/(host|client)$/.exec(url.pathname);
+      const codexSocket = /^\/api\/codex\/([a-f0-9]{32})\/(host|browser)$/.exec(url.pathname);
+      if (codexSocket) {
+        if (request.method !== "GET" || url.search || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") fail(400, "Expected a WebSocket upgrade without query parameters");
+        const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", codexSocket[1]).toArray()[0];
+        if (!device) fail(403, "Device is not paired");
+        if (codexSocket[2] === "host") {
+          this.checkHost(device.host_hash, await this.hostHash(request));
+          return this.codex.connect(device);
+        }
+        this.requireOrigin(request);
+        if (request.headers.has("Authorization")) fail(403, "Codex browser control requires a session");
+        const session = await this.requireSession(request);
+        this.requireLiveSession(session);
+        if (device.user_id !== session.user.id) fail(403, "Device belongs to another account");
+        return this.codex.connect(device, session);
+      }
       if (websocket) {
         if (request.method !== "GET" || url.search || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
           fail(400, "Expected a WebSocket upgrade without query parameters");
@@ -449,19 +473,23 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.codex.owns(ws)) { this.codex.message(ws, message); return Promise.resolve(); }
     return this.workflows.message(ws, message);
   }
 
   webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): void {
+    if (this.codex.owns(ws)) { this.codex.ended(ws); return; }
     this.workflows.close(ws);
   }
 
   webSocketError(ws: WebSocket, _error: unknown): void {
+    if (this.codex.owns(ws)) { this.codex.ended(ws); return; }
     this.workflows.close(ws);
   }
 
-  alarm(): Promise<void> {
-    return this.workflows.alarm();
+  async alarm(): Promise<void> {
+    await this.workflows.alarm();
+    await this.codex.alarm();
   }
 
   private requireOrigin(request: Request): void {

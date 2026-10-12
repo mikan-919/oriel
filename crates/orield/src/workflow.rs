@@ -231,7 +231,7 @@ fn verification_log_tail(path: &Path) -> Result<String> {
 }
 
 #[derive(Debug)]
-enum Stop {
+pub(super) enum Stop {
     Changed,
     Uncertain,
     LeaseLost,
@@ -240,6 +240,7 @@ enum Stop {
     PullClosed,
     TargetChanged,
     ModelCapacity,
+    WebPaused,
 }
 impl Stop {
     fn retryable(&self) -> bool {
@@ -270,6 +271,7 @@ impl fmt::Display for Stop {
             Self::ModelCapacity => {
                 "selected Codex model is at capacity; approval and local work preserved"
             }
+            Self::WebPaused => "paused from Oriel Web; approval and local work preserved",
         })
     }
 }
@@ -291,7 +293,7 @@ fn agent_failure(transcript: &Path) -> anyhow::Error {
             .context(format!("private transcript at {}", transcript.display()))
     } else {
         anyhow!(
-            "codex exec failed; private transcript at {}",
+            "Codex app-server failed; private transcript at {}",
             transcript.display()
         )
     }
@@ -649,6 +651,9 @@ impl Session {
         self.guard_with_child(guard, false).await
     }
     async fn guard_with_child(&mut self, guard: &Guard, child_running: bool) -> Result<Snapshot> {
+        if crate::codex::paused() {
+            return Err(Stop::WebPaused.into());
+        }
         self.checked().await?;
         let snapshot = if child_running && guard.code {
             // Never extend the uncertainty window of a source-writing child.
@@ -1128,7 +1133,7 @@ fn agent_prompt(row: &Row, plan: bool, discussion: bool) -> String {
     )
 }
 
-fn copy_model_auth(home: &Path) -> Result<()> {
+pub(super) fn copy_model_auth(home: &Path) -> Result<()> {
     let source = if let Some(home) = std::env::var_os("CODEX_HOME") {
         PathBuf::from(home)
     } else {
@@ -1151,7 +1156,7 @@ fn copy_model_auth(home: &Path) -> Result<()> {
     Ok(())
 }
 
-struct ModelAuth(PathBuf);
+pub(super) struct ModelAuth(pub(super) PathBuf);
 impl Drop for ModelAuth {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -1258,7 +1263,12 @@ fn dependency_cache_environment_from(
 
 fn reject_project_authority(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
-        for authority in [".codex/config.toml", ".codex/hooks.json", ".mcp.json"] {
+        for authority in [
+            ".codex/config.toml",
+            ".codex/hooks.json",
+            ".codex/rules",
+            ".mcp.json",
+        ] {
             ensure!(
                 !ancestor.join(authority).exists(),
                 "unsafe project agent configuration {authority}; remove credential-bearing MCP/hooks before autonomous execution"
@@ -1340,28 +1350,12 @@ async fn agent(
                 .iter()
                 .map(|(name, value)| (name, value)),
         )
-        .args([
-            "exec",
-            "--json",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--ephemeral",
-            "--color",
-            "never",
-            "--sandbox",
-            if plan { "read-only" } else { "workspace-write" },
-            "--output-schema",
-        ])
-        .arg(&schema)
-        .arg("--output-last-message")
-        .arg(&output)
-        .arg("-C")
-        .arg(path)
+        .args(["app-server", "--listen", "stdio://"])
         .args([
             "-c",
             "approval_policy=\"on-request\"",
             "-c",
-            "approvals_reviewer=\"auto_review\"",
+            "approvals_reviewer=\"user\"",
             "-c",
             "project_root_markers=[\".git\"]",
             "-c",
@@ -1376,7 +1370,6 @@ async fn agent(
             "features.hooks=false",
             "-c",
             "mcp_servers={}",
-            "-",
         ])
         .current_dir(path)
         .stdin(Stdio::piped())
@@ -1402,48 +1395,42 @@ async fn agent(
         })
         .await?;
     session.guard(guard).await?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| anyhow!("codex exec is unavailable through PATH"))?;
-    let id = child.id().context("agent process has no ID")?;
-    use tokio::io::AsyncWriteExt;
-    let input = tokio::time::timeout(Duration::from_secs(8), async {
-        let mut stdin = child.stdin.take().context("agent prompt pipe missing")?;
-        stdin.write_all(prompt.as_bytes()).await?;
-        stdin.shutdown().await?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await
-    .unwrap_or_else(|_| Err(anyhow!(Stop::Uncertain)));
-    if let Err(error) = input {
-        git::stop_group(id)?;
-        let _ = child.wait().await;
-        return Err(error);
-    }
-    let completion = child.wait();
-    tokio::pin!(completion);
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-    interval.tick().await;
-    let (result, finished) = loop {
-        tokio::select! {
-            status = &mut completion => break (status.map_err(|_| anyhow!("agent completion uncertain")), true),
-            _ = interval.tick() => if let Err(error) = session.guard_with_child(guard, true).await { break (Err(error), false); },
-            _ = tokio::signal::ctrl_c() => break (Err(anyhow!(Stop::Interrupted)), false),
+    let mut engine = crate::codex::Engine::spawn(
+        command,
+        path,
+        &format!("#{} · {}", row.issue.number, row.issue.title),
+        true,
+        !plan,
+        &transcript,
+    )
+    .await?;
+    let result = {
+        let completion = engine.run(&prompt, agent_schema(), plan);
+        tokio::pin!(completion);
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                result = &mut completion => break result,
+                _ = interval.tick() => if let Err(error) = session.guard_with_child(guard, true).await { break Err(error); },
+                _ = tokio::signal::ctrl_c() => break Err(anyhow!(Stop::Interrupted)),
+            }
         }
     };
-    git::stop_group(id)?;
-    if !finished {
-        let _ = completion.await;
-    }
+    engine.stop().await;
     // No provider credentials were copied here; discard model auth as soon as
     // the coding process and its descendants have stopped.
     drop(model_auth);
-    let status = result?;
+    let text = result.map_err(|error| {
+        if error.downcast_ref::<Stop>().is_some() {
+            error
+        } else {
+            agent_failure(&transcript)
+        }
+    })?;
     session.progress("reviewing").await?;
     session.guard(guard).await?;
-    if !status.success() {
-        return Err(agent_failure(&transcript));
-    }
+    git::private_file(&output, text.as_bytes())?;
     let metadata = fs::symlink_metadata(&output)
         .map_err(|_| anyhow!("agent returned no structured final output"))?;
     ensure!(
@@ -2091,6 +2078,10 @@ async fn scan(
     session
         .exchange(json!({"type":"heartbeat"}), "heartbeat")
         .await?;
+    if crate::codex::paused() {
+        session.progress("paused").await?;
+        return Ok(());
+    }
     let snapshot = session.snapshot().await?;
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
@@ -2903,7 +2894,12 @@ mod tests {
         assert!(reject_project_authority(&project).is_ok());
         let nested = project.join("src/nested");
         git::private_directory(&nested).unwrap();
-        for authority in [".codex/config.toml", ".codex/hooks.json", ".mcp.json"] {
+        for authority in [
+            ".codex/config.toml",
+            ".codex/hooks.json",
+            ".codex/rules",
+            ".mcp.json",
+        ] {
             let file = project.join(authority);
             git::private_directory(file.parent().unwrap()).unwrap();
             git::private_file(&file, b"{}").unwrap();
