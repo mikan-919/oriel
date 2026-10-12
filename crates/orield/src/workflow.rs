@@ -239,6 +239,19 @@ enum Stop {
     Rejected,
     PullClosed,
     TargetChanged,
+    ModelCapacity,
+}
+impl Stop {
+    fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::LeaseLost
+                | Self::Interrupted
+                | Self::Rejected
+                | Self::Uncertain
+                | Self::ModelCapacity
+        )
+    }
 }
 impl fmt::Display for Stop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -254,10 +267,35 @@ impl fmt::Display for Stop {
             Self::TargetChanged => {
                 "immutable target/configuration advanced; work retained for fresh admission"
             }
+            Self::ModelCapacity => {
+                "selected Codex model is at capacity; approval and local work preserved"
+            }
         })
     }
 }
 impl std::error::Error for Stop {}
+
+fn agent_failure(transcript: &Path) -> anyhow::Error {
+    let last = verification_log_tail(transcript).ok().and_then(|text| {
+        text.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+    });
+    if last.is_some_and(|event| {
+        event["type"] == "turn.failed"
+            && event["error"]["message"]
+                == "Selected model is at capacity. Please try a different model."
+    }) {
+        anyhow!(Stop::ModelCapacity)
+            .context(format!("private transcript at {}", transcript.display()))
+    } else {
+        anyhow!(
+            "codex exec failed; private transcript at {}",
+            transcript.display()
+        )
+    }
+}
 
 struct Guard {
     row: Row,
@@ -1333,7 +1371,7 @@ async fn agent(
             "-c",
             "features.shell_snapshot=false",
             "-c",
-            "features.web_search=false",
+            "web_search=\"disabled\"",
             "-c",
             "features.hooks=false",
             "-c",
@@ -1403,11 +1441,9 @@ async fn agent(
     let status = result?;
     session.progress("reviewing").await?;
     session.guard(guard).await?;
-    ensure!(
-        status.success(),
-        "codex exec failed; private transcript at {}",
-        transcript.display()
-    );
+    if !status.success() {
+        return Err(agent_failure(&transcript));
+    }
     let metadata = fs::symlink_metadata(&output)
         .map_err(|_| anyhow!("agent returned no structured final output"))?;
     ensure!(
@@ -2138,10 +2174,7 @@ async fn scan(
         };
         if let Err(error) = result {
             event("Stopped", format!("#{} · {error:#}", row.issue.number));
-            if matches!(
-                error.downcast_ref::<Stop>(),
-                Some(Stop::LeaseLost | Stop::Interrupted | Stop::Rejected | Stop::Uncertain)
-            ) {
+            if error.downcast_ref::<Stop>().is_some_and(Stop::retryable) {
                 return Err(error);
             }
             match error.downcast_ref::<Stop>() {
@@ -2231,7 +2264,9 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
                         let _ = session.socket.close(None).await;
                         break;
                     }
-                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
+                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::ModelCapacity)) {
+                        console.warning(format!("Codex unavailable: {error:#}; retrying in 15s. Approval and local work preserved."));
+                    } else if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
                         console.warning(format!(
                             "Lease lost: {error:#}; retrying in 15s. Local work preserved."
                         ));
@@ -2262,6 +2297,46 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_capacity_retries_without_reporting_task_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "oriel-agent-failure-{}",
+            random_hex::<12>().unwrap()
+        ));
+        git::private_directory(&root).unwrap();
+        let transcript = root.join("transcript.jsonl");
+        git::private_file(&transcript, b"").unwrap();
+        let capacity = json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}).to_string();
+        for (text, retry) in [
+            (format!("{{\"type\":\"turn.started\"}}\n{capacity}\n"), true),
+            (json!({"type":"item.completed","item":{"type":"agent_message","text":"Selected model is at capacity. Please try a different model."}}).to_string(), false),
+            (format!("{capacity}\n{{\"type\":\"turn.completed\"}}\n"), false),
+            (format!("{capacity}\ninvalid JSON\n"), false),
+            (json!({"type":"turn.failed","error":{"message":"private-provider-detail"}}).to_string(), false),
+            ("invalid JSON".to_owned(), false),
+        ] {
+            fs::write(&transcript, text).unwrap();
+            let error = agent_failure(&transcript);
+            assert_eq!(error.downcast_ref::<Stop>().is_some_and(Stop::retryable), retry);
+            assert!(!format!("{error:#}").contains("private-provider-detail"));
+            if retry {
+                assert!(matches!(error.downcast_ref::<Stop>(), Some(Stop::ModelCapacity)));
+            }
+        }
+        for stop in [Stop::Changed, Stop::PullClosed, Stop::TargetChanged] {
+            assert!(!stop.retryable());
+        }
+        assert!(
+            !anyhow::Error::new(AgentIntervention {
+                reason: "missing human decision".into(),
+                output: transcript
+            })
+            .downcast_ref::<Stop>()
+            .is_some_and(Stop::retryable)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn failure_reports_preserve_the_blocker_and_verification_attempts() {
@@ -2535,13 +2610,14 @@ mod tests {
         ])
         .unwrap();
         let filtered = private_home_path(&path, home);
-        assert_eq!(
-            std::env::split_paths(&filtered).collect::<Vec<_>>(),
-            [
-                PathBuf::from("/usr/bin"),
-                PathBuf::from("/nix/store/node/bin")
-            ]
-        );
+        let entries = std::env::split_paths(&filtered).collect::<Vec<_>>();
+        // Installed Cargo tools may be appended when CARGO_HOME is set, as in CI.
+        assert!(entries.starts_with(&[
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/nix/store/node/bin")
+        ]));
+        assert!(!entries.contains(&home.join(".local/share/vite-plus/bin")));
+        assert!(!entries.contains(&home.join(".local/share/vite-plus/fallback-bin")));
     }
 
     #[tokio::test]
