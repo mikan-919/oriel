@@ -20,6 +20,7 @@
             clippy
 
             nodejs
+            python3
             openssl
         ];
 
