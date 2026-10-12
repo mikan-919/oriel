@@ -325,7 +325,7 @@ impl Engine {
         let mut events = self.client.subscribe();
         let model = self.hub.model.lock().unwrap().clone();
         let thread = self.client.request("thread/start", json!({"cwd":self.client.cwd,"model":model["model"],
-            "sandbox":if read_only { "read-only" } else { "workspace-write" }, "approvalPolicy":"on-request",
+            "sandbox":if read_only { Some("read-only") } else { None }, "approvalPolicy":"on-request",
             "approvalsReviewer":"user","developerInstructions":prompt})).await?;
         let thread_id = thread["thread"]["id"]
             .as_str()
@@ -907,6 +907,7 @@ mod tests {
               if(!initialized)process.exit(2);
               if(m.method==='model/list'){send({id:m.id,result:{initialized}});return;}
               if(m.method==='thread/start'){
+                if(m.params.developerInstructions && m.params.sandbox!==null)process.exit(3);
                 send({id:m.id,result:{thread:{id:'owned'}}});
                 send({id:'approval',method:'item/fileChange/requestApproval',params:{threadId:'owned'}});return;
               }
