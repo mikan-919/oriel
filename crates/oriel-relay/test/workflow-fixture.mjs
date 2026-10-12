@@ -13,9 +13,10 @@ export function workflowFixture() {
       { id: "done", name: "Done", type: "completed" }, { id: "canceled", name: "Canceled", type: "canceled" },
     ], base_branch: "main", target_oid: "1".repeat(40), repository_node_id: "R_501", autonomous: true, verification: [["true"]],
     config_source: undefined, configurations: new Map(), calls: [], grants: [], uncertainty: new Map(), failures: new Map(), holdReads: undefined,
-    installationPermissions: { contents: "write", metadata: "read", workflows: "write", issues: "write", pull_requests: "write", checks: "write", statuses: "read" },
+    installationPermissions: { contents: "write", metadata: "read", workflows: "write", issues: "write", pull_requests: "write", checks: "write", statuses: "read", actions: "read" },
     issuePageSize: 100, attachmentPageSize: 100, comments: new Map([[42, [{ id: 1, body: "/oriel how", user: { login: "human", type: "User" }, created_at: "2026-01-01T00:00:00Z" }]]]), reviews: new Map(), reviewComments: new Map(), checks: [], statuses: [],
     compare: undefined, sealSupported: true, trees: new Map(),
+    annotations: new Map(), actionJobs: new Map(), jobLogs: new Map(), logStorage: "https://pipelines.actions.githubusercontent.com",
   });
   fixture.addHow = (state = "Todo", number = 42) => {
     const how = {
@@ -66,6 +67,16 @@ export function workflowFixture() {
   const pullNode = pr => ({ ...structuredClone(pr), head: { ...structuredClone(pr.head), sha: fixture.refs.get(pr.head.ref) ?? pr.head.sha } });
   fixture.fetch = async request => {
     const url = new URL(request.url);
+    if (url.origin === "https://pipelines.actions.githubusercontent.com") {
+      assert.equal(request.headers.get("Authorization"), null, "GitHub token must never follow the log redirect");
+      assert.equal(request.headers.get("Cookie"), null);
+      const log = fixture.jobLogs.get(Number(url.pathname.split("/").at(-1))) ?? "";
+      if (request.method === "HEAD") return new Response(null, { headers: { "Content-Length": String(Buffer.byteLength(log)) } });
+      const range = request.headers.get("Range");
+      if (range) assert.equal(range, `bytes=${Math.max(0,Buffer.byteLength(log)-65536)}-${Buffer.byteLength(log)-1}`);
+      const failure = await record("github", "job-log-download", request); if (failure) return failure;
+      return new Response(range ? Buffer.from(log).subarray(-65536) : log, { status: range ? 206 : 200 });
+    }
     if (url.origin === "https://api.github.com" && url.pathname === "/app/installations/101") {
       const failure = await record("github", "installation-permissions", request);
       return failure ?? Response.json({ id: 101, app_id: 123, permissions: fixture.installationPermissions });
@@ -75,11 +86,12 @@ export function workflowFixture() {
       assert.deepEqual(body.repository_ids, [501]);
       assert.equal(body.permissions.metadata, "read");
       for (const [permission, value] of Object.entries(body.permissions)) {
-        assert.ok(["contents", "issues", "pull_requests", "metadata", "checks", "statuses", "workflows"].includes(permission));
+        assert.ok(["contents", "issues", "pull_requests", "metadata", "checks", "statuses", "workflows", "actions"].includes(permission));
         assert.ok(["read", "write"].includes(value));
-        if (["metadata", "checks", "statuses"].includes(permission)) assert.equal(value, "read");
+        if (["metadata", "checks", "statuses", "actions"].includes(permission)) assert.equal(value, "read");
       }
       fixture.grants.push(structuredClone(body.permissions));
+      if (body.permissions.actions === "read" && !["read", "write"].includes(fixture.installationPermissions.actions)) return new Response("private-provider-diagnostic", { status: 422 });
       if (body.permissions.workflows === "write") {
         const failure = await record("github", "workflow-token", request, body);
         if (failure) return failure;
@@ -166,7 +178,7 @@ export function workflowFixture() {
     const body = request.method === "GET" ? undefined : await request.json();
     const operation = path === "" ? "repository" : path.startsWith("/contents/") ? "configuration" : path.startsWith("/git/ref/") ? "ref" : path.startsWith("/git/matching-refs/") ? "refs" : path.startsWith("/git/commits/") ? "git-commit" : path.startsWith("/git/trees/") ? "tree" :
       path === "/issues" ? request.method === "POST" ? "what-create" : "whats" : path === "/pulls" ? request.method === "POST" ? "pr-create" : "prs" : path.startsWith("/compare/") ? "compare" :
-      /\/issues\/\d+\/comments$/.test(path) ? request.method === "POST" ? "pr-comment" : "pr-comments" : /\/pulls\/\d+\/reviews$/.test(path) ? "reviews" : /\/pulls\/\d+\/comments$/.test(path) ? "review-comments" : path.includes("/check-runs") ? "checks" : path.endsWith("/statuses") ? "statuses" : "pr";
+      /\/issues\/\d+\/comments$/.test(path) ? request.method === "POST" ? "pr-comment" : "pr-comments" : /\/pulls\/\d+\/reviews$/.test(path) ? "reviews" : /\/pulls\/\d+\/comments$/.test(path) ? "review-comments" : path.endsWith("/annotations") ? "annotations" : path.startsWith("/actions/jobs/") ? path.endsWith("/logs") ? "job-logs" : "action-job" : path.includes("/check-runs") ? "checks" : path.endsWith("/statuses") ? "statuses" : "pr";
     const failure = await record("github", operation, request, body); if (failure) return failure;
     if (fixture.apiFailed) return new Response("private-provider-diagnostic", { status: 503 });
     if (operation === "repository") return Response.json({ id: 501, node_id: fixture.repository_node_id, default_branch: fixture.base_branch });
@@ -207,6 +219,9 @@ export function workflowFixture() {
     }
     if (operation === "reviews") return Response.json(restPage(fixture.reviews.get(number) ?? [], url));
     if (operation === "review-comments") return Response.json(restPage(fixture.reviewComments.get(number) ?? [], url));
+    if (operation === "annotations") return Response.json(restPage(fixture.annotations.get(number) ?? [], url));
+    if (operation === "action-job") return Response.json(fixture.actionJobs.get(Number(path.split("/")[3])) ?? null);
+    if (operation === "job-logs") return new Response(null, { status: 302, headers: { Location: `${fixture.logStorage}/logs/${path.split("/")[3]}?signature=private-storage-signature` } });
     if (operation === "checks") {
       if (path.startsWith("/check-runs/")) return Response.json(fixture.checks.find(check => check.id === Number(path.split("/")[2])) ?? null);
       return Response.json({ check_runs: restPage(fixture.checks.filter(check => check.head_sha === path.split("/")[2]), url) });

@@ -72,6 +72,14 @@ import {
 // with @oriel, request HOW refinement in Triage; /oriel PR comments, reviews and failed checks drive verified fixes
 // on the same canonical branch. Human merge is required before Linear Done,
 // including WHATs auto-closed by that merge.
+// Failed PR checks automatically resume with native annotations and, for Actions,
+// failed job/step details and a bounded log excerpt. Diagnostics are downloaded only
+// at repair start, require the current PR head/check identity, and never forward
+// GitHub credentials to signed log storage. Actions: read is requested only for
+// diagnostics; missing permission falls back to check output/annotations. Grant it
+// on the GitHub App and approve installation updates to enable private job logs.
+// The host reruns every configured verification before pushing. Signed responses
+// bound retries to three since the last successful check, including prior heads.
 // Triage refinement replies contain the model's actual summary in the commenter's
 // language, not a fixed HOW-update notice. Read-only questions/blockers may be posted
 // without approving code; question-only replies leave the canonical HOW unchanged.

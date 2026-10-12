@@ -56,6 +56,7 @@ type GithubPull = {
   head: { ref: string; sha: string; repo: { id: number } | null }; base: { ref: string; repo: { id: number } };
 };
 type GithubComment = { id: number; body: string; user: { type: string; login: string }; created_at: string };
+type CheckAnnotation = { path: string; start_line: number; annotation_level: string; title?: string; message: string; raw_details?: string };
 type LinearComment = { id: string; body: string; createdAt: string; user: { id: string; name: string; app: boolean } | null };
 type WorkflowFacts = { snapshot: WorkflowSnapshot; states: LinearState[]; hows: WorkflowHow[]; pulls: GithubPull[]; refs: Map<string, string>; recoveries: Map<number, string> };
 
@@ -498,6 +499,85 @@ export class Integrations {
     return null;
   }
 
+  private async workflowCiFeedback(context: WorkflowContext, grant: WorkflowGrant): Promise<Feedback> {
+    const current = await this.workflowCurrent(context, grant, ["review"]);
+    const feedback = current.row.feedback;
+    const pr = current.row.pull_request;
+    if (!grant.feedback || !feedback || feedback.kind !== "check_failure" || feedback.key !== grant.feedback.key ||
+      !pr || pr.number !== grant.feedback.pr_number || pr.head_oid !== grant.feedback.head_oid) this.auth.fail(409, "CI failure is no longer current");
+    const checkId = Number(feedback.key.split(":").at(-2));
+    // Commit statuses have no check-run/job identity; their native description is the diagnostic.
+    if (!Number.isSafeInteger(checkId) || checkId <= 0) return feedback;
+    const check = await this.workflowGithub<{ id: number; head_sha: string; details_url: string | null }>(context, `${context.path}/check-runs/${checkId}`);
+    if (!check || check.id !== checkId || check.head_sha !== pr.head_oid) this.auth.fail(409, "CI check identity changed");
+    const annotations = await this.workflowGithub<CheckAnnotation[]>(context, `${context.path}/check-runs/${checkId}/annotations?per_page=100&page=1`);
+    if (!Array.isArray(annotations)) this.auth.fail(502, "CI annotations are unavailable");
+    const notes = annotations.filter(note => note.annotation_level === "failure" || note.annotation_level === "warning").slice(0, 20)
+      .map(note => ({ path: note.path, line: note.start_line, body: [note.title, note.message, note.raw_details].filter(Boolean).join("\n").slice(0, 4000) }));
+    let body = feedback.body;
+    // Only native GitHub Actions job links can select a log. Never fetch a check author's arbitrary URL.
+    const jobLink = check.details_url && /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)(?:\?[^#]*)?$/.exec(check.details_url);
+    if (jobLink && jobLink[1].toLowerCase() === context.repository.owner.toLowerCase() && jobLink[2].toLowerCase() === context.repository.name.toLowerCase()) {
+      body += `\nGitHub Actions: ${check.details_url}`;
+      try {
+        // Request Actions read only for CI diagnostics; ordinary discovery and Git tokens retain their scopes.
+        const credential = await this.installationToken(context.binding.user_id, context.check, { metadata: "read", actions: "read" });
+        const actions = { ...context, github: credential.token };
+        const job = await this.workflowGithub<{ id: number; run_id: number; head_sha: string; check_run_url: string; name: string; status: string; conclusion: string; steps: { number: number; name: string; conclusion: string | null }[] }>(actions, `${context.path}/actions/jobs/${jobLink[4]}`);
+        if (!job || String(job.id) !== jobLink[4] || String(job.run_id) !== jobLink[3] || job.head_sha !== pr.head_oid ||
+          job.check_run_url !== `https://api.github.com${context.path}/check-runs/${checkId}` || job.status !== "completed" ||
+          !["failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"].includes(job.conclusion)) this.auth.fail(409, "Actions job does not match the admitted failed check");
+        body += `\nJob: ${job.name} (${job.conclusion})\n${job.steps.filter(step => step.conclusion && !["success", "skipped", "neutral"].includes(step.conclusion)).map(step => `Step ${step.number}: ${step.name} (${step.conclusion})`).join("\n")}`;
+        const log = await this.workflowJobLog(actions, job.id);
+        body = `${body.slice(0, 15000)}${body.length > 15000 ? "\n[Summary/step list truncated]" : ""}\nLog excerpt:\n${log}`;
+      } catch (error) {
+        context.check();
+        if (!(error instanceof Error) || !("status" in error) || error.status !== 502) throw error;
+        body += `\nActions job logs are unavailable: ${error.message.slice(0, 1000)}\nUse the check summary and annotations below. Private job logs require GitHub App Actions: read and updated installation approval.`;
+      }
+    }
+    const latest = await this.workflowCurrent(context, grant, ["review"]);
+    if (latest.row.feedback?.key !== feedback.key || latest.row.pull_request?.head_oid !== pr.head_oid) this.auth.fail(409, "CI failure changed during diagnostics");
+    return { ...feedback, body: body.slice(0, 80000), comments: notes };
+  }
+
+  private async workflowJobLog(context: WorkflowContext, jobId: number): Promise<string> {
+    context.check();
+    const response = await fetch(`https://api.github.com${context.path}/actions/jobs/${jobId}/logs`, {
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${context.github}`, "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" },
+      redirect: "manual", signal: AbortSignal.timeout(20000),
+    }).catch(() => this.auth.fail(502, "Actions job log request failed"));
+    context.check();
+    if (response.status !== 302) this.auth.fail(502, `Actions job log request failed (HTTP ${response.status})`);
+    let url: URL;
+    try { url = new URL(response.headers.get("Location") ?? ""); } catch { this.auth.fail(502, "Actions job log URL is invalid"); }
+    if (url.protocol !== "https:" || url.username || url.password || url.hash ||
+      ![".actions.githubusercontent.com", ".blob.core.windows.net"].some(suffix => url.hostname.endsWith(suffix))) this.auth.fail(502, "Actions job log URL is not a GitHub log storage endpoint");
+    // The storage URL is signed. Do not send the installation credential across this redirect.
+    const metadata = await fetch(url, { method: "HEAD", redirect: "manual", signal: AbortSignal.timeout(10000) }).catch(() => null);
+    context.check();
+    const length = metadata?.ok ? Number(metadata.headers.get("Content-Length")) : 0;
+    const headers = Number.isSafeInteger(length) && length > 0 ? { Range: `bytes=${Math.max(0, length - 65536)}-${length - 1}` } : {};
+    const logs = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(20000) })
+      .catch(() => this.auth.fail(502, "Actions job log download failed"));
+    context.check();
+    if (!logs.ok || !logs.body) this.auth.fail(502, `Actions job log download failed (HTTP ${logs.status})`);
+    const reader = logs.body.getReader(); const decoder = new TextDecoder();
+    let excerpt = "", bytes = 0, truncated = false;
+    try {
+      for (;;) {
+        const part = await reader.read().catch(() => this.auth.fail(502, "Actions job log stream failed"));
+        context.check();
+        if (part.done) break;
+        bytes += part.value.length;
+        excerpt = (excerpt + decoder.decode(part.value, { stream: true })).slice(-64000);
+        if (bytes >= 4 * 1024 * 1024) { truncated = true; break; }
+      }
+      excerpt = (excerpt + decoder.decode()).slice(-64000);
+    } finally { await reader.cancel().catch(() => {}); }
+    return `${truncated ? "[Download limited to 4 MiB; excerpt may omit later output]\n" : ""}${excerpt.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")}`;
+  }
+
   async workflowAdmission(device: Device, claim: WorkflowClaim, check: () => void): Promise<WorkflowAdmission> {
     if (!["plan", "discuss", "implement", "respond", "reconcile"].includes(claim.kind) || !Number.isSafeInteger(claim.issue_number) || claim.issue_number <= 0 || !SECRET.test(claim.version) || claim.branch !== null && typeof claim.branch !== "string") this.auth.fail(400, "Invalid workflow claim");
     const context = await this.workflowContext(device, check);
@@ -551,7 +631,7 @@ export class Integrations {
       if (typeof body.lease_id !== "string" || !body.lease_id) this.auth.fail(400, "A live workflow lease is required");
       const grant = authority.verify(device, body.lease_id);
       const leased = () => { check(); authority.verify(device, grant.lease_id); };
-      const context = await this.workflowContext(device, leased, route[2] === "actions");
+      const context = await this.workflowContext(device, leased, route[2] === "actions" && body.action !== "ci-feedback");
       if (route[2] === "git-token") {
         if (!["plan", "discuss", "implement", "respond"].includes(grant.kind)) this.auth.fail(409, "Reconciliation does not need Git credentials");
         if (["plan", "discuss"].includes(grant.kind)) await this.workflowCurrent(context, grant);
@@ -777,8 +857,9 @@ export class Integrations {
   private async workflowAction(context: WorkflowContext, grant: WorkflowGrant, body: Record<string, unknown>): Promise<unknown> {
     const action = body.action;
     const kind = action === "proposal" || action === "started" ? "plan" : action === "answered" ? "discuss" : action === "begin" || action === "publish" ? "implement" :
-      action === "responded" ? "respond" : action === "done" ? "reconcile" : action === "invalidate" || action === "fail" ? grant.kind : null;
+      action === "responded" || action === "ci-feedback" ? "respond" : action === "done" ? "reconcile" : action === "invalidate" || action === "fail" ? grant.kind : null;
     if (!kind || kind !== grant.kind) this.auth.fail(403, "Workflow action is not allowed by this lease");
+    if (action === "ci-feedback") return this.workflowCiFeedback(context, grant);
     if (action === "started") {
       const { row } = await this.workflowCurrent(context, grant, ["needs-how", "triage"]);
       if (!grant.issue_feedback || !row.issue_feedback?.planning) this.auth.fail(409, "A current Issue HOW request is required");

@@ -473,6 +473,63 @@ test("current review facts and signed response cursors bound each failed check t
   } finally { await s.close(); }
 });
 
+test("failed PR Actions resume with current job steps, annotations and a bounded log without leaking credentials", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "ci-feedback")).status, 403);
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" });
+    assert.equal(published.status, 200); await s.message({type:"release",lease_id:implementation});
+    s.fixture.checks.push({id: 10, name:"test", head_sha:head, status:"completed", conclusion:"failure", completed_at:"2026-01-01T00:00:00Z",
+      details_url:"https://github.com/octocat/connected/actions/runs/20/job/30", output:{title:"Tests failed",summary:null,text:null}});
+    s.fixture.annotations.set(10, [{path:"src/lib.rs", start_line:7, annotation_level:"failure", message:"Expected true, got false", raw_details:"Assertion failed"}]);
+    s.fixture.actionJobs.set(30, {id:30, run_id:20, head_sha:head, check_run_url:"https://api.github.com/repos/octocat/connected/check-runs/10", name:"cargo tests", status:"completed", conclusion:"failure",
+      steps:[{number:1,name:"Checkout",conclusion:"success"},{number:2,name:"cargo test --workspace",conclusion:"failure"}]});
+    s.fixture.jobLogs.set(30, "earlier output\n".repeat(10000)+"\u001b[31merror: test_boundary failed\u001b[0m\n");
+    const failure = (await s.snapshot()).workflows[0].feedback;
+    assert.equal(failure.kind,"check_failure");
+    assert.equal(s.fixture.calls.filter(call=>call.operation==="job-logs").length,0,"Polling must not repeatedly download diagnostics");
+    const lease = await s.claim("respond");
+    const diagnostics = await s.action(lease,"ci-feedback");
+    assert.equal(diagnostics.status,200,JSON.stringify(diagnostics.data));
+    assert.equal(diagnostics.data.key,failure.key);
+    assert.match(diagnostics.data.body,/Step 2: cargo test --workspace \(failure\)/);
+    assert.match(diagnostics.data.body,/error: test_boundary failed/);
+    assert.ok(diagnostics.data.body.length<=80000);
+    assert.ok(!diagnostics.data.body.includes("\u001b"));
+    assert.ok(!JSON.stringify(diagnostics.data).includes("private-storage-signature"));
+    assert.deepEqual(diagnostics.data.comments,[{path:"src/lib.rs",line:7,body:"Expected true, got false\nAssertion failed"}]);
+    assert.deepEqual(s.fixture.grants.at(-1),{metadata:"read",actions:"read"});
+    s.fixture.checks[0].output.summary="long summary ".repeat(1500);
+    const longSummary=await s.action(lease,"ci-feedback");
+    assert.equal(longSummary.status,200); assert.ok(longSummary.data.body.length<=80000);
+    assert.match(longSummary.data.body,/error: test_boundary failed/,"Summary truncation must preserve the final failure log");
+    s.fixture.checks[0].output.summary=null;
+    s.fixture.installationPermissions.actions=undefined;
+    const fallback = await s.action(lease,"ci-feedback");
+    assert.equal(fallback.status,200); assert.match(fallback.data.body,/Actions: read/); assert.equal(fallback.data.comments.length,1);
+    assert.ok(!JSON.stringify(fallback.data).includes("private-provider-diagnostic"));
+    s.fixture.installationPermissions.actions="read";
+    s.fixture.logStorage="https://attacker.example";
+    const rejectedUrl = await s.action(lease,"ci-feedback");
+    assert.equal(rejectedUrl.status,200); assert.match(rejectedUrl.data.body,/logs are unavailable/);
+    s.fixture.logStorage="https://pipelines.actions.githubusercontent.com";
+    s.fixture.actionJobs.get(30).head_sha="9".repeat(40);
+    assert.equal((await s.action(lease,"ci-feedback")).status,409,"Logs from a different commit cannot be repair input");
+    s.fixture.actionJobs.get(30).head_sha=head;
+    let raced=false;
+    s.fixture.holdReads=({operation})=>{if(operation==="job-log-download"&&!raced){raced=true;s.fixture.checks.push({...s.fixture.checks[0],id:11,conclusion:"success"});}};
+    assert.equal((await s.action(lease,"ci-feedback")).status,409,"Successful rerun during log download revokes the failure input");
+    s.fixture.holdReads=undefined;
+    assert.equal((await s.snapshot()).workflows[0].feedback,null);
+    // A failed check on an older commit never starts a response for the current head.
+    s.fixture.checks.push({...s.fixture.checks[0],id:12,head_sha:"8".repeat(40)});
+    assert.equal((await s.snapshot()).workflows[0].feedback,null);
+  } finally {await s.close();}
+});
+
 test("commit-pinned configuration and canonical-head races revoke publication rather than publish unchecked work", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
