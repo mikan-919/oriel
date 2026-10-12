@@ -888,7 +888,13 @@ mod tests {
         drop(inherited);
         assert!(lock_workflow_identity(&path).is_err());
         drop(replacement);
+        // Releasing one identity must not unlock a different device's workflow.
+        assert!(lock_workflow_identity(&other).is_err());
+        let final_owner = lock_workflow_identity(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(final_owner);
         drop(other_owner);
+        assert!(lock_workflow_identity(&other).is_ok());
     }
 
     #[test]
