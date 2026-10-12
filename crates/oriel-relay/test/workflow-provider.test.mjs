@@ -384,6 +384,27 @@ test("a failed review returns to Triage with the required decision while retaini
     assert.equal(s.fixture.pulls[0].state, "open");
     assert.equal(s.fixture.refs.get(row.branch), head);
     assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: response }, hostHeaders)).status, 409);
+    await s.message({ type: "release", lease_id: response });
+    const waiting = (await s.snapshot()).workflows[0];
+    assert.equal(waiting.feedback, null);
+    assert.match(waiting.blocked_reason, /human Todo reapproval/);
+    const denied = await s.message({ type: "claim", kind: "respond", issue_number: 42, version: waiting.version, branch: waiting.branch });
+    assert.equal(denied.type, "rejected", "Failure and an existing PR do not infer renewed approval");
+    how.state = { ...s.fixture.states.find(state => state.id === "todo") };
+    const renewed = (await s.snapshot()).workflows[0];
+    assert.equal(renewed.phase, "review");
+    assert.equal(renewed.pull_request.number, s.fixture.pulls[0].number);
+    assert.equal(renewed.branch, row.branch);
+    assert.equal(renewed.feedback.kind, "check_failure");
+    const repair = await s.claim("respond");
+    assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: repair }, hostHeaders)).status, 200);
+    assert.equal((await s.action(repair, "responded", { head_oid: head, verified: true, feedback_key: renewed.feedback.key, summary: "Verified after human reapproval" })).status, 200);
+    await s.message({ type: "release", lease_id: repair });
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    s.fixture.pulls[0].state = "closed";
+    const closed = (await s.snapshot()).workflows[0];
+    assert.equal(closed.phase, "blocked");
+    assert.match(closed.blocked_reason, /PR closed without merge/);
   } finally { await s.close(); }
 });
 

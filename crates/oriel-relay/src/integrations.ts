@@ -310,8 +310,8 @@ export class Integrations {
               else if (pr?.merged_at) row.phase = exact("Done", "completed") ? "done" : "merged";
               else if (exact("Done", "completed")) { row.phase = "blocked"; row.blocked_reason = "Done is not backed by an actual merged PR"; }
               else if (issue.state === "closed" || how.state.type === "canceled") row.phase = "closed";
-              else if (exact("Triage", "triage")) row.phase = "triage";
-              else if (exact("Todo", "unstarted") && !pr) row.phase = "approved";
+              else if (exact("Triage", "triage")) { row.phase = "triage"; if (pr?.state === "open") row.blocked_reason = "HOW is in Triage; human Todo reapproval is required before continuing the existing PR"; }
+              else if (exact("Todo", "unstarted") && (!pr || pr.state === "open" && row.canonical_oid)) row.phase = pr ? "review" : "approved";
               else if (row.canonical_oid && (exact("In Progress", "started") || how.state.type === "started" && /review/i.test(how.state.name) && states.filter(state => state.type === "started" && /review/i.test(state.name)).length === 1)) row.phase = pr?.state === "open" ? "review" : pr ? "blocked" : "running";
               else { row.phase = "blocked"; row.blocked_reason = pr?.state === "closed" ? "PR closed without merge" : "Human Todo or a matching sealed In Progress branch is required"; }
               const priorPrefix = `oriel/${how.identifier}-gh-${issue.number}-`;
