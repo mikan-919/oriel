@@ -447,6 +447,14 @@ test("Installation token rejection preserves the connection and never releases p
     assert.equal(denied.data.token, undefined);
     assert.doesNotMatch(JSON.stringify(denied.data), /private-provider-diagnostic|must-not-leak-token/);
     assert.equal((await owner.api("/api/integrations")).data.github.repository_id, fixture.repository.repository_id);
+    for (const status of [500, 502, 503]) {
+      fixture.tokenStatus = status;
+      const unavailable = await daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease.lease_id }, hostHeaders);
+      assert.equal(unavailable.status, 502);
+      assert.match(unavailable.data.error, /GitHub is temporarily unavailable/);
+      assert.doesNotMatch(unavailable.data.error, /Check the GitHub App installation|private-provider-diagnostic|must-not-leak-token/);
+      assert.equal(unavailable.data.token, undefined);
+    }
     fixture.tokenStatus = undefined;
     const restored = await daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease.lease_id }, hostHeaders);
     assert.equal(restored.status, 200);

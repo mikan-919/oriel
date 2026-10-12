@@ -1495,7 +1495,9 @@ export class Integrations {
         body: JSON.stringify({ repository_ids: [repository.repository_id], permissions }), redirect: "manual",
       });
       if (!response.ok) {
-        let hint = response.status === 401
+        let hint = response.status >= 500
+          ? "GitHub is temporarily unavailable; retry without changing the installation permissions."
+          : response.status === 401
           ? "Check GITHUB_APP_ID and the matching GitHub App private key."
           : response.status === 422
             ? `Check the GitHub App permissions requested (${Object.entries(permissions).map(([permission, access]) => `${permission}=${access}`).join(", ")}), then approve updated permissions on this installation.`

@@ -333,7 +333,14 @@ impl Engine {
         self.client.request("turn/start", json!({"threadId":thread_id,"effort":model["effort"],"input":[{"type":"text","text":"Carry out the task in the developer instructions and return the required structured result."}],"outputSchema":schema})).await?;
         let mut text = String::new();
         loop {
-            let event = events.recv().await.context("Codex progress ended")?;
+            let event = events.recv().await.map_err(|error| {
+                if matches!(error, broadcast::error::RecvError::Lagged(_)) {
+                    anyhow!(workflow::Stop::Uncertain)
+                        .context("Codex progress buffer overflowed; local work preserved for retry")
+                } else {
+                    anyhow!(error).context("Codex progress ended")
+                }
+            })?;
             if event["method"] == "item/completed"
                 && event["params"]["item"]["type"] == "agentMessage"
                 && let Some(value) = event["params"]["item"]["text"].as_str()
@@ -455,7 +462,11 @@ impl Engine {
                                     }
                                     process_hub.changed();
                                 }
-                                let _ = events.send(message.clone());
+                                // Completion waits can pause during provider checks. Keep
+                                // streaming deltas on Web/transcript, out of their bounded queue.
+                                if !message["method"].as_str().is_some_and(|method| method.ends_with("Delta") || method.ends_with("/delta")) {
+                                    let _ = events.send(message.clone());
+                                }
                                 if !message["method"].as_str().is_some_and(|m| m.starts_with("account/") || m.starts_with("item/reasoning/")) {
                                     let _ = outgoing.send(json!({"type":"event","engine":engine_id,"message":message}));
                                 }
@@ -908,6 +919,8 @@ mod tests {
               if(m.method==='model/list'){send({id:m.id,result:{initialized}});return;}
               if(m.method==='thread/start'){
                 if(m.params.developerInstructions && m.params.sandbox!==null)process.exit(3);
+                if(m.params.developerInstructions)for(let i=0;i<600;i++)send({method:'item/commandExecution/outputDelta',params:{delta:'compiling\n'}});
+                if(m.params.developerInstructions==='overflow')for(let i=0;i<600;i++)send({method:'configWarning',params:{message:'notice'}});
                 send({id:m.id,result:{thread:{id:'owned'}}});
                 send({id:'approval',method:'item/fileChange/requestApproval',params:{threadId:'owned'}});return;
               }
@@ -972,6 +985,14 @@ mod tests {
                 .unwrap(),
             "{\"summary\":\"done\"}"
         );
+        let overflow = engine
+            .run("overflow", json!({"type":"object"}), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            overflow.downcast_ref::<workflow::Stop>(),
+            Some(workflow::Stop::Uncertain)
+        ));
         engine.stop().await;
         assert!(engine.hub.engines.lock().unwrap().is_empty());
         assert!(
