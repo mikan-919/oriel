@@ -272,7 +272,9 @@ test("Owner progress streams follow multiple devices, admitted task metadata, pa
       devices.find(current => current.device_id === secondDevice)?.state === "idle"), secondDevice);
     assert.equal(released.task, null);
     const replacement = await socket(worker);
-    assert.equal((await bounded(first.ended)).code, 1008);
+    const replaced = await bounded(first.ended);
+    assert.equal(replaced.code, 1008);
+    assert.equal(replaced.reason, "Workflow host replaced by another connection");
     assert.equal((await gitToken(daemon, reclaim.lease_id)).status, 409);
     assert.equal(progressDevice(await observer.snapshot(devices =>
       devices.find(current => current.device_id === device)?.state === "idle")).task, null);

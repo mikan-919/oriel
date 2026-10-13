@@ -512,7 +512,10 @@ impl Session {
                                 }
                             }
                             Message::Ping(bytes) => self.socket.send(Message::Pong(bytes)).await?,
-                            Message::Close(_) => bail!("workflow ownership connection closed during {operation}"),
+                            Message::Close(frame) => {
+                                let _ = self.socket.flush().await;
+                                return Err(crate::relay_closed(frame).context(format!("workflow ownership connection closed during {operation}")));
+                            },
                             _ => bail!("invalid workflow ownership message"),
                         }
                     }
@@ -2708,6 +2711,51 @@ mod tests {
         session.checked().await.unwrap();
         session.socket.close(None).await.unwrap();
         ownership.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn workflow_closed_socket_preserves_reason_and_stops_authority() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert!(matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+            socket
+                .close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: "Workflow host replaced by another connection".into(),
+                }))
+                .await
+                .unwrap();
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap(),
+                Some(Ok(Message::Close(_)))
+            ));
+        });
+        let (socket, _) = connect_async(&url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://127.0.0.1").unwrap(),
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: Some("lease".into()),
+        };
+        let error = session.checked().await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<Stop>(),
+            Some(Stop::Uncertain)
+        ));
+        let detail = format!("{error:#}");
+        assert!(detail.contains("1008"));
+        assert!(detail.contains("Workflow host replaced by another connection"));
+        peer.await.unwrap();
     }
 
     #[tokio::test]

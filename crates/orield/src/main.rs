@@ -203,6 +203,27 @@ fn lock_workflow_identity(path: &Path) -> Result<File> {
     }
 }
 
+fn relay_closed(
+    frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> anyhow::Error {
+    let Some(frame) = frame else {
+        return anyhow!("Relay closed the WebSocket without a status code");
+    };
+    // A peer's arbitrary reason may contain secrets or forged log lines.
+    let reason = match frame.reason.as_str() {
+        "Codex connection ended"
+        | "Workflow connection ended"
+        | "Codex host replaced by another connection"
+        | "Workflow host replaced by another connection"
+        | "Connection deadline unavailable" => frame.reason.as_str(),
+        _ => "reason omitted",
+    };
+    anyhow!(
+        "Relay closed the WebSocket (code {}: {reason})",
+        u16::from(frame.code)
+    )
+}
+
 fn relay_origin(value: &str) -> Result<Url> {
     ensure!(
         !value.contains('\\')
@@ -829,6 +850,34 @@ fn parse_resize(message: &str) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_close_diagnostics_keep_codes_and_known_reasons_without_peer_content() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        for reason in [
+            "Codex host replaced by another connection",
+            "Workflow host replaced by another connection",
+        ] {
+            let error = relay_closed(Some(CloseFrame {
+                code: CloseCode::Policy,
+                reason: reason.into(),
+            }));
+            assert!(error.to_string().contains("1008"));
+            assert!(error.to_string().contains(reason));
+        }
+        let error = relay_closed(Some(CloseFrame {
+            code: CloseCode::Error,
+            reason: "private-token\nforged-log".into(),
+        }));
+        assert!(error.to_string().contains("1011"));
+        assert!(!error.to_string().contains("private-token"));
+        assert!(!error.to_string().contains('\n'));
+        assert!(
+            relay_closed(None)
+                .to_string()
+                .contains("without a status code")
+        );
+    }
     use std::sync::Barrier;
 
     struct TestDirectory(PathBuf);

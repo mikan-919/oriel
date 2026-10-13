@@ -153,7 +153,9 @@ test("Codex host replacement and repository changes invalidate the previous cont
     host.ws.send(JSON.stringify({type:"heartbeat"}));
     await host.read(message => message.type === "heartbeat");
     const replacement = await socket(worker, "host", hostHeaders);
-    assert.equal((await closed(host)).code, 1008);
+    const replaced = await closed(host);
+    assert.equal(replaced.code, 1008);
+    assert.equal(replaced.reason, "Codex host replaced by another connection");
     const browser = await socket(worker, "browser", {Cookie: cookies(owner), Origin: origin});
     await browser.read(message => message.type === "state");
     assert.equal((await daemon.api(`/api/integrations/${device}/repository`, {repository: {owner: "octocat", name: "connected"}}, hostHeaders)).status, 200);

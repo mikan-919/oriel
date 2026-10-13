@@ -64,9 +64,9 @@ export class WorkflowLeases {
     return value?.protocol === PROTOCOL ? value : null;
   }
 
-  private stop(ws: WebSocket): void {
+  private stop(ws: WebSocket, reason = "Workflow connection ended"): void {
     try { ws.serializeAttachment(null); } catch { /* Closed sockets cannot retain grants. */ }
-    try { ws.close(1008, "Workflow connection ended"); } catch { /* Already closed. */ }
+    try { ws.close(1008, reason); } catch { /* Already closed. */ }
   }
 
   private stopAll(): void {
@@ -178,7 +178,7 @@ export class WorkflowLeases {
   connect(device: Device): Response {
     const binding = this.integrations.workflowBinding(device);
     for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
-      if (this.attachment(ws)?.binding.device_id === device.device_id) this.stop(ws);
+      if (this.attachment(ws)?.binding.device_id === device.device_id) this.stop(ws, "Workflow host replaced by another connection");
     }
     const pair = new WebSocketPair();
     const attachment: Attachment = { protocol: PROTOCOL, binding, expires_at: Date.now() + EXPIRY_MS, grant: null,
