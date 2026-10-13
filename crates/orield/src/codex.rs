@@ -657,7 +657,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
         }) {
             Ok(path) => path,
             Err(error) => {
-                eprintln!("Codex control unavailable: {error}");
+                tracing::warn!("Codex control unavailable: {error}");
                 return;
             }
         };
@@ -682,7 +682,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             Ok(())
         })();
         if let Err(error) = prepared {
-            eprintln!("Codex control unavailable: {error}");
+            tracing::warn!("Codex control unavailable: {error}");
             return;
         }
         let auth = workflow::ModelAuth(stable.join(".codex/auth.json"));
@@ -721,7 +721,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             {
                 Ok(engine) => engine,
                 Err(error) => {
-                    eprintln!("Codex control unavailable: {error}");
+                    tracing::warn!("Codex control unavailable: {error}");
                     return;
                 }
             };
@@ -791,12 +791,12 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             if let Err(error) = connected {
                 if let Some(opened) = opened {
                     let silence = last_reply.unwrap_or(opened).elapsed().as_secs();
-                    eprintln!(
+                    tracing::warn!(
                         "Codex Web connection interrupted: {error:#}; connected for {}s, no Relay reply for {silence}s; retrying in 15s",
                         opened.elapsed().as_secs()
                     );
                 } else {
-                    eprintln!("Codex Web connection unavailable: {error:#}; retrying in 15s");
+                    tracing::warn!("Codex Web connection unavailable: {error:#}; retrying in 15s");
                 }
             }
             tokio::select! { _ = tokio::time::sleep(Duration::from_secs(15)) => {}, _ = stopping.changed() => break }

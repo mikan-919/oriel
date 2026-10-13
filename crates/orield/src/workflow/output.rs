@@ -24,7 +24,9 @@ impl Console {
     pub(super) fn warning(&mut self, message: impl AsRef<str>) {
         let message = line(message.as_ref());
         if self.notice != message {
-            event("Warning", &message);
+            // Use the same timestamped stdout writer as Codex diagnostics so
+            // simultaneous disconnects cannot interleave stdout and stderr.
+            tracing::warn!("{message}");
             self.notice = message;
         }
     }
