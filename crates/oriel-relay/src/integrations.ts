@@ -100,8 +100,7 @@ export class Integrations {
   }
 
   workflowBinding(device: Device): WorkflowBinding {
-    this.liveDevice(device);
-    const current = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device.device_id).toArray()[0];
+    const current = this.liveDevice(device);
     const github = this.row(device.user_id, "github");
     const linear = this.row(device.user_id, "linear");
     if (!github?.active || !github.target || !linear?.active || !linear.target) this.auth.fail(409, "Connect GitHub repository and Linear team in Web");
@@ -117,7 +116,6 @@ export class Integrations {
 
   private async workflowContext(device: Device, check: () => void, write = false): Promise<WorkflowContext> {
     const binding = this.workflowBinding(device);
-    const github = this.row(device.user_id, "github")!;
     const linear = this.row(device.user_id, "linear")!;
     const guard = () => {
       check();
@@ -127,8 +125,9 @@ export class Integrations {
     const credential = await this.credential(linear, "active", guard);
     const live = () => {
       guard();
-      if (this.row(device.user_id, "github")?.generation !== github.generation) this.auth.fail(409, "GitHub connection changed");
-      this.current(linear, "active", guard);
+      // guard already checked both provider generations synchronously. The
+      // credential comparison still needs a fresh row; no await separates it.
+      this.current(linear, "active", () => {});
     };
     live();
     const repository = token.repository;
@@ -1139,9 +1138,10 @@ export class Integrations {
     return { status, ...(step ? { step } : {}), ...(error ? { error } : {}) };
   }
 
-  private liveDevice(device: Device): void {
+  private liveDevice(device: Device): Device {
     const current = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device.device_id).toArray()[0];
     if (!current || current.user_id !== device.user_id || current.host_hash !== device.host_hash) this.auth.fail(403, "Device ownership changed");
+    return current;
   }
 
   private current(connection: Connection, slot: "active" | "pending", check: () => void): Connection {

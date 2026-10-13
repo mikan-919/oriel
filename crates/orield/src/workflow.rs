@@ -33,6 +33,8 @@ use crate::{
     workflow_git as git,
 };
 
+const SCAN_INTERVAL: Duration = Duration::from_secs(60);
+
 #[derive(Clone, Deserialize)]
 struct What {
     number: u64,
@@ -475,6 +477,7 @@ impl Session {
                     message = self.socket.next() => {
                         match message.context("workflow ownership connection ended")?? {
                             Message::Text(text) => {
+                                if text.as_str() == "oriel:pong" { continue; }
                                 let value: Value = serde_json::from_str(&text)?;
                                 if value["request_id"] == id {
                                     if value["type"] == "error" {
@@ -654,6 +657,36 @@ impl Session {
         } else {
             error
         }
+    }
+
+    async fn wait(&mut self, duration: Duration) -> Result<()> {
+        let end = tokio::time::Instant::now() + duration;
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let mut ping = tokio::time::interval(Duration::from_secs(10));
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let waiting = async {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(end) => return Ok(()),
+                    _ = tokio::time::sleep_until(deadline) => bail!("workflow Relay keepalive timed out"),
+                    _ = ping.tick() => self.socket.send(Message::Text("oriel:ping".into())).await?,
+                    frame = self.socket.next() => match frame.context("workflow ownership connection ended while waiting")?? {
+                        Message::Text(text) if text.as_str() == "oriel:pong" => deadline = tokio::time::Instant::now() + Duration::from_secs(45),
+                        Message::Ping(bytes) => self.socket.send(Message::Pong(bytes)).await?,
+                        Message::Close(frame) => { let _ = self.socket.flush().await; return Err(crate::relay_closed(frame)); },
+                        _ => bail!("unexpected workflow message while waiting"),
+                    },
+                    _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
+                }
+            }
+        }.await;
+        waiting.map_err(|error: anyhow::Error| {
+            if error.downcast_ref::<Stop>().is_some() {
+                error
+            } else {
+                error.context(Stop::Uncertain)
+            }
+        })
     }
     async fn guard(&mut self, guard: &Guard) -> Result<Snapshot> {
         self.guard_with_child(guard, false).await
@@ -2227,7 +2260,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         if once {
             "Single scan"
         } else {
-            "Watching every 15s · Ctrl-C to stop"
+            "Watching every 60s · Ctrl-C to stop"
         },
     );
     event(
@@ -2248,7 +2281,10 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         };
         match connection {
             Ok(mut session) => loop {
-                let result = scan(&mut session, &root, &mut suppressed, &mut console).await;
+                let mut result = scan(&mut session, &root, &mut suppressed, &mut console).await;
+                if result.is_ok() && !once {
+                    result = session.wait(SCAN_INTERVAL).await;
+                }
                 if once {
                     return match result {
                         Err(error)
@@ -2281,10 +2317,6 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
                         console.warning(format!("Connection interrupted: {error:#}; retrying in 15s. Local work preserved."));
                     }
                     break;
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(15)) => {},
-                    _ = tokio::signal::ctrl_c() => { let _ = session.socket.close(None).await; return Ok(()); },
                 }
             },
             Err(error) => {
@@ -2711,6 +2743,73 @@ mod tests {
         session.checked().await.unwrap();
         session.socket.close(None).await.unwrap();
         ownership.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_workflow_uses_runtime_pongs_without_discovery_or_lease_approval() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut pings = 0;
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                if text.as_str() == "oriel:ping" {
+                    pings += 1;
+                    socket
+                        .send(Message::Text("oriel:pong".into()))
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(
+                        pings >= 5,
+                        "Idle connection must survive its original 45-second expiry"
+                    );
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(
+                        request["type"], "heartbeat",
+                        "Waiting cannot discover or claim work"
+                    );
+                    // A pong already in transit at the end of waiting must not
+                    // corrupt the next correlated control response.
+                    socket
+                        .send(Message::Text("oriel:pong".into()))
+                        .await
+                        .unwrap();
+                    socket
+                        .send(Message::Text(
+                            json!({"type":"heartbeat", "request_id":request["request_id"]})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
+            panic!("Idle connection ended before the next control request");
+        });
+        let (socket, _) = connect_async(&url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://127.0.0.1").unwrap(),
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: None,
+        };
+        session.wait(Duration::from_secs(46)).await.unwrap();
+        assert!(
+            session.lease.is_none(),
+            "Automatic pongs cannot grant a source-writing lease"
+        );
+        session
+            .exchange(json!({"type":"heartbeat"}), "heartbeat")
+            .await
+            .unwrap();
+        peer.await.unwrap();
     }
 
     #[tokio::test]

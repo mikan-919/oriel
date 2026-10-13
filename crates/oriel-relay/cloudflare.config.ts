@@ -37,8 +37,8 @@ import {
 // /api/workflow-progress/connect is a same-Origin, Passkey-session read-only socket;
 // its sole client frame, "ready", requests a fresh snapshot and grants no authority.
 // Host stages use the existing leased control socket; task identity comes from native
-// admission facts, not model output. Snapshots are pushed on changes and at least
-// every 10s while watched; logout/expiry/revocation stop that session's delivery.
+// admission facts, not model output. Snapshots are pushed only on changes;
+// runtime pongs maintain liveness; logout/expiry/revocation stop delivery.
 // Control loss clears running claims. No progress history is stored; snapshots never
 // include prompts, stdout or tokens. Workflow offline is not terminal-host availability.
 // Codex page: run `orield codex` for read-only conversation/review, or `orield workflow`
@@ -118,6 +118,11 @@ import {
 // command is also accepted for the connected app.
 // The workflow poll reads profile links and explicit @oriel commands from Markdown;
 // AgentSessionEvent webhooks are not required or enabled by this integration.
+// Idle full discovery runs every 60s. Runtime keepalive keeps the control socket
+// live without database reads; active source-writing checks remain every 5s.
+// Live local authority checks use fresh SQL rows, without duplicate synchronous
+// queries. No approval facts are cached. Daily read quota failures return 503
+// with a stable code, Retry-After and the next 00:00 UTC reset time.
 // Enable the selected team's Team Settings > Triage before proposing HOWs.
 // Required native states: Triage (triage), Todo (unstarted), In Progress (started),
 // Done (completed). Oriel never substitutes Todo when Triage is unavailable.

@@ -11,6 +11,7 @@ import { decodeClientDataJSON } from "@simplewebauthn/server/helpers";
 import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 import { CodexConnections } from "./codex";
+import { quotaResponse } from "./quota";
 
 export interface AccountEnv extends IntegrationEnv { RELAY: DurableObjectNamespace; }
 
@@ -463,6 +464,12 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         }
       }
     } catch (error) {
+      const limited = quotaResponse(error);
+      if (limited) {
+        // No SQL authority can be established while reads are unavailable.
+        for (const ws of this.ctx.getWebSockets()) try { ws.close(1013, "Daily database read limit exceeded"); } catch { /* Already closed. */ }
+        return limited;
+      }
       if (error instanceof HttpError || error instanceof WorkflowLeaseError) {
         response = json({ error: error.message }, error.status);
       } else {
