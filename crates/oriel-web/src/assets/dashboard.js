@@ -355,6 +355,7 @@ function retryProgress(epoch) {
 
 function staleProgress() {
     if (!user) return;
+    workflowPollInterval = 60000;
     clearTimeout(progressExpiry);
     clearInterval(progressKeepalive);
     const connection = progressSocket;
@@ -382,7 +383,7 @@ function connectProgress() {
     const current = () => currentAccount(epoch) && progressSocket === connection;
     connection.addEventListener("open", () => {
         if (!current()) return;
-        connection.send("ready");
+        connection.send("ready:changes");
         progressKeepalive = setInterval(() => {
             if (current() && connection.readyState === WebSocket.OPEN) connection.send("oriel:ping");
         }, 15000);
@@ -406,7 +407,12 @@ function connectProgress() {
                 return;
             }
             const frame = JSON.parse(event.data);
+            if (frame.type === "workflow-changed") {
+                scheduleWorkflowRefresh();
+                return;
+            }
             if (frame.type !== "workflow-progress" || !Array.isArray(frame.devices)) throw new Error("Invalid progress snapshot");
+            workflowPollInterval = frame.poll_after_seconds === 900 ? 900000 : 60000;
             const snapshot = new Map();
             for (const device of frame.devices) {
                 if (typeof device.device_id !== "string" || !["offline", "idle", "running", "paused"].includes(device.state)) {
@@ -1090,18 +1096,33 @@ document.addEventListener("visibilitychange", () => {
         scheduleDevices();
     }
 });
-setInterval(async () => {
+let workflowPollInterval = 60000;
+let workflowRefreshTimer;
+let lastWorkflowPoll = 0;
+let workflowDirty = false;
+function scheduleWorkflowRefresh() {
+    // Coalesce provider bursts without storing event payloads or polling SQL.
+    clearTimeout(workflowRefreshTimer);
+    workflowDirty = true;
+    workflowRefreshTimer = setTimeout(() => pollWorkflow(true), 1000);
+}
+async function pollWorkflow(changed = false) {
     if (!user || busy || workflowRefreshing || !repositoryDeviceId || dashboard.hidden || document.hidden) return;
+    if (!changed && !workflowDirty && Date.now() - lastWorkflowPoll < workflowPollInterval) return;
     const epoch = accountEpoch;
     workflowRefreshing = true;
+    workflowDirty = false;
+    lastWorkflowPoll = Date.now();
     try {
         await refreshWorkflow();
     } catch (error) {
         if (currentAccount(epoch)) status.textContent = errorText(error);
     } finally {
         workflowRefreshing = false;
+        if (workflowDirty) scheduleWorkflowRefresh();
     }
-}, 60000);
+}
+setInterval(() => pollWorkflow(), 60000);
 
 function scheduleDevices() {
     clearTimeout(deviceTimer);
@@ -1112,7 +1133,7 @@ function scheduleDevices() {
             try { await refreshDevices(); } catch (_) {}
         }
         if (currentAccount(epoch)) scheduleDevices();
-    }, 60000);
+    }, 300000);
 }
 render();
 perform(async () => {

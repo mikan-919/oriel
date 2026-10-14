@@ -19,8 +19,8 @@ export class CodexConnections {
     private sessionExpiry: (hash: string, user: string) => number | null, private schedule: () => void) {}
 
   owns(ws: WebSocket): boolean { return (ws.deserializeAttachment() as Attachment | null)?.protocol === PROTOCOL; }
-  private close(ws: WebSocket): void {
-    try { ws.close(1008, "Codex connection ended"); } catch { /* Already closed. */ }
+  private close(ws: WebSocket, reason = "Codex connection ended"): void {
+    try { ws.close(1008, reason); } catch { /* Already closed. */ }
   }
   private live(ws: WebSocket): Attachment {
     const a = ws.deserializeAttachment() as Attachment | null;
@@ -41,7 +41,7 @@ export class CodexConnections {
     const role = session ? "browser" : "host";
     if (role === "host") for (const ws of this.sockets()) {
       const a = ws.deserializeAttachment() as Attachment | null;
-      if (a?.role === "host" && a.device_id === device.device_id) this.close(ws);
+      if (a?.role === "host" && a.device_id === device.device_id) this.close(ws, "Codex host replaced by another connection");
     }
     const expiresAt = session ? this.sessionExpiry(session.hash, session.user.id) : Date.now() + 45_000;
     if (!expiresAt || expiresAt <= Date.now()) throw new Error("Session expired");

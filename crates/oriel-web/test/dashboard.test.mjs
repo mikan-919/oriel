@@ -64,7 +64,7 @@ test('background polling stops for hidden tabs and resumes device discovery when
     currentAccount: epoch => !!c.user && epoch === c.accountEpoch,
     refreshDevices: async () => {deviceRequests++;}, refreshWorkflow: async () => {workflowRequests++;},
     setInterval(callback, delay) {assert.equal(delay, 60000); periodic = callback;},
-    setTimeout(callback, delay) {assert.equal(delay, 60000); timer = callback; return 1;}, clearTimeout() {},
+    setTimeout(callback, delay) {assert.ok([1000, 300000].includes(delay)); timer = callback; return 1;}, clearTimeout() {},
     staleProgress() {throw new Error('Unexpected progress expiry');}, errorText: String});
   vm.runInContext(source.slice(source.indexOf('document.addEventListener("visibilitychange"'),
     source.indexOf('\nrender();\nperform(async () =>')), c);
@@ -73,11 +73,22 @@ test('background polling stops for hidden tabs and resumes device discovery when
   await periodic();
   assert.equal(deviceRequests, 1);
   assert.equal(workflowRequests, 1);
+  vm.runInContext('workflowPollInterval = 900000', c);
+  await periodic();
+  assert.equal(workflowRequests, 1, 'Live event mode avoids repeated full discovery');
+  c.scheduleWorkflowRefresh();
+  c.busy = true;
+  await timer();
+  assert.equal(workflowRequests, 1);
+  c.busy = false;
+  await periodic();
+  assert.equal(workflowRequests, 2, 'A change received while busy remains pending');
+  c.scheduleDevices();
   c.document.hidden = true;
   await timer();
   await periodic();
   assert.equal(deviceRequests, 1);
-  assert.equal(workflowRequests, 1);
+  assert.equal(workflowRequests, 2);
   c.document.hidden = false;
   visibility();
   assert.equal(deviceRequests, 2, 'Returning to the tab refreshes devices immediately');

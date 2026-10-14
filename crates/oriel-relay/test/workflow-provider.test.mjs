@@ -4,9 +4,9 @@ import test from "node:test";
 import { client, connect, device, hostHeaders, origin, pair, runtime } from "./helpers.mjs";
 import { workflowFixture } from "./workflow-fixture.mjs";
 
-async function setup() {
+async function setup(measureSql = false) {
   const fixture = workflowFixture();
-  const worker = await runtime(fixture.env, request => fixture.fetch(request));
+  const worker = await runtime(fixture.env, request => fixture.fetch(request), measureSql);
   const { owner, daemon } = await pair(worker);
   await connect(owner, fixture, "github"); await connect(owner, fixture, "linear");
   assert.equal((await daemon.api(`/api/integrations/${device}/repository`, { repository: fixture.repository }, hostHeaders)).status, 200);
@@ -55,6 +55,70 @@ test("discovery failures identify the provider without exposing upstream bodies 
     }
     assert.equal((await s.snapshot()).workflows.find(row => row.issue.number === 42).phase, "approved");
   } finally { await s.close(); }
+});
+
+test("Discovery overlaps independent reads and bounded HOW and issue batches without dropping facts", {timeout:10000}, async () => {
+  const s = await setup();
+  const releases = [];
+  let timer;
+  try {
+    for (let number = 43; number < 50; number++) {
+      s.fixture.issues.push({...s.fixture.issues[0],number,node_id:`I_${number}`,html_url:`https://github.com/octocat/connected/issues/${number}`});
+    }
+    for (let number = 42; number < 46; number++) {
+      const how = s.fixture.addHow("Todo", number);
+      how.id = `11111111-1111-5111-a111-${String(number).padStart(12,"0")}`;
+      how.identifier = `ENG-${number}`;
+    }
+    const gate = () => {let release;const ready = new Promise(resolve=>{release=resolve;});releases.push(release);return {ready,release};};
+    const reference = gate(), how = gate(), comment = gate();
+    let howReads = 0, commentReads = 0;
+    s.fixture.holdReads = async ({operation}) => {
+      if(operation==="ref") await reference.ready;
+      if(operation==="whats") reference.release();
+      if(operation==="how") {if(++howReads===1) await how.ready;else how.release();}
+      if(operation==="pr-comments") {if(++commentReads===1) await comment.ready;else comment.release();}
+    };
+    const snapshot = await Promise.race([s.snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("Independent discovery reads were serialized")),3000);})]);
+    assert.deepEqual(snapshot.workflows.map(row=>row.issue.number), [42,43,44,45,46,47,48,49]);
+    assert.equal(howReads,8); // Four HOWs and their four discussion collections.
+    assert.equal(commentReads,8);
+    for(const row of snapshot.workflows.slice(0,4)) assert.equal(row.phase,"approved");
+  } finally {
+    clearTimeout(timer);s.fixture.holdReads=undefined;for(const release of releases)release();await s.close();
+  }
+});
+
+test("Read tokens are reused within expiry while provider facts and access generations stay live", async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow("Todo");
+    await s.snapshot();
+    const minted = s.fixture.grants.length;
+    s.fixture.issues[0].title = "Human changed the WHAT";
+    assert.equal((await s.snapshot()).workflows[0].issue.title, "Human changed the WHAT");
+    assert.equal(s.fixture.grants.length, minted, "Fresh facts must not mint a new read token each time");
+    s.fixture.failures.set("repository",503);
+    assert.equal((await s.daemon.api(`/api/workflows/${device}`,undefined,hostHeaders)).status,502);
+    s.fixture.failures.delete("repository");
+    await connect(s.owner,s.fixture,"github");
+    await s.snapshot();
+    assert.equal(s.fixture.grants.length,minted+1,"A new authorization generation cannot reuse the old token");
+    const provider = s.fixture.fetch.bind(s.fixture);
+    s.fixture.fetch = async request => {
+      const response = await provider(request);
+      if (new URL(request.url).pathname.endsWith("/access_tokens") &&
+          (await request.clone().json()).permissions.issues === "read") {
+        return Response.json({...await response.json(),expires_at:new Date(Date.now()+60000).toISOString()});
+      }
+      return response;
+    };
+    await connect(s.owner,s.fixture,"github");
+    await s.snapshot();
+    const shortLived = s.fixture.grants.length;
+    await s.snapshot();
+    assert.equal(s.fixture.grants.length,shortLived+1,"Tokens near expiry must be replaced");
+  } finally {await s.close();}
 });
 
 test("HOW planning waits for native Triage and resumes when the team enables it", async () => {
@@ -501,6 +565,15 @@ test("submitted PR reviews and inline replies resume while pending reviews and e
     const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" }); assert.equal(published.status, 200);
     await s.message({ type: "release", lease_id: implementation });
     const pr = published.data.pull_request;
+    let release, timer;
+    const pending = new Promise(resolve => { release = resolve; });
+    s.fixture.holdReads = async ({operation}) => {
+      if(operation === "reviews") await pending;
+      if(operation === "review-comments") release();
+    };
+    try {
+      await Promise.race([s.snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("PR review reads were serialized")),3000);})]);
+    } finally {clearTimeout(timer);release();s.fixture.holdReads=undefined;}
     const reviews = [
       { id: 0, state: "CHANGES_REQUESTED", body: "Superseded request", submitted_at: "2025-12-31T23:59:59Z", user: { login: "reviewer" } },
       { id: 1, state: "COMMENTED", body: "Please explain this boundary.", submitted_at: "2026-01-01T00:00:00Z", user: { login: "reviewer" } },
@@ -801,5 +874,44 @@ test("request deletion during final creation reads prevents initial HOW creation
     const result = await s.action(lease, "proposal", { title: "HOW", description: "Plan for review.", summary: "Prepared the HOW for review." });
     assert.equal(result.status, 409);
     assert.deepEqual(s.fixture.linears, []);
+  } finally { await s.close(); }
+});
+
+test("Leased discovery reads only the current WHAT while still checking approval and ambiguous links", async () => {
+  const s = await setup(true);
+  try {
+    const namespace = await s.worker.getDurableObjectNamespace("ACCOUNTS");
+    const costs = () => namespace.get(namespace.idFromName("accounts")).costForTest();
+    s.fixture.addHow("Todo");
+    for (let number = 43; number < 90; number++) s.fixture.issues.push({...s.fixture.issues[0], number, node_id:`I_${number}`, html_url:`https://github.com/octocat/connected/issues/${number}`});
+    s.fixture.calls.length = 0;
+    const beforeFull = await costs();
+    const full = await s.snapshot();
+    const afterFull = await costs();
+    const fullComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
+    assert.equal(full.workflows.length, 48);
+    const lease_id = await s.claim("implement");
+    s.fixture.calls.length = 0;
+    const beforeScoped = await costs();
+    const current = await s.message({type:"snapshot", lease_id});
+    const afterScoped = await costs();
+    const fullReads = afterFull.reads - beforeFull.reads, scopedReads = afterScoped.reads - beforeScoped.reads;
+    assert.ok(scopedReads < fullReads / 2, JSON.stringify({fullReads, scopedReads}));
+    console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, scopedReads}));
+    assert.equal(current.type, "snapshot", JSON.stringify(current));
+    assert.deepEqual(current.snapshot.workflows.map(row => row.issue.number), [42]);
+    assert.equal(current.snapshot.workflows[0].phase, "approved");
+    const scopedComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
+    assert.equal(scopedComments, 1);
+    assert.equal(fullComments, 48);
+    assert.equal(s.fixture.calls.some(call => call.operation === "whats"), false);
+    s.fixture.linears[0].state = {...s.fixture.states.find(state => state.name === "Triage")};
+    assert.equal((await s.message({type:"snapshot", lease_id})).snapshot.workflows[0].phase, "triage");
+    s.fixture.addHow("Todo").id = "22222222-2222-4222-a222-222222222222";
+    const duplicate = (await s.message({type:"snapshot", lease_id})).snapshot.workflows[0];
+    assert.equal(duplicate.phase, "blocked");
+    assert.match(duplicate.blocked_reason, /Multiple Linear/);
+    s.fixture.issues = s.fixture.issues.filter(issue => issue.number !== 42);
+    assert.deepEqual((await s.message({type:"snapshot", lease_id})).snapshot.workflows, []);
   } finally { await s.close(); }
 });

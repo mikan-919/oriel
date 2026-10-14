@@ -217,6 +217,28 @@ fn lock_workflow_identity(path: &Path) -> Result<WorkflowIdentityLock> {
     }
 }
 
+fn relay_closed(
+    frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> anyhow::Error {
+    let Some(frame) = frame else {
+        return anyhow!("Relay closed the WebSocket without a status code");
+    };
+    // A peer's arbitrary reason may contain secrets or forged log lines.
+    let reason = match frame.reason.as_str() {
+        "Codex connection ended"
+        | "Workflow connection ended"
+        | "Codex host replaced by another connection"
+        | "Workflow host replaced by another connection"
+        | "Daily database read limit exceeded"
+        | "Connection deadline unavailable" => frame.reason.as_str(),
+        _ => "reason omitted",
+    };
+    anyhow!(
+        "Relay closed the WebSocket (code {}: {reason})",
+        u16::from(frame.code)
+    )
+}
+
 fn relay_origin(value: &str) -> Result<Url> {
     ensure!(
         !value.contains('\\')
@@ -427,11 +449,9 @@ async fn pair_device(
     let status_url = origin.join(&format!("/api/pair/{}/status", identity.device_id))?;
     loop {
         ensure!(unix_seconds()? < expires_at, "pairing URL has expired");
-        let status: PairStatus = client
-            .get(status_url.clone())
-            .send()
+        let response = client.get(status_url.clone()).send().await?;
+        let status: PairStatus = pairing_response(response)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("invalid pairing status response")?;
@@ -449,12 +469,13 @@ async fn pair_device(
                     approved,
                     "pairing cancelled; local account confirmation was not granted"
                 );
-                let confirmed: PairStatus = client
+                let response = client
                     .post(origin.join(&format!("/api/pair/{}/confirm", identity.device_id))?)
                     .json(&serde_json::json!({ "user_id": user_id }))
                     .send()
+                    .await?;
+                let confirmed: PairStatus = pairing_response(response)
                     .await?
-                    .error_for_status()?
                     .json()
                     .await
                     .context("invalid pairing confirmation response")?;
@@ -480,14 +501,15 @@ async fn ensure_paired(origin: &Url, identity: &DeviceIdentity) -> Result<()> {
         .timeout(Duration::from_secs(15))
         .build()
         .context("failed to initialize pairing HTTP client")?;
-    let start: PairStart = client
+    let response = client
         .post(origin.join("/api/pair/start")?)
         .json(
             &serde_json::json!({ "device_id": identity.device_id, "name": device_name(identity) }),
         )
         .send()
+        .await?;
+    let start: PairStart = pairing_response(response)
         .await?
-        .error_for_status()?
         .json()
         .await
         .context("invalid pairing start response")?;
@@ -506,6 +528,27 @@ async fn ensure_paired(origin: &Url, identity: &DeviceIdentity) -> Result<()> {
         }
     }
     result
+}
+
+async fn pairing_response(mut response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if body.len() + chunk.len() > 4096 {
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .is_some_and(|value| value["code"] == "durable_objects_daily_read_limit")
+        {
+            bail!(
+                "Relay database daily read limit exceeded; the Cloudflare free limit resets at 00:00 UTC. Existing device registration is preserved; retry after the reset."
+            );
+        }
+    }
+    response.error_for_status().map_err(Into::into)
 }
 
 struct Terminal {
@@ -843,6 +886,65 @@ fn parse_resize(message: &str) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_close_diagnostics_keep_codes_and_known_reasons_without_peer_content() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        for reason in [
+            "Codex host replaced by another connection",
+            "Workflow host replaced by another connection",
+        ] {
+            let error = relay_closed(Some(CloseFrame {
+                code: CloseCode::Policy,
+                reason: reason.into(),
+            }));
+            assert!(error.to_string().contains("1008"));
+            assert!(error.to_string().contains(reason));
+        }
+        let error = relay_closed(Some(CloseFrame {
+            code: CloseCode::Error,
+            reason: "private-token\nforged-log".into(),
+        }));
+        assert!(error.to_string().contains("1011"));
+        assert!(!error.to_string().contains("private-token"));
+        assert!(!error.to_string().contains('\n'));
+        assert!(
+            relay_closed(None)
+                .to_string()
+                .contains("without a status code")
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_quota_error_preserves_registration_and_omits_untrusted_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for body in [
+                r#"{"code":"durable_objects_daily_read_limit","error":"private-token\nforged-log"}"#,
+                r#"{"error":"private-token"}"#,
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                socket.write_all(format!("HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::new();
+        let error = pairing_response(client.get(&url).send().await.unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("00:00 UTC"));
+        assert!(error.to_string().contains("registration is preserved"));
+        assert!(!error.to_string().contains("private-token"));
+        let error = pairing_response(client.get(&url).send().await.unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("503"));
+        assert!(!error.to_string().contains("private-token"));
+        server.await.unwrap();
+    }
     use std::sync::Barrier;
 
     struct TestDirectory(PathBuf);

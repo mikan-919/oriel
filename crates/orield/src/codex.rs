@@ -657,7 +657,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
         }) {
             Ok(path) => path,
             Err(error) => {
-                eprintln!("Codex control unavailable: {error}");
+                tracing::warn!("Codex control unavailable: {error}");
                 return;
             }
         };
@@ -682,7 +682,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             Ok(())
         })();
         if let Err(error) = prepared {
-            eprintln!("Codex control unavailable: {error}");
+            tracing::warn!("Codex control unavailable: {error}");
             return;
         }
         let auth = workflow::ModelAuth(stable.join(".codex/auth.json"));
@@ -721,12 +721,14 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             {
                 Ok(engine) => engine,
                 Err(error) => {
-                    eprintln!("Codex control unavailable: {error}");
+                    tracing::warn!("Codex control unavailable: {error}");
                     return;
                 }
             };
         let mut events = hub.events.subscribe();
         loop {
+            let mut opened = None;
+            let mut last_reply = None;
             let connected = async {
                 let mut url = origin.join(&format!("/api/codex/{}/host", identity.device_id))?;
                 url.set_scheme(if origin.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| anyhow!("invalid Relay URL"))?;
@@ -734,6 +736,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", identity.host_token))?;
                 token.set_sensitive(true); request.headers_mut().insert("Authorization", token);
                 let (mut socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+                opened = Some(tokio::time::Instant::now());
                 socket.send(Message::Text(hub.state().to_string().into())).await?;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
                 let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
@@ -750,6 +753,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                         frame = socket.next() => {
                             match frame.context("Codex Relay ended")?? {
                                 Message::Text(text) => {
+                                    last_reply = Some(tokio::time::Instant::now());
                                     deadline = tokio::time::Instant::now() + Duration::from_secs(45);
                                     if text.as_str() == KEEPALIVE_PONG { continue; }
                                     ensure!(text.len() <= MAX_MESSAGE, "Relay message too large");
@@ -769,7 +773,11 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                                     }
                                 },
                                 Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                                Message::Close(_) => break,
+                                Message::Close(frame) => {
+                                    // Receiving Close queues its reply; send it before dropping TCP.
+                                    let _ = socket.flush().await;
+                                    return Err(crate::relay_closed(frame));
+                                },
                                 _ => {},
                             }
                         }
@@ -780,8 +788,16 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             if *stopping.borrow() || engine.client.sender.is_closed() {
                 break;
             }
-            if connected.is_err() {
-                eprintln!("Codex Web connection interrupted; retrying in 15s");
+            if let Err(error) = connected {
+                if let Some(opened) = opened {
+                    let silence = last_reply.unwrap_or(opened).elapsed().as_secs();
+                    tracing::warn!(
+                        "Codex Web connection interrupted: {error:#}; connected for {}s, no Relay reply for {silence}s; retrying in 15s",
+                        opened.elapsed().as_secs()
+                    );
+                } else {
+                    tracing::warn!("Codex Web connection unavailable: {error:#}; retrying in 15s");
+                }
             }
             tokio::select! { _ = tokio::time::sleep(Duration::from_secs(15)) => {}, _ = stopping.changed() => break }
         }

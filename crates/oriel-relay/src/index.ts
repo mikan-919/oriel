@@ -1,5 +1,7 @@
 export { RelayDevice } from "../build/index.js";
 export { AccountRegistry } from "./account";
+import { quotaResponse } from "./quota";
+import { workflowChange, type WebhookEnv } from "./webhook";
 
 interface RelayResponse extends Response {
   webSocket: WebSocket | null;
@@ -10,7 +12,7 @@ interface ObjectNamespace {
   get(id: { toString(): string }): { fetch(request: Request): Promise<RelayResponse> };
 }
 
-interface Env {
+interface Env extends WebhookEnv {
   ACCOUNTS: ObjectNamespace;
   RELAY: ObjectNamespace;
 }
@@ -18,8 +20,18 @@ interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Preserve the original provider URLs as well as the /api routes.
+    const hook = /^(?:\/api)?\/webhooks\/(github|linear)$/.exec(url.pathname);
+    if (hook) {
+      const change = await workflowChange(request, env, hook[1] as "github" | "linear");
+      if (change instanceof Response) return change;
+      return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request("https://internal/workflow-change", {
+        method:"POST", body:JSON.stringify(change),
+      })).catch(error => quotaResponse(error) ?? Promise.reject(error));
+    }
     if (url.pathname.startsWith("/api/")) {
-      return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request);
+      return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request)
+        .catch(error => quotaResponse(error) ?? Promise.reject(error));
     }
     const route = /^\/device\/([0-9a-f]{32})\/(host|client)$/.exec(url.pathname);
     if (!route) return new Response("Not Found", { status: 404 });
@@ -28,7 +40,8 @@ export default {
       return new Response("Expected WebSocket", { status: 426 });
     }
     if (url.search) return new Response("Query parameters are not allowed", { status: 400 });
-    const authorized = await env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request);
+    const authorized = await env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request)
+      .catch(error => quotaResponse(error) ?? Promise.reject(error));
     if (authorized.status !== 200) return authorized;
     // The frame object sees no browser/daemon credentials or account metadata.
     const headers = new Headers(request.headers);
