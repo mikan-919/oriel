@@ -406,6 +406,7 @@ struct Session {
     repository: Repository,
     lease: Option<String>,
     changed: bool,
+    exchange_pending: bool,
     scan_interval: Duration,
 }
 impl Session {
@@ -452,6 +453,7 @@ impl Session {
             repository,
             lease: None,
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
         })
     }
@@ -463,6 +465,7 @@ impl Session {
         let provider_read = matches!(operation.as_str(), "claim" | "snapshot");
         let wait = Duration::from_secs(if provider_read { 90 } else { 8 });
         request["request_id"] = json!(id);
+        self.exchange_pending = true;
         let response = async {
             self.socket
                 .send(Message::Text(request.to_string().into()))
@@ -541,7 +544,7 @@ impl Session {
                 }
             }
         };
-        tokio::time::timeout(wait, response)
+        let result = tokio::time::timeout(wait, response)
             .await
             .map_err(|_| {
                 anyhow!(
@@ -556,7 +559,23 @@ impl Session {
                 } else {
                     error.context(Stop::Uncertain)
                 }
-            })
+            });
+        if result.is_ok() {
+            self.exchange_pending = false;
+        }
+        result
+    }
+
+    async fn shutdown(&mut self) {
+        // A cancelled exchange can still receive a reply (or a claim grant).
+        // Never reuse that stream for release; disconnect to expire ownership.
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            if !self.exchange_pending {
+                let _ = self.release().await;
+            }
+            let _ = self.socket.close(None).await;
+        })
+        .await;
     }
     async fn progress(&mut self, stage: &'static str) -> Result<()> {
         let mut request = json!({"type":"progress", "stage":stage});
@@ -2147,11 +2166,100 @@ async fn read_only(
     Ok(())
 }
 
+fn interrupted(result: &Result<()>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|error| matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)))
+}
+
+type Work = for<'a> fn(
+    &'a mut Session,
+    &'a Path,
+    &'a Snapshot,
+    &'a Row,
+    &'a str,
+) -> futures_util::future::LocalBoxFuture<'a, Result<()>>;
+
+// Success means the caller must exit, including in continuous mode.
+async fn drive_session(
+    session: &mut Session,
+    root: &Path,
+    suppressed: &mut HashMap<(u64, String, String), String>,
+    console: &mut Console,
+    once: bool,
+    execute: Work,
+) -> Result<()> {
+    loop {
+        let mut result = scan(session, root, suppressed, console, execute).await;
+        if result.is_ok() && !once {
+            result = session.wait(session.scan_interval).await;
+            if interrupted(&result) {
+                session.shutdown().await;
+            }
+        }
+        if interrupted(&result) {
+            return Ok(());
+        }
+        if once {
+            session.shutdown().await;
+            return result;
+        }
+        result?;
+    }
+}
+
+fn execute_work<'a>(
+    session: &'a mut Session,
+    root: &'a Path,
+    snapshot: &'a Snapshot,
+    row: &'a Row,
+    kind: &'a str,
+) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+    Box::pin(async move {
+        match kind {
+            "plan" => read_only(session, root, snapshot, row, false).await,
+            "discuss" => read_only(session, root, snapshot, row, true).await,
+            "implement" => implement(session, root, snapshot, row, false).await,
+            "respond" => implement(session, root, snapshot, row, true).await,
+            "reconcile"
+                if row.recovery.as_deref() == Some("invalidate") && row.phase == "blocked" =>
+            {
+                session.action("invalidate", json!({})).await.map(|_| {
+                    event(
+                        "Approval",
+                        "Revoked; HOW returned to Triage for human approval",
+                    )
+                })
+            }
+            "reconcile" => session
+                .action("done", json!({}))
+                .await
+                .map(|_| event("Done", "Human merge confirmed; Linear updated")),
+            _ => unreachable!(),
+        }
+    })
+}
+
 async fn scan(
     session: &mut Session,
     root: &Path,
     suppressed: &mut HashMap<(u64, String, String), String>,
     console: &mut Console,
+    execute: Work,
+) -> Result<()> {
+    let result = scan_inner(session, root, suppressed, console, execute).await;
+    if interrupted(&result) {
+        session.shutdown().await;
+    }
+    result
+}
+
+async fn scan_inner(
+    session: &mut Session,
+    root: &Path,
+    suppressed: &mut HashMap<(u64, String, String), String>,
+    console: &mut Console,
+    execute: Work,
 ) -> Result<()> {
     if crate::codex::paused() {
         session.progress("paused").await?;
@@ -2217,29 +2325,12 @@ async fn scan(
                 "preparing"
             })
             .await?;
-        let result = match kind {
-            "plan" => read_only(session, root, &snapshot, row, false).await,
-            "discuss" => read_only(session, root, &snapshot, row, true).await,
-            "implement" => implement(session, root, &snapshot, row, false).await,
-            "respond" => implement(session, root, &snapshot, row, true).await,
-            "reconcile"
-                if row.recovery.as_deref() == Some("invalidate") && row.phase == "blocked" =>
-            {
-                session.action("invalidate", json!({})).await.map(|_| {
-                    event(
-                        "Approval",
-                        "Revoked; HOW returned to Triage for human approval",
-                    )
-                })
-            }
-            "reconcile" => session
-                .action("done", json!({}))
-                .await
-                .map(|_| event("Done", "Human merge confirmed; Linear updated")),
-            _ => unreachable!(),
-        };
+        let result = execute(session, root, &snapshot, row, kind).await;
         if let Err(error) = result {
             event("Stopped", format!("#{} · {error:#}", row.issue.number));
+            if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) {
+                return Err(error);
+            }
             if error.downcast_ref::<Stop>().is_some_and(Stop::retryable) {
                 return Err(error);
             }
@@ -2274,9 +2365,11 @@ async fn scan(
 }
 
 pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> Result<()> {
-    let repository = repository::report_current(origin, identity)
-        .await?
-        .context("workflow requires a GitHub origin in the current working directory")?;
+    let repository = tokio::select! {
+        report = repository::report_current(origin, identity) => report?,
+        _ = tokio::signal::ctrl_c() => return Ok(()),
+    }
+    .context("workflow requires a GitHub origin in the current working directory")?;
     let root = git::state_root()?;
     let mut suppressed = HashMap::new();
     let mut console = Console::default();
@@ -2306,45 +2399,40 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
             _ = tokio::signal::ctrl_c() => return Ok(()),
         };
         match connection {
-            Ok(mut session) => loop {
-                let mut result = scan(&mut session, &root, &mut suppressed, &mut console).await;
-                if result.is_ok() && !once {
-                    result = session.wait(session.scan_interval).await;
-                }
-                if once {
-                    return match result {
-                        Err(error)
-                            if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) =>
+            Ok(mut session) => {
+                match drive_session(
+                    &mut session,
+                    &root,
+                    &mut suppressed,
+                    &mut console,
+                    once,
+                    execute_work,
+                )
+                .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(error) if once => return Err(error),
+                    Err(error) => {
+                        if matches!(error.downcast_ref::<Stop>(), Some(Stop::Rejected)) {
+                            console.warning(format!("Request rejected: {error:#}; retrying in 15s. Local work preserved."));
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                session.socket.close(None),
+                            )
+                            .await;
+                        } else if matches!(error.downcast_ref::<Stop>(), Some(Stop::ModelCapacity))
                         {
-                            Ok(())
+                            console.warning(format!("Codex unavailable: {error:#}; retrying in 15s. Approval and local work preserved."));
+                        } else if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
+                            console.warning(format!(
+                                "Lease lost: {error:#}; retrying in 15s. Local work preserved."
+                            ));
+                        } else {
+                            console.warning(format!("Connection interrupted: {error:#}; retrying in 15s. Local work preserved."));
                         }
-                        result => result,
-                    };
+                    }
                 }
-                if let Err(error) = result {
-                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) {
-                        let _ = session.socket.close(None).await;
-                        return Ok(());
-                    }
-                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::Rejected)) {
-                        console.warning(format!(
-                            "Request rejected: {error:#}; retrying in 15s. Local work preserved."
-                        ));
-                        let _ = session.socket.close(None).await;
-                        break;
-                    }
-                    if matches!(error.downcast_ref::<Stop>(), Some(Stop::ModelCapacity)) {
-                        console.warning(format!("Codex unavailable: {error:#}; retrying in 15s. Approval and local work preserved."));
-                    } else if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
-                        console.warning(format!(
-                            "Lease lost: {error:#}; retrying in 15s. Local work preserved."
-                        ));
-                    } else {
-                        console.warning(format!("Connection interrupted: {error:#}; retrying in 15s. Local work preserved."));
-                    }
-                    break;
-                }
-            },
+            }
             Err(error) => {
                 if once {
                     return Err(error);
@@ -2362,6 +2450,331 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signal_child_work<'a>(
+        session: &'a mut Session,
+        root: &'a Path,
+        snapshot: &'a Snapshot,
+        row: &'a Row,
+        _: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg("sleep 300 & descendant=$!; echo $$ $descendant > pids; echo preserved > unsent; touch ready; wait");
+            command.current_dir(root).process_group(0);
+            session
+                .run_child(&mut command, &Guard::new(snapshot, row, true))
+                .await
+                .map(|_| ())
+        })
+    }
+
+    #[test]
+    fn single_sigint_exits_waiting_and_running_workflows() {
+        use std::process::Command;
+        use std::time::Instant;
+        for mode in [
+            "waiting",
+            "child-once",
+            "child-continuous",
+            "claim",
+            "preparing",
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("oriel-signal-{}", random_hex::<12>().unwrap()));
+            fs::create_dir_all(&root).unwrap();
+            let mut process = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "workflow::tests::sigint_subprocess",
+                    "--nocapture",
+                ])
+                .env("ORIEL_SIGNAL_TEST_ROOT", &root)
+                .env("ORIEL_SIGNAL_TEST_MODE", mode)
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            while !root.join("ready").exists() {
+                if let Some(status) = process.try_wait().unwrap() {
+                    panic!("signal fixture exited before ready: {status}");
+                }
+                if started.elapsed() > Duration::from_secs(10) {
+                    let _ = process.kill();
+                    panic!("signal fixture did not become ready");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(unsafe { libc::kill(process.id() as i32, libc::SIGINT) }, 0);
+            let sent = Instant::now();
+            loop {
+                if let Some(status) = process.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                if sent.elapsed() > Duration::from_secs(8) {
+                    let _ = process.kill();
+                    panic!("one SIGINT did not terminate workflow");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if mode.starts_with("child") {
+                assert_eq!(
+                    fs::read_to_string(root.join("unsent")).unwrap().trim(),
+                    "preserved"
+                );
+                for pid in fs::read_to_string(root.join("pids"))
+                    .unwrap()
+                    .split_whitespace()
+                {
+                    // A killed orphan can briefly remain a zombie until init reaps it.
+                    let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
+                    assert!(stat.is_err() || stat.unwrap().split_whitespace().nth(2) == Some("Z"));
+                }
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sigint_subprocess() {
+        let Ok(root) = std::env::var("ORIEL_SIGNAL_TEST_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let mode = std::env::var("ORIEL_SIGNAL_TEST_MODE").unwrap();
+        // Register the process-wide handler before publishing readiness.
+        let signal = tokio::signal::ctrl_c();
+        tokio::pin!(signal);
+        tokio::select! { _ = &mut signal => panic!("unexpected early signal"), _ = tokio::task::yield_now() => {} }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server_root = root.clone();
+        let server_mode = mode.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut claims = 0;
+            let mut releases = 0;
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                if text == "oriel:ping" {
+                    fs::write(server_root.join("ready"), "").unwrap();
+                    socket
+                        .send(Message::Text("oriel:pong".into()))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let mut reply = json!({"request_id":request["request_id"]});
+                reply["type"] = json!(match request["type"].as_str().unwrap() {
+                    "snapshot" => {
+                        let workflows = if server_mode == "waiting" {
+                            vec![]
+                        } else {
+                            vec![json!({
+                                "issue":{"number":1,"title":"WHAT","body":null,"url":"https://example.com"},
+                                "what_comments":[],"how_comments":[],"version":"approved","phase":"running"
+                            })]
+                        };
+                        reply["snapshot"] = json!({"repository":{"owner":"octocat","name":"connected"},
+                            "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+                            "target_oid":"1111111111111111111111111111111111111111",
+                            "configuration":{"autonomous":true,"verification":[["true"]],"error":null}, "workflows":workflows});
+                        "snapshot"
+                    }
+                    "claim" => {
+                        claims += 1;
+                        assert_eq!(claims, 1);
+                        if server_mode == "claim" {
+                            fs::write(server_root.join("ready"), "").unwrap();
+                            continue;
+                        }
+                        reply["lease_id"] = json!("lease");
+                        "granted"
+                    }
+                    "progress" => {
+                        if server_mode == "preparing" {
+                            fs::write(server_root.join("ready"), "").unwrap();
+                            continue;
+                        }
+                        "progressed"
+                    }
+                    "release" => {
+                        releases += 1;
+                        "released"
+                    }
+                    _ => panic!("unexpected request {request}"),
+                });
+                socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(releases, usize::from(server_mode.starts_with("child")));
+        });
+        let (socket, _) = connect_async(url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://localhost/").unwrap(),
+            socket,
+            repository: Repository {
+                owner: "octocat".into(),
+                name: "connected".into(),
+            },
+            lease: None,
+            changed: false,
+            exchange_pending: false,
+            scan_interval: SCAN_INTERVAL,
+        };
+        drive_session(
+            &mut session,
+            &root,
+            &mut HashMap::new(),
+            &mut Console::default(),
+            mode == "child-once",
+            signal_child_work,
+        )
+        .await
+        .unwrap();
+        drop(session);
+        server.await.unwrap();
+    }
+
+    fn interrupt_pending_work<'a>(
+        session: &'a mut Session,
+        root: &'a Path,
+        snapshot: &'a Snapshot,
+        row: &'a Row,
+        kind: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+        session.exchange_pending = true;
+        interrupt_work(session, root, snapshot, row, kind)
+    }
+
+    fn interrupt_work<'a>(
+        _: &'a mut Session,
+        root: &'a Path,
+        _: &'a Snapshot,
+        _: &'a Row,
+        _: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            fs::write(root.join("unsent"), "preserved").unwrap();
+            Err(Stop::Interrupted.into())
+        })
+    }
+
+    #[tokio::test]
+    async fn interrupted_scan_preserves_work_and_bounds_release_failures() {
+        for mode in ["released", "rejected", "silent", "disconnect", "pending"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let snapshot = json!({
+                "repository":{"owner":"octocat","name":"connected"},
+                "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+                "target_oid":"1111111111111111111111111111111111111111",
+                "configuration":{"autonomous":true,"verification":[["true"]],"error":null},
+                "workflows":([1,2].map(|number| json!({
+                    "issue":{"number":number,"title":"WHAT","body":null,"url":"https://example.com"},
+                    "what_comments":[],"how_comments":[],"version":"approved","phase":"running"
+                })))
+            });
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut claims = 0;
+                let mut releases = 0;
+                while let Some(Ok(Message::Text(text))) = socket.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let kind = request["type"].as_str().unwrap();
+                    let mut reply = json!({"request_id":request["request_id"]});
+                    reply["type"] = json!(match kind {
+                        "snapshot" => {
+                            reply["snapshot"] = snapshot.clone();
+                            "snapshot"
+                        }
+                        "claim" => {
+                            claims += 1;
+                            assert_eq!(request["issue_number"], 1);
+                            reply["lease_id"] = json!("lease");
+                            "granted"
+                        }
+                        "progress" => {
+                            assert_eq!(request["stage"], "preparing");
+                            "progressed"
+                        }
+                        "release" => {
+                            releases += 1;
+                            if mode == "disconnect" {
+                                break;
+                            }
+                            if mode == "silent" {
+                                continue;
+                            }
+                            if mode == "rejected" {
+                                "rejected"
+                            } else {
+                                "released"
+                            }
+                        }
+                        _ => panic!("unexpected action: {request}"),
+                    });
+                    socket
+                        .send(Message::Text(reply.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(claims, 1);
+                assert_eq!(releases, usize::from(mode != "pending"));
+            });
+            let (socket, _) = connect_async(url).await.unwrap();
+            let mut session = Session {
+                client: Client::new(),
+                endpoint: Url::parse("http://localhost/").unwrap(),
+                socket,
+                repository: Repository {
+                    owner: "octocat".into(),
+                    name: "connected".into(),
+                },
+                lease: None,
+                changed: false,
+                exchange_pending: false,
+                scan_interval: SCAN_INTERVAL,
+            };
+            let root = std::env::temp_dir()
+                .join(format!("oriel-interrupt-{}", random_hex::<12>().unwrap()));
+            fs::create_dir_all(&root).unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(6),
+                scan(
+                    &mut session,
+                    &root,
+                    &mut HashMap::new(),
+                    &mut Console::default(),
+                    if mode == "pending" {
+                        interrupt_pending_work
+                    } else {
+                        interrupt_work
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(interrupted(&result));
+
+            assert!(interrupted(&result));
+            assert_eq!(
+                fs::read_to_string(root.join("unsent")).unwrap(),
+                "preserved"
+            );
+            drop(session);
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[test]
     fn model_capacity_retries_without_reporting_task_failure() {
@@ -2770,6 +3183,7 @@ mod tests {
             },
             lease: None,
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
         };
         let row = serde_json::from_value(json!({
@@ -2830,6 +3244,7 @@ mod tests {
             },
             lease: None,
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
         };
         tokio::time::timeout(
@@ -2914,6 +3329,7 @@ mod tests {
             },
             lease: None,
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
         };
         session.wait(Duration::from_secs(46)).await.unwrap();
@@ -2961,6 +3377,7 @@ mod tests {
                 name: "connected".into(),
             },
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
             lease: Some("lease".into()),
         };
@@ -3030,6 +3447,7 @@ mod tests {
                 name: "connected".into(),
             },
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
             lease: Some("lease".into()),
         };
@@ -3121,6 +3539,7 @@ mod tests {
                 name: "connected".into(),
             },
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
             lease: Some("lease".into()),
         };
@@ -3229,6 +3648,7 @@ mod tests {
             },
             lease: None,
             changed: false,
+            exchange_pending: false,
             scan_interval: SCAN_INTERVAL,
         };
         let snapshot = session.snapshot().await.unwrap();
