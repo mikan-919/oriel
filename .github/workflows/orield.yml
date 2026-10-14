@@ -47,6 +47,8 @@ jobs:
         run: cargo package -p orield --list --locked
       - name: Verify publishable package
         run: cargo publish -p orield --dry-run --locked
+      - name: Create archive for installation
+        run: cargo package -p orield --locked
       - name: Install unpacked package and check help
         shell: bash
         run: |
