@@ -1,0 +1,86 @@
+name: Validate and publish orield
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/orield/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/orield.yml"
+      - "scripts/orield-release.py"
+      - "scripts/test_orield_release.py"
+  pull_request:
+    paths:
+      - "crates/orield/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/orield.yml"
+      - "scripts/orield-release.py"
+      - "scripts/test_orield_release.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Test release decisions without registry access
+        run: python3 -m unittest discover -s scripts -p 'test_orield_release.py'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy -p orield --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test -p orield --locked
+      - name: List package contents
+        run: cargo package -p orield --list --locked
+      - name: Verify publishable package
+        run: cargo publish -p orield --dry-run --locked
+      - name: Create archive for installation
+        run: cargo package -p orield --locked
+      - name: Install unpacked package and check help
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "orield"))')
+          package_dir=$(mktemp -d)
+          install_dir=$(mktemp -d)
+          trap 'rm -rf "$package_dir" "$install_dir"' EXIT
+          tar -xzf "target/package/orield-${version}.crate" -C "$package_dir"
+          test -f "$package_dir/orield-${version}/README.md"
+          test -f "$package_dir/orield-${version}/LICENSE"
+          cargo install --path "$package_dir/orield-${version}" --locked --root "$install_dir"
+          # Verify that the installed command does not depend on the checkout.
+          (cd "$install_dir" && ./bin/orield --help)
+
+  publish:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ORIELD_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: crates-io
+    concurrency:
+      group: orield-crates-io
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish missing version and verify registry installation
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.ORIELD_CRATES_IO_TOKEN }}
+          ORIELD_CRATES_IO_OWNER: ${{ vars.ORIELD_CRATES_IO_OWNER }}
+        run: python3 scripts/orield-release.py

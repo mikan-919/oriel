@@ -1215,6 +1215,20 @@ fn rustup_home() -> Option<PathBuf> {
 }
 
 fn private_home_path(path: &std::ffi::OsStr, home: &Path) -> std::ffi::OsString {
+    // Isolating CARGO_HOME keeps credentials private, but installed tools such
+    // as worker-build still live in the host's Cargo bin directory.
+    let cargo_bin = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cargo"))
+        .join("bin");
+    private_home_path_with_cargo_bin(path, home, &cargo_bin)
+}
+
+fn private_home_path_with_cargo_bin(
+    path: &std::ffi::OsStr,
+    home: &Path,
+    cargo_bin: &Path,
+) -> std::ffi::OsString {
     let shim_dirs = [
         home.join(".local/share/vite-plus/bin"),
         home.join(".local/share/vite-plus/fallback-bin"),
@@ -1222,14 +1236,8 @@ fn private_home_path(path: &std::ffi::OsStr, home: &Path) -> std::ffi::OsString 
     let mut paths: Vec<_> = std::env::split_paths(path)
         .filter(|entry| !shim_dirs.contains(entry))
         .collect();
-    // Isolating CARGO_HOME keeps credentials private, but installed tools such
-    // as worker-build still live in the host's Cargo bin directory.
-    let cargo_bin = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".cargo"))
-        .join("bin");
-    if cargo_bin.is_dir() && !paths.contains(&cargo_bin) {
-        paths.push(cargo_bin);
+    if cargo_bin.is_dir() && !paths.iter().any(|entry| entry == cargo_bin) {
+        paths.push(cargo_bin.to_owned());
     }
     std::env::join_paths(paths).unwrap_or_else(|_| path.to_owned())
 }
@@ -2667,15 +2675,25 @@ mod tests {
             home.join(".local/share/vite-plus/fallback-bin").as_path(),
         ])
         .unwrap();
-        let filtered = private_home_path(&path, home);
-        let entries = std::env::split_paths(&filtered).collect::<Vec<_>>();
-        // Installed Cargo tools may be appended when CARGO_HOME is set, as in CI.
-        assert!(entries.starts_with(&[
+        let root = std::env::temp_dir().join(format!("oriel-path-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(&root).unwrap();
+        let expected = vec![
             PathBuf::from("/usr/bin"),
-            PathBuf::from("/nix/store/node/bin")
-        ]));
-        assert!(!entries.contains(&home.join(".local/share/vite-plus/bin")));
-        assert!(!entries.contains(&home.join(".local/share/vite-plus/fallback-bin")));
+            PathBuf::from("/nix/store/node/bin"),
+        ];
+        let entries = |path: &std::ffi::OsStr, cargo_bin: &Path| {
+            std::env::split_paths(&private_home_path_with_cargo_bin(path, home, cargo_bin))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(entries(&path, &root.join("missing")), expected);
+        let mut with_cargo = expected;
+        with_cargo.push(root.clone());
+        assert_eq!(entries(&path, &root), with_cargo);
+        let already_present =
+            std::env::join_paths(std::env::split_paths(&path).chain(std::iter::once(root.clone())))
+                .unwrap();
+        assert_eq!(entries(&already_present, &root), with_cargo);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

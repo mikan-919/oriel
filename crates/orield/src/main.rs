@@ -186,12 +186,26 @@ fn load_identity(path: &Path) -> Result<DeviceIdentity> {
     load_identity(path)
 }
 
-fn lock_workflow_identity(path: &Path) -> Result<File> {
+#[derive(Debug)]
+struct WorkflowIdentityLock(File);
+
+impl Drop for WorkflowIdentityLock {
+    fn drop(&mut self) {
+        // A concurrently forked child may still hold this open file description
+        // until exec. Unlock explicitly so that closing our handle releases
+        // ownership immediately, even while that inherited descriptor exists.
+        if let Err(error) = self.0.unlock() {
+            warn!(%error, "failed to release workflow identity lock");
+        }
+    }
+}
+
+fn lock_workflow_identity(path: &Path) -> Result<WorkflowIdentityLock> {
     // Keep the device's existing identity file locked for this process's lifetime.
-    // No lock file or credential rewrite is needed; closing the handle releases it.
+    // No lock file or credential rewrite is needed.
     let file = File::open(path).context("failed to open workflow device identity")?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(WorkflowIdentityLock(file)),
         Err(fs::TryLockError::WouldBlock) => {
             bail!(
                 "workflow already running for this device; stop the existing orield workflow before starting another"
@@ -967,10 +981,22 @@ mod tests {
         load_identity(&other).unwrap();
         let other_owner = lock_workflow_identity(&other).unwrap();
         assert_eq!(fs::read(&path).unwrap(), original);
+        // A duplicate shares the open file description, just like a descriptor
+        // inherited by a concurrent fork before the child has called exec.
+        let inherited = owner.0.try_clone().unwrap();
         drop(owner);
         let replacement = lock_workflow_identity(&path).unwrap();
+        assert!(lock_workflow_identity(&path).is_err());
+        drop(inherited);
+        assert!(lock_workflow_identity(&path).is_err());
         drop(replacement);
+        // Releasing one identity must not unlock a different device's workflow.
+        assert!(lock_workflow_identity(&other).is_err());
+        let final_owner = lock_workflow_identity(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(final_owner);
         drop(other_owner);
+        assert!(lock_workflow_identity(&other).is_ok());
     }
 
     #[test]
