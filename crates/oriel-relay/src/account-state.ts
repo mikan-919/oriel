@@ -12,8 +12,8 @@ export class AccountState {
       return (query: string, ...bindings: SqlStorageValue[]) => {
         // Cache only the account tables owned by this object. Every SQL write,
         // including OAuth refresh and pairing, invalidates before it executes.
-        const lookup = /^SELECT\b/i.test(query) && /\bFROM (?:devices|account_integrations|sessions)\b/i.test(query);
-        if (!/^SELECT\b|^PRAGMA\b/i.test(query)) this.clear();
+        const lookup = !query.includes(";") && /^SELECT\b/i.test(query) && /\bFROM (?:devices|account_integrations|sessions)\b/i.test(query);
+        if (query.includes(";") || !/^SELECT\b|^PRAGMA\b/i.test(query)) this.clear();
         if (!lookup) return source.exec(query, ...bindings);
         const expiring = /(?:sessions\.)?expires_at > \?/.test(query);
         const storedQuery = expiring

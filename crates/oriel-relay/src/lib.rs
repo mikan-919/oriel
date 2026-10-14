@@ -311,7 +311,8 @@ impl DurableObject for RelayDevice {
                 && p.status(Date::now().as_millis()) != "offline"
             {
                 // A replayed reply must not extend the host's liveness deadline.
-                let already_online = p.status(Date::now().as_millis()) == "online";
+                let already_online = self.cached.borrow().last_reply.is_some()
+                    && p.status(Date::now().as_millis()) == "online";
                 p.challenge.clear();
                 p.last_reply = Some(Date::now().as_millis());
                 p.deadline = None;
