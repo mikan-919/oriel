@@ -890,6 +890,10 @@ test("Leased discovery reads only the current WHAT while still checking approval
     const afterFull = await costs();
     const fullComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
     assert.equal(full.workflows.length, 48);
+    const beforeIdle = await costs();
+    const idle = await s.message({ type: "snapshot", changes: true });
+    const afterIdle = await costs();
+    assert.equal(idle.snapshot.workflows.length, 48);
     const lease_id = await s.claim("implement");
     s.fixture.calls.length = 0;
     const beforeScoped = await costs();
@@ -897,7 +901,9 @@ test("Leased discovery reads only the current WHAT while still checking approval
     const afterScoped = await costs();
     const fullReads = afterFull.reads - beforeFull.reads, scopedReads = afterScoped.reads - beforeScoped.reads;
     assert.ok(scopedReads < fullReads / 2, JSON.stringify({fullReads, scopedReads}));
-    console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, scopedReads}));
+    const idleReads = afterIdle.reads - beforeIdle.reads;
+    assert.ok(scopedReads < idleReads / 2, JSON.stringify({idleReads, scopedReads}));
+    console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, idleReads, scopedReads}));
     assert.equal(current.type, "snapshot", JSON.stringify(current));
     assert.deepEqual(current.snapshot.workflows.map(row => row.issue.number), [42]);
     assert.equal(current.snapshot.workflows[0].phase, "approved");
