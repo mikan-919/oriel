@@ -149,9 +149,9 @@ function screen(connectionRequest = {}) {
   vm.runInContext(source.slice(source.indexOf('let currentPage =')),c);
   return {c,regions,buttons,elements};
 }
-test('overview is initial page; switching preserves authentication-controlled hidden state',()=>{
+test('workflow is initial page; switching preserves authentication-controlled hidden state',()=>{
   const {c,regions,buttons,elements}=screen();
-  assert.equal(regions[0].classList.values.has('page-hidden'),false);
+  assert.equal(regions[1].classList.values.has('page-hidden'),false);
   regions[3].hidden=true;
   c.showPage('settings');
   assert.equal(regions[3].hidden,true);

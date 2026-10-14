@@ -3,16 +3,18 @@ use std::{fs, path::Path};
 use topcoat::{Result, context::Cx, view::ViewExt};
 
 mod ui;
+mod workflow;
 
 const STYLE: &str = include_str!("assets/dashboard.css");
 // Capture before external modules; pairing secrets never enter storage.
 const PAIR_CAPTURE_JS: &str = include_str!("assets/pairing.js");
 const TERMINAL_JS: &str = include_str!("assets/dashboard.js");
+const WORKFLOW_JS: &str = include_str!("assets/workflow.js");
 const CODEX_JS: &str = include_str!("assets/codex.js");
 // Build once; Cloudflare Workers Static Assets serves the generated files.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("build");
+    let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/public");
     let cx = Cx::default();
     let html = ui::home(&cx).await?.single().await?.render(&cx);
     fs::create_dir_all(&output)?;
@@ -20,6 +22,7 @@ async fn main() -> Result<()> {
     fs::write(output.join("terminal.js"), TERMINAL_JS)?;
     fs::write(output.join("codex.js"), CODEX_JS)?;
     fs::write(output.join("dashboard.css"), STYLE)?;
+    fs::write(output.join("workflow.js"), WORKFLOW_JS)?;
     println!("oriel-web assets: {}", output.display());
     Ok(())
 }

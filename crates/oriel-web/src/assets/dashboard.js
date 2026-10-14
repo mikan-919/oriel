@@ -1,5 +1,24 @@
 import {mountCodex} from "./codex.js";
+import {mountWorkflow} from "./workflow.js";
 const codexPanel = mountCodex();
+const workflowPanel = mountWorkflow({
+    onDevice: id => perform(async () => {
+        repositoryRequest++; repositoryDeviceId = id; workflowSnapshot = null; render();
+        await refreshWorkflow();
+    }),
+    onCodex: control => {
+        showPage("codex");
+        document.getElementById("codex-device").value = repositoryDeviceId;
+        document.getElementById("codex-connect").click();
+        status.textContent = control ? "端末に接続後、Codexの一時停止・再開で実行を操作してください。" : "この端末のCodexに接続します。実装の会話は操作するCodexから選択してください。";
+    },
+    onCreate: () => { document.getElementById("what-status").textContent = ""; document.getElementById("workflow-create-dialog").showModal(); },
+});
+function renderWorkflowPanel() {
+    const device = devices.find(item => item.device_id === repositoryDeviceId);
+    workflowPanel.update({snapshot: workflowSnapshot, device, devices, progress: device && progressSnapshot.get(device.device_id), live:progressStream === "live", userId:user?.id, busy});
+}
+
 const pairing = window.orielPairing;
 delete window.orielPairing;
 const connectionRequest = window.orielConnection;
@@ -91,11 +110,13 @@ const progressStages = {
 const encoder = new TextEncoder();
 
 function render() {
-    account.textContent = sessionLoading ? "ログイン状態を確認中…" : user ? `ログイン中: ${user.display_name} (${user.id})` : "未ログインです。";
+    account.textContent = sessionLoading ? "ログイン状態を確認中…" : user ? `ログイン中: ${user.display_name}` : "未ログインです。";
     anonymousActions.hidden = !!user;
     sessionActions.hidden = !user;
     for (const button of dashboard.querySelectorAll("button")) button.disabled = busy;
     renderOverview();
+    renderWorkflowPanel();
+    document.getElementById("workflow-onboarding").hidden = !!user && !!devices.length;
     for (const row of deviceRows.values()) row.open.disabled = busy || deviceListFailed || row.device.terminal_status !== "online";
     approvePair.disabled = busy || !user || !pairInfo || pairClaimed;
     pairSection.hidden = !pairing.token && !pairing.invalid && !pairInfo;
@@ -482,6 +503,7 @@ function updateProgressLink(link, label, address, host) {
 
 function renderProgressCards() {
     renderOverview();
+    renderWorkflowPanel();
     for (const [id, row] of deviceRows) {
         const progress = progressSnapshot.get(id);
         const stale = progressStream !== "live";
@@ -875,7 +897,7 @@ async function refreshWorkflow(pushed) {
     if (!user || !device) return;
     const epoch = accountEpoch;
     const request = ++repositoryRequest;
-    repositoryDetails.textContent = `${device.name} (${device.device_id})`;
+    repositoryDetails.textContent = device.name;
     repositoryStatus.textContent = "Issue → Linear → PRの状態を読み込み中…";
     try {
         const result = pushed ?? await integrationApi(`/api/workflows/${device.device_id}`);
@@ -885,61 +907,13 @@ async function refreshWorkflow(pushed) {
         const label = `${result.repository.owner}/${result.repository.name}`;
         document.getElementById(`repository-${device.device_id}`).textContent = `最終報告リポジトリ: ${label}`;
         repositoryDetails.textContent += ` — ${label} → ${result.team.team_name}`;
-        const items = document.createDocumentFragment();
-        const progress = progressSnapshot.get(device.device_id);
-        const runnerDisconnected = progressStream === "live" && (!progress || progress.state === "offline");
-        const progressUnavailable = progressStream !== "live";
-        for (const row of result.workflows) {
-            const item = document.createElement("li");
-            const title = document.createElement("p");
-            title.append(issueLink(`#${row.issue.number}`, row.issue.url, "github.com"), `: ${row.issue.title}`);
-            const phase = document.createElement("p");
-            phase.textContent = `${workflowPhaseLabel(row.phase)}${row.blocked_reason ? ` ${row.blocked_reason}` : ""}`;
-            item.append(title, phase);
-            if (runnerDisconnected && ["approved", "running"].includes(row.phase)) {
-                const recovery = document.createElement("p");
-                recovery.textContent = "runnerが未接続です。端末のチェックアウトで orield workflow を実行してください。再開前に承認を再確認します。";
-                item.append(recovery);
-            } else if (progressUnavailable && ["approved", "running"].includes(row.phase)) {
-                const recovery = document.createElement("p");
-                recovery.textContent = "実行状況を取得できず、runnerの接続は未確認です。runnerは再開前に承認を再確認します。";
-                item.append(recovery);
-            }
-            appendDescription(item, "WHAT（GitHub Issue本文）", row.issue.body);
-            if (row.linear) {
-                const how = document.createElement("p");
-                how.append("Linear HOW: ", issueLink(row.linear.identifier, row.linear.url, "linear.app"),
-                    `: ${row.linear.title} — ${row.linear.state.name} (${row.linear.state.type})`);
-                item.append(how);
-                appendDescription(item, "HOW（Linear本文）", row.linear.description);
-            }
-            if (row.branch) {
-                const branch = document.createElement("p");
-                branch.textContent = `対象ブランチ: ${row.branch}`;
-                item.append(branch);
-            }
-            if (row.pull_request) {
-                const pull = document.createElement("p");
-                pull.append(issueLink(`PR #${row.pull_request.number}`, row.pull_request.url, "github.com"),
-                    row.pull_request.merged ? " — マージ済み" : ` — ${row.pull_request.state}${row.pull_request.draft ? "（下書き）" : ""}`);
-                item.append(pull);
-            }
-            if (row.how_feedback) appendDescription(item, "HOW修正依頼", row.how_feedback.body);
-            if (row.feedback) {
-                const feedback = [row.feedback.body, ...row.feedback.comments.map((comment) =>
-                    `${comment.path ? `${comment.path}${comment.line == null ? "" : `:${comment.line}`}: ` : ""}${comment.body}`)];
-                appendDescription(item, `PRフィードバック（${row.feedback.kind}）`, feedback.join("\n\n"));
-            }
-            items.append(item);
-        }
-        repositoryIssues.replaceChildren(items);
         const configuration = result.configuration;
         const gate = configuration.error
             ? `コード実行不可: ${configuration.error} HOWの計画は引き続き利用できます。`
             : configuration.autonomous
                 ? `コード実行にはTodo承認と設定済みの検証コマンド${configuration.verification.length}件が必要です。`
                 : "コード実行不可: 対象ブランチに autonomous: true が設定されていません。";
-        repositoryStatus.textContent = `${result.workflows.length ? `ワークフロー${result.workflows.length}件。` : "ワークフローはありません。WHATを作成するかGitHubでIssueを開いてください。"} ${gate}`;
+        repositoryStatus.textContent = `${result.workflows.length}件 · 最終取得 ${new Date().toLocaleTimeString("ja-JP")} ${configuration.autonomous && !configuration.error ? "" : gate}`;
         render();
     } catch (error) {
         if (error.sessionExpired) throw error;
@@ -972,6 +946,7 @@ async function createWhat() {
     pendingWhat = null;
     whatTitle.value = "";
     whatBody.value = "";
+    document.getElementById("workflow-create-dialog").close();
     status.textContent = `GitHub WHAT #${result.issue.number} を作成しました。チェックアウトで orield workflow を実行してHOWを提案してください。`;
     await refreshWorkflow();
 }
@@ -1099,7 +1074,7 @@ refreshIssuesButton.addEventListener("click", () => perform(refreshIssues));
 refreshRepositoryButton.addEventListener("click", () => perform(refreshWorkflow));
 whatForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    perform(createWhat);
+    perform(async () => { try { await createWhat(); } catch (error) { document.getElementById("what-status").textContent = errorText(error); throw error; } });
 });
 document.getElementById("close-terminal").addEventListener("click", () => {
     disconnect();
@@ -1163,7 +1138,7 @@ perform(async () => {
     await refreshAccountData();
 });
 
-let currentPage = "overview";
+let currentPage = "workflow";
 const pageNames = {overview: "概要", workflow: "ワークフロー", codex: "Codex", devices: "端末", settings: "設定"};
 function showPage(page, focus = true) {
     if (!Object.hasOwn(pageNames, page)) return;
@@ -1228,4 +1203,7 @@ document.getElementById("overview-action").addEventListener("click", () => {
     if (!user) document.getElementById("login").focus();
     else showPage(deviceListFailed ? "settings" : devices.length && repositoryDeviceId ? "workflow" : "devices");
 });
-showPage(connectionRequest.returned || connectionRequest.failed ? "settings" : "overview", false);
+showPage(connectionRequest.returned || connectionRequest.failed ? "settings" : "workflow", false);
+
+document.getElementById("what-cancel").addEventListener("click", () => document.getElementById("workflow-create-dialog").close());
+for (const button of dashboard.querySelectorAll("[data-go]")) button.addEventListener("click", () => showPage(button.dataset.go));

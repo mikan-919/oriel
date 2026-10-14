@@ -1,9 +1,9 @@
 import { bindings, defineConfig } from "cf/config";
 
 // Public app: https://oriel-web.mikan-919.workers.dev
-// `npm run build` renders the Topcoat view into build/index.html and terminal.js.
+// `npm run build` renders the Topcoat view and scripts into build/public/.
 // `npm run dev` serves http://localhost:3001; `npm run deploy` publishes assets.
-// Deploy uses the shared build-output adapter and Wrangler, not cf's strict upload.
+// Build and deployment use cf's build-output and prebuilt upload.
 // CI can use `npm run deploy:prebuilt` after building; this stays the only config.
 // Same-origin API/WebSocket requests use the private Relay service binding.
 // No credentials are embedded in static assets. Rebuild after Rust view edits.
