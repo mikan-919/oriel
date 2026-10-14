@@ -76,16 +76,49 @@ async function runtime(env = {}, outbound, measureSql = false) {
     if (measureSql && metadata.type === "esm" && modules[name].contents.includes("sql = this.ctx.storage.sql;")) {
       // Test-only instrumentation of the actual workerd SQLite cursor counters.
       // This method and wrapper are never present in the deployed bundle.
+      if (measureSql === "combined-prototype") {
+        // Only running source work skips HOW discussion history. Admission,
+        // WHAT request identity and all native approval facts are still read.
+        const original = 'if (row.linear) {';
+        if (!modules[name].contents.includes(original)) throw new Error("HOW history probe no longer matches the bundle");
+        modules[name].contents = modules[name].contents.replace(original,
+          'if (row.linear && !(issueNumber !== void 0 && row.phase === "running")) {');
+      }
+      modules[name].contents = modules[name].contents.replace("this.ctx.storage.setAlarm(deadline)", "this.setAlarmForTest(deadline)");
       modules[name].contents = modules[name].contents.replace("sql = this.ctx.storage.sql;", `
-        cost = {reads:0, writes:0};
+        cost = {reads:0, writes:0, alarmSets:0};
+        authRowsForTest = new Map();
         costForTest() { return this.cost; }
+        setAlarmForTest(deadline) { this.cost.alarmSets++; return this.ctx.storage.setAlarm(deadline); }
+        alarmForTest() { return this.alarm(); }
+        clearAuthRowsForTest() { this.authRowsForTest.clear(); }
+        expireSessionsForTest() { this.sql.exec("UPDATE sessions SET expires_at = 0"); }
+        shortenSessionsForTest() { this.sql.exec("UPDATE sessions SET expires_at = ?", Math.floor(Date.now()/1000) + 2); }
+        replayConstructorSqlForTest(queries) { for (const query of queries) this.sql.exec(query).toArray(); }
         sql = {exec:(...args) => {
+          const cache = ${["auth-state-prototype", "combined-prototype"].includes(measureSql)};
+          const session = /\\bFROM sessions\\b/i.test(args[0]);
+          const lookup = /^SELECT\\b/i.test(args[0]) && /\\bFROM (?:devices|account_integrations|sessions)\\b/i.test(args[0]);
+          const key = JSON.stringify(session && /expires_at > \\?/i.test(args[0]) ? args.slice(0, -1) : args);
+          if (cache && lookup && this.authRowsForTest.has(key)) {
+            const saved = this.authRowsForTest.get(key);
+            const rows = session && saved.expiresAt <= Math.floor(Date.now()/1000) ? [] : structuredClone(saved.rows);
+            return {toArray:() => rows, [Symbol.iterator]:() => rows[Symbol.iterator]()};
+          }
+          if (cache && !/^SELECT\\b|^PRAGMA\\b/i.test(args[0])) this.authRowsForTest.clear();
+          let expiresAt = Infinity;
+          if (cache && lookup && session) {
+            const expiry = this.ctx.storage.sql.exec("SELECT expires_at FROM sessions WHERE hash = ?", args[1]);
+            expiresAt = expiry.toArray()[0]?.expires_at ?? 0;
+            this.cost.reads += expiry.rowsRead;
+            this.cost.writes += expiry.rowsWritten;
+          }
           const cursor = this.ctx.storage.sql.exec(...args);
           let reads = 0, writes = 0;
           const count = () => {this.cost.reads += cursor.rowsRead - reads; this.cost.writes += cursor.rowsWritten - writes; reads = cursor.rowsRead; writes = cursor.rowsWritten;};
           count();
           return new Proxy(cursor, {get:(target, key) => {
-            if (key === 'toArray') return () => {const value = target.toArray(); count(); return value;};
+            if (key === 'toArray') return () => {const value = target.toArray(); count(); if (cache && lookup) this.authRowsForTest.set(JSON.stringify(session && /expires_at > \\?/i.test(args[0]) ? args.slice(0,-1) : args), {rows:structuredClone(value), expiresAt}); return value;};
             const value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
           }});
         }};

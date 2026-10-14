@@ -1,0 +1,231 @@
+{
+  "current": {
+    "activeSnapshot": {
+      "rowsRead": 344,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "activeSnapshotRepeat": {
+      "rowsRead": 344,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "webList": {
+      "rowsRead": 1355,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "webListRepeat": {
+      "rowsRead": 1355,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "devicesList": {
+      "rowsRead": 25,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "devicesListRepeat": {
+      "rowsRead": 25,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "codexOutput": {
+      "rowsRead": 3,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "deadlineAlarm": {
+      "rowsRead": 23,
+      "rowsWritten": 0,
+      "alarmSets": 1,
+      "providerRequests": 0
+    },
+    "activeSnapshotCold": {
+      "rowsRead": 344,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "constructorSqlReplay": {
+      "rowsRead": 5,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "activeSnapshotAfterConstructorSql": {
+      "rowsRead": 344,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "devicesListAfterConstructorSql": {
+      "rowsRead": 25,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    }
+  },
+  "authStatePrototype": {
+    "activeSnapshot": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "activeSnapshotRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "webList": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "webListRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "devicesList": {
+      "rowsRead": 1,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "devicesListRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "codexOutput": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "deadlineAlarm": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 1,
+      "providerRequests": 0
+    },
+    "activeSnapshotCold": {
+      "rowsRead": 7,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "constructorSqlReplay": {
+      "rowsRead": 5,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "activeSnapshotAfterConstructorSql": {
+      "rowsRead": 7,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 12
+    },
+    "devicesListAfterConstructorSql": {
+      "rowsRead": 4,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    }
+  },
+  "combinedPrototype": {
+    "activeSnapshot": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "activeSnapshotRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "webList": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "webListRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "devicesList": {
+      "rowsRead": 1,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "devicesListRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "codexOutput": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "deadlineAlarm": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 1,
+      "providerRequests": 0
+    },
+    "activeSnapshotCold": {
+      "rowsRead": 7,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "constructorSqlReplay": {
+      "rowsRead": 5,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "activeSnapshotAfterConstructorSql": {
+      "rowsRead": 7,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "devicesListAfterConstructorSql": {
+      "rowsRead": 4,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    }
+  },
+  "_context": {
+    "date": "2026-10-14",
+    "issues": 48,
+    "hows": 1,
+    "pullRequests": 0,
+    "scope": "Local workerd; current production code versus test-only state and HOW-history prototypes. Initialization SQL statements are metered individually. No deployed changes. Terminal KV counts and future Worker duration are modelled separately."
+  }
+}
