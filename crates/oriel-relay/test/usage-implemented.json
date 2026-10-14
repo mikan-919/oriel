@@ -1,0 +1,91 @@
+{
+  "implemented": {
+    "activeSnapshot": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "activeSnapshotRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "webList": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "webListRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 59
+    },
+    "devicesList": {
+      "rowsRead": 1,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "devicesListRepeat": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "codexOutput": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "deadlineAlarm": {
+      "rowsRead": 0,
+      "rowsWritten": 0,
+      "alarmSets": 1,
+      "providerRequests": 0
+    },
+    "activeSnapshotCold": {
+      "rowsRead": 5,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "constructorSqlReplay": {
+      "rowsRead": 5,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    },
+    "activeSnapshotAfterConstructorSql": {
+      "rowsRead": 5,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 11
+    },
+    "devicesListAfterConstructorSql": {
+      "rowsRead": 4,
+      "rowsWritten": 0,
+      "alarmSets": 0,
+      "providerRequests": 0
+    }
+  },
+  "context": {
+    "date": "2026-10-14",
+    "implementation": "production source",
+    "devices": 1,
+    "issues": 48,
+    "hows": 1,
+    "pullRequests": 0,
+    "connections": [
+      "workflow",
+      "Codex host",
+      "dashboard progress",
+      "terminal host"
+    ],
+    "notice": "SQL cursor counts are measured. Constructor replay plus cache reload is not a complete cold-start measurement."
+  }
+}

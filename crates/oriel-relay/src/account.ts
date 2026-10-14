@@ -12,6 +12,8 @@ import { Integrations, type Device, type IntegrationEnv } from "./integrations";
 import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 import { CodexConnections } from "./codex";
 import { quotaResponse } from "./quota";
+import { AccountState } from "./account-state";
+import type { WorkflowSnapshot } from "./workflow";
 
 export interface AccountEnv extends IntegrationEnv { RELAY: DurableObjectNamespace; }
 
@@ -198,7 +200,8 @@ function webauthnCredential(
 
 /** Account/authentication metadata only; terminal frames never enter this object. */
 export class AccountRegistry extends DurableObject<AccountEnv> {
-  private readonly sql = this.ctx.storage.sql;
+  private readonly accountState = new AccountState(this.ctx.storage);
+  private readonly sql = this.accountState.sql;
   private readonly origin: string;
   private readonly rpID: string;
   private readonly secure: boolean;
@@ -224,7 +227,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     this.secure = origin.protocol === "https:";
     this.sessionCookie = this.secure ? "__Host-oriel-session" : "oriel-session";
     this.challengeCookie = this.secure ? "__Host-oriel-challenge" : "oriel-challenge";
-    this.ctx.storage.transactionSync(() => {
+    this.accountState.transaction(() => {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
@@ -316,6 +319,12 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     let response: Response;
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/terminal-change" && request.method === "POST") {
+        const { device_id } = await request.json() as { device_id: string };
+        const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device_id).toArray()[0];
+        if (device) this.workflows.deviceChanged(device.user_id);
+        return new Response(null, { status: 200 });
+      }
       // Only the Worker can route here, after verifying the provider signature.
       // The public entrypoint does not expose /workflow-change.
       if (url.pathname === "/workflow-change" && request.method === "POST") {
@@ -423,10 +432,11 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
                 ]);
                 if (["online", "grace", "offline", "unknown"].includes(state)) device.terminal_status = state;
               } catch { /* Keep unknown when the relay cannot be queried. */ }
-              finally { clearTimeout(timer); }
+              finally { if (timer !== undefined) clearTimeout(timer); }
             }
           }));
-          response = json({ devices });
+          this.requireLiveSession(session);
+          response = json({ devices: devices.filter(device => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device.device_id).toArray()[0]?.user_id === session.user.id) });
           break;
         }
         case "POST /api/auth/register/options":
@@ -447,7 +457,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           const session = await this.session(request);
           const secret = cookie(request, this.challengeCookie);
           const challengeHash = secret && SECRET.test(secret) ? await hash(secret) : null;
-          this.ctx.storage.transactionSync(() => {
+          this.accountState.transaction(() => {
             if (session) this.sql.exec("DELETE FROM sessions WHERE hash = ?", session.hash);
             if (challengeHash) this.sql.exec("DELETE FROM challenges WHERE hash = ?", challengeHash);
           });
@@ -492,6 +502,29 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     this.workflows.publish();
     this.scheduleSockets();
     return response;
+  }
+
+  // These RPC methods are exposed only to the service binding. The public
+  // Worker never forwards an internal path or returns preparation credentials.
+  async prepareSnapshot(request: Request) {
+    try { return { value: await this.integrations.prepareSnapshot(request, this.workflows) }; }
+    catch (error) { return this.snapshotError(error); }
+  }
+
+  async finishSnapshot(request: Request, fence: string, snapshot: WorkflowSnapshot, snapshotHash: string, issueNumber?: number) {
+    try {
+      const device = await this.integrations.finishSnapshot(request, this.workflows, fence);
+      this.integrations.workflowBinding(device);
+      this.workflows.publishFacts(device, snapshot, snapshotHash, issueNumber);
+      return { value: true };
+    }
+    catch (error) { return this.snapshotError(error); }
+  }
+
+  private snapshotError(error: unknown) {
+    const known = error instanceof HttpError || error instanceof WorkflowLeaseError;
+    return { error: known ? error.message : "Workflow provider state could not be confirmed; no approval was inferred",
+      status: known ? error.status : 502 };
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -576,7 +609,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     const secretHash = await hash(secret);
     const previous = cookie(request, this.challengeCookie);
     const previousHash = previous && SECRET.test(previous) ? await hash(previous) : null;
-    this.ctx.storage.transactionSync(() => {
+    this.accountState.transaction(() => {
       if (session) this.requireLiveSession(session);
       this.cleanupExpired();
       if (previousHash) this.sql.exec("DELETE FROM challenges WHERE hash = ?", previousHash);
@@ -595,7 +628,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     const challengeHash = await hash(secret);
     const session = await this.session(request);
     // Consume before any asynchronous signature verification, including failed attempts.
-    const challenge = this.ctx.storage.transactionSync(() => {
+    const challenge = this.accountState.transaction(() => {
       const row = this.sql.exec<Challenge>("SELECT * FROM challenges WHERE hash = ?", challengeHash).toArray()[0];
       this.sql.exec("DELETE FROM challenges WHERE hash = ?", challengeHash);
       return row;
@@ -637,7 +670,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     ).toArray() : [];
     const options = await generateRegistrationOptions({
       rpName: "Oriel", rpID: this.rpID,
-      userID: encoder.encode(user.id), userName: user.display_name, userDisplayName: user.display_name,
+      userID: new Uint8Array(encoder.encode(user.id)), userName: user.display_name, userDisplayName: user.display_name,
       timeout: CHALLENGE_SECONDS * 1000, attestationType: "none",
       authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "required" },
       extensions: { credProps: true }, supportedAlgorithmIDs: ALGORITHMS,
@@ -667,7 +700,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     const key = info.credential.publicKey;
     const publicKey = key.byteOffset === 0 && key.byteLength === key.buffer.byteLength
       ? key.buffer : key.buffer.slice(key.byteOffset, key.byteOffset + key.byteLength);
-    this.ctx.storage.transactionSync(() => {
+    this.accountState.transaction(() => {
       this.ceremonyStillValid(challenge, session);
       if (this.sql.exec("SELECT id FROM credentials WHERE id = ?", info.credential.id).toArray().length) {
         fail(409, "This Passkey is already registered");
@@ -717,7 +750,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     const user = this.sql.exec<User>("SELECT id, display_name FROM users WHERE id = ?", credential.user_id).toArray()[0];
     if (!user) fail(400, "Passkey account is unavailable");
     const fresh = await this.newSession();
-    this.ctx.storage.transactionSync(() => {
+    this.accountState.transaction(() => {
       this.ceremonyStillValid(challenge, session);
       const current = this.sql.exec<Credential>("SELECT * FROM credentials WHERE id = ?", credential.id).toArray()[0];
       // A second ceremony may have advanced the counter while signature verification awaited.
@@ -748,7 +781,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     const hostHash = await this.hostHash(request);
     const token = randomSecret();
     const tokenHash = await hash(token);
-    const result = this.ctx.storage.transactionSync(() => {
+    const result = this.accountState.transaction(() => {
       const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0];
       if (device) {
         this.checkHost(device.host_hash, hostHash);
@@ -770,7 +803,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private async pairBrowser(request: Request, body: Record<string, unknown>, claim: boolean): Promise<Response> {
     const session = await this.requireSession(request);
     const tokenHash = await hash(pairingToken(body.token));
-    const result = this.ctx.storage.transactionSync(() => {
+    const result = this.accountState.transaction(() => {
       this.requireLiveSession(session);
       const pending = this.sql.exec<Pairing>("SELECT * FROM pairings WHERE token_hash = ?", tokenHash).toArray()[0];
       if (!pending) fail(404, "Pairing link is invalid or has already completed");
@@ -790,7 +823,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     if (action === "confirm" && (typeof body.user_id !== "string" || !DEVICE_ID.test(body.user_id))) {
       fail(400, "Invalid account ID");
     }
-    const result = this.ctx.storage.transactionSync(() => {
+    const result = this.accountState.transaction(() => {
       const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0];
       if (device) {
         this.checkHost(device.host_hash, hostHash);

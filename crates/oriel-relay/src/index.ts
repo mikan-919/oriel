@@ -2,6 +2,9 @@ export { RelayDevice } from "../build/index.js";
 export { AccountRegistry } from "./account";
 import { quotaResponse } from "./quota";
 import { workflowChange, type WebhookEnv } from "./webhook";
+import { WorkflowReader } from "./workflow-reader";
+import { digest, type WorkflowSnapshot } from "./workflow";
+import type { IntegrationEnv, SnapshotPreparation } from "./integrations";
 
 interface RelayResponse extends Response {
   webSocket: WebSocket | null;
@@ -12,14 +15,37 @@ interface ObjectNamespace {
   get(id: { toString(): string }): { fetch(request: Request): Promise<RelayResponse> };
 }
 
-interface Env extends WebhookEnv {
-  ACCOUNTS: ObjectNamespace;
+interface Env extends WebhookEnv, IntegrationEnv {
+  ACCOUNTS: Omit<ObjectNamespace, "get"> & { get(id: { toString(): string }): {
+    fetch(request: Request): Promise<RelayResponse>;
+    prepareSnapshot(request: Request): Promise<{ value: SnapshotPreparation } | { error: string; status: number }>;
+    finishSnapshot(request: Request, fence: string, snapshot: WorkflowSnapshot, snapshotHash: string, issueNumber?: number): Promise<{ value: boolean } | { error: string; status: number }>;
+  } };
   RELAY: ObjectNamespace;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const snapshot = /^\/api\/workflows\/[a-f0-9]{32}(\/snapshot)?$/.exec(url.pathname);
+    if (snapshot && request.method === (snapshot[1] ? "POST" : "GET")) {
+      const account = env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts"));
+      const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
+      try {
+        const prepared = await account.prepareSnapshot(request.clone());
+        if ("error" in prepared) return json({ error: prepared.error }, prepared.status);
+        const reader = new WorkflowReader(env, { fail: (status, message) => { throw Object.assign(new Error(message), { status }); } });
+        const value = await reader.read(prepared.value);
+        const finished = await account.finishSnapshot(request, prepared.value.fence, value, await digest(value), prepared.value.issue_number);
+        if ("error" in finished) return json({ error: finished.error }, finished.status);
+        return json(snapshot[1] ? { snapshot: value, poll_after_seconds: prepared.value.poll_after_seconds } : value);
+      } catch (error) {
+        const quota = quotaResponse(error);
+        if (quota) return quota;
+        const known = error instanceof Error && "status" in error && typeof error.status === "number";
+        return json({ error: known ? error.message : "Workflow provider state could not be confirmed; no approval was inferred" }, known ? error.status as number : 502);
+      }
+    }
     // Preserve the original provider URLs as well as the /api routes.
     const hook = /^(?:\/api)?\/webhooks\/(github|linear)$/.exec(url.pathname);
     if (hook) {

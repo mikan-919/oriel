@@ -73,63 +73,85 @@ async function runtime(env = {}, outbound, measureSql = false) {
       ...metadata,
       contents: await readFile(`${base}bundle/${name}`, metadata.type === "esm" ? "utf8" : undefined),
     };
-    if (measureSql && metadata.type === "esm" && modules[name].contents.includes("sql = this.ctx.storage.sql;")) {
-      // Test-only instrumentation of the actual workerd SQLite cursor counters.
-      // This method and wrapper are never present in the deployed bundle.
-      if (measureSql === "combined-prototype") {
-        // Only running source work skips HOW discussion history. Admission,
-        // WHAT request identity and all native approval facts are still read.
-        const original = 'if (row.linear) {';
-        if (!modules[name].contents.includes(original)) throw new Error("HOW history probe no longer matches the bundle");
-        modules[name].contents = modules[name].contents.replace(original,
-          'if (row.linear && !(issueNumber !== void 0 && row.phase === "running")) {');
-      }
+    if (measureSql && metadata.type === "esm" && modules[name].contents.includes("i.relaydevice_new(e, t)")) {
+      modules[name].contents = modules[name].contents.replace("n = i.relaydevice_new(e, t);", `
+        const cost = {gets:0, puts:0, alarmSets:0};
+        this.__terminalCostForTest = cost;
+        const source = e.storage;
+        const storage = new Proxy(source, {get:(target, key) => {
+          const value = Reflect.get(target, key, target);
+          if (typeof value !== "function") return value;
+          return (...args) => {
+            if (key === "get") cost.gets++;
+            if (key === "put") cost.puts++;
+            if (key === "setAlarm") cost.alarmSets++;
+            return value.apply(target, args);
+          };
+        }});
+        e = new Proxy(e, {get:(target, key) => {
+          if (key === "storage") return storage;
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }});
+        n = i.relaydevice_new(e, t);
+      `);
+      modules[name].contents = modules[name].contents.replace("fetch(e) {", `fetch(e) {
+        if (new URL(e.url).pathname === "/__terminal-cost-for-test") return Promise.resolve(Response.json(this.__terminalCostForTest));
+      `);
+    }
+    if (metadata.type === "esm" && modules[name].contents.includes("sql = this.accountState.sql;")) {
+      modules[name].contents = modules[name].contents.replace("let clearChallenge = false;", `
+        if (new URL(request.url).pathname === "/test-sql") {
+          const {query, bindings} = await request.json();
+          return Response.json(this.sql.exec(query, ...bindings).toArray());
+        }
+        let clearChallenge = false;
+      `);
+      modules[name].contents = modules[name].contents.replace('if (url.pathname.startsWith("/api/")) {', `
+        if (url.pathname === "/__terminal-cost-for-test") return env.RELAY.get(env.RELAY.idFromName(url.searchParams.get("device"))).fetch(new Request("https://internal/__terminal-cost-for-test"));
+        if (url.pathname === "/__account-sql-for-test") return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request("https://internal/test-sql", request));
+        if (url.pathname.startsWith("/api/")) {
+      `);
+      modules[name].contents = modules[name].contents.replace("sql = this.accountState.sql;", `
+        sql = this.accountState.sql;
+        accountSqlForTest(query, bindings) { return this.sql.exec(query, ...bindings).toArray(); }
+        rollbackForTest(query, bindings, lookup, arguments_) {
+          try { this.accountState.transaction(() => { this.sql.exec(query, ...bindings); this.sql.exec(lookup, ...arguments_).toArray(); throw Error("rollback"); }); }
+          catch { return true; }
+        }
+      `);
+    }
+    if (measureSql && metadata.type === "esm" && modules[name].contents.includes("accountState = new AccountState(this.ctx.storage);")) {
       modules[name].contents = modules[name].contents.replace("this.ctx.storage.setAlarm(deadline)", "this.setAlarmForTest(deadline)");
-      modules[name].contents = modules[name].contents.replace("sql = this.ctx.storage.sql;", `
+      modules[name].contents = modules[name].contents.replace("accountState = new AccountState(this.ctx.storage);", `
         cost = {reads:0, writes:0, alarmSets:0};
-        authRowsForTest = new Map();
         costForTest() { return this.cost; }
         setAlarmForTest(deadline) { this.cost.alarmSets++; return this.ctx.storage.setAlarm(deadline); }
         alarmForTest() { return this.alarm(); }
-        clearAuthRowsForTest() { this.authRowsForTest.clear(); }
+        clearAuthRowsForTest() { this.accountState.clear(); }
         expireSessionsForTest() { this.sql.exec("UPDATE sessions SET expires_at = 0"); }
         shortenSessionsForTest() { this.sql.exec("UPDATE sessions SET expires_at = ?", Math.floor(Date.now()/1000) + 2); }
         replayConstructorSqlForTest(queries) { for (const query of queries) this.sql.exec(query).toArray(); }
-        sql = {exec:(...args) => {
-          const cache = ${["auth-state-prototype", "combined-prototype"].includes(measureSql)};
-          const session = /\\bFROM sessions\\b/i.test(args[0]);
-          const lookup = /^SELECT\\b/i.test(args[0]) && /\\bFROM (?:devices|account_integrations|sessions)\\b/i.test(args[0]);
-          const key = JSON.stringify(session && /expires_at > \\?/i.test(args[0]) ? args.slice(0, -1) : args);
-          if (cache && lookup && this.authRowsForTest.has(key)) {
-            const saved = this.authRowsForTest.get(key);
-            const rows = session && saved.expiresAt <= Math.floor(Date.now()/1000) ? [] : structuredClone(saved.rows);
-            return {toArray:() => rows, [Symbol.iterator]:() => rows[Symbol.iterator]()};
-          }
-          if (cache && !/^SELECT\\b|^PRAGMA\\b/i.test(args[0])) this.authRowsForTest.clear();
-          let expiresAt = Infinity;
-          if (cache && lookup && session) {
-            const expiry = this.ctx.storage.sql.exec("SELECT expires_at FROM sessions WHERE hash = ?", args[1]);
-            expiresAt = expiry.toArray()[0]?.expires_at ?? 0;
-            this.cost.reads += expiry.rowsRead;
-            this.cost.writes += expiry.rowsWritten;
-          }
+        sqlForTest = {exec:(...args) => {
           const cursor = this.ctx.storage.sql.exec(...args);
           let reads = 0, writes = 0;
           const count = () => {this.cost.reads += cursor.rowsRead - reads; this.cost.writes += cursor.rowsWritten - writes; reads = cursor.rowsRead; writes = cursor.rowsWritten;};
           count();
           return new Proxy(cursor, {get:(target, key) => {
-            if (key === 'toArray') return () => {const value = target.toArray(); count(); if (cache && lookup) this.authRowsForTest.set(JSON.stringify(session && /expires_at > \\?/i.test(args[0]) ? args.slice(0,-1) : args), {rows:structuredClone(value), expiresAt}); return value;};
+            if (key === 'toArray') return () => {const value = target.toArray(); count(); return value;};
             const value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
           }});
         }};
+        accountState = new AccountState(this.ctx.storage, this.sqlForTest);
       `);
     }
   }
+
   const integrationEnv = {
     GITHUB_CLIENT_ID: "", GITHUB_CLIENT_SECRET: "", GITHUB_APP_ID: "", GITHUB_APP_PRIVATE_KEY: "", LINEAR_CLIENT_ID: "", INTEGRATION_ENCRYPTION_KEY: "", GITHUB_APP_WEBHOOK_SECRET: "", LINEAR_WEBHOOK_SECRET: "",
     ...env,
   };
-  return new Miniflare({ unsafeInspectDurableObjects: true, workers: [{ config: {
+  const worker = new Miniflare({ unsafeInspectDurableObjects: true, workers: [{ config: {
     ...config,
     env: {
       ...config.env, PUBLIC_ORIGIN: { type: "text", value: origin },
@@ -137,6 +159,20 @@ async function runtime(env = {}, outbound, measureSql = false) {
     },
     manifest: { mainModule: config.manifest.mainModule, modules },
   }, ...(outbound ? { dev: { outboundService: { type: "fetcher", handler: outbound } } } : {}) }] });
+  const inspect = worker.unsafeGetDurableObjectStorage.bind(worker);
+  worker.unsafeGetDurableObjectStorage = async (script, name, id) => {
+    const storage = await inspect(script, name, id);
+    if (name !== "AccountRegistry") return storage;
+    // Production has one SQL writer. Mutate through that same writer in tests
+    // so rollback, refresh and revocation exercise the actual invalidation path.
+    return new Proxy(storage, { get: (target, key) => key === "exec" ? async (query, ...bindings) => {
+      if (/^SELECT\b|^PRAGMA\b/i.test(query)) return target.exec(query, ...bindings);
+      const response = await worker.dispatchFetch(`${origin}/__account-sql-for-test`, {method:"POST", body:JSON.stringify({query, bindings})});
+      if (!response.ok) throw Error("Test account SQL mutation failed");
+      return response.json();
+    } : Reflect.get(target, key) });
+  };
+  return worker;
 }
 
 function client(worker, publicOrigin = origin) {

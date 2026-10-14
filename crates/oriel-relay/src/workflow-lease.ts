@@ -1,6 +1,6 @@
 import type { Device, Integrations } from "./integrations";
 import { digest } from "./workflow";
-import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask } from "./workflow";
+import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask, WorkflowSnapshot } from "./workflow";
 
 const SOCKET_TAG = "workflow";
 const WATCH_TAG = "workflow-progress";
@@ -25,6 +25,7 @@ type WatchAttachment = {
   expires_at: number;
   last_snapshot?: string;
   changes?: boolean;
+  state?: boolean;
 };
 type Attachment = {
   protocol: typeof PROTOCOL;
@@ -53,6 +54,7 @@ function sameBinding(left: WorkflowBinding, right: WorkflowBinding): boolean {
 
 /** Ownership lives only in hibernating WebSocket attachments, never in SQL. */
 export class WorkflowLeases {
+  private lastFacts = new Map<string, string>();
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly integrations: Integrations,
@@ -134,6 +136,25 @@ export class WorkflowLeases {
     }
   }
 
+  publishFacts(device: Device, snapshot: WorkflowSnapshot, hash: string, issueNumber?: number): void {
+    const payload = JSON.stringify({ type: "workflow-snapshot", device_id: device.device_id, issue_number: issueNumber, snapshot });
+    const key = `${device.device_id}:${issueNumber ?? "all"}`;
+    if (this.lastFacts.get(key) === hash) return;
+    if (this.lastFacts.size >= 64) this.lastFacts.clear();
+    this.lastFacts.set(key, hash);
+    for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+      try { const watcher = this.liveWatch(ws); if (watcher.state && watcher.user_id === device.user_id) ws.send(payload); }
+      catch { /* Revoked sessions cannot receive provider facts. */ }
+    }
+  }
+
+  deviceChanged(userId: string): void {
+    for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+      try { const watcher = this.liveWatch(ws); if (watcher.state && watcher.user_id === userId) this.send(ws, { type: "device-changed" }); }
+      catch { /* Revoked. */ }
+    }
+  }
+
   changed(users: Set<string>): void {
     for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
       const saved = this.attachment(ws);
@@ -209,7 +230,7 @@ export class WorkflowLeases {
     catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
     this.publish();
     this.schedule();
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Snapshot-Transport": "http" } });
   }
 
   verify(device: Device, leaseId: string): WorkflowGrant {
@@ -226,14 +247,32 @@ export class WorkflowLeases {
     throw new WorkflowLeaseError();
   }
 
+  readScope(device: Device, leaseId: unknown, renew = false): { issue_number?: number; check: () => void } {
+    const ws = this.ctx.getWebSockets(SOCKET_TAG).find(socket => this.attachment(socket)?.binding.device_id === device.device_id);
+    if (!ws) throw new WorkflowLeaseError();
+    const check = () => {
+      const current = this.live(ws);
+      if (current.grant?.lease_id !== leaseId) throw new WorkflowLeaseError();
+      if (current.binding.user_id !== device.user_id || current.binding.host_hash !== device.host_hash ||
+          current.binding.repository_generation !== device.repository_generation) throw new WorkflowLeaseError();
+    };
+    check();
+    const current = this.live(ws);
+    if (renew) {
+      ws.serializeAttachment({ ...current, expires_at: Date.now() + EXPIRY_MS, changes: true, dirty: false });
+      this.schedule();
+    }
+    return { issue_number: current.grant?.issue_number, check };
+  }
+
   private send(ws: WebSocket, response: Record<string, unknown>): void {
     try { ws.send(JSON.stringify(response)); } catch { this.stop(ws); }
   }
 
   async message(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (this.ctx.getTags(ws).includes(WATCH_TAG)) {
-      if (message === "ready" || message === "ready:changes") {
-        if (message === "ready:changes") ws.serializeAttachment({...this.liveWatch(ws), changes:true});
+      if (message === "ready" || message === "ready:changes" || message === "ready:state") {
+        ws.serializeAttachment({...this.liveWatch(ws), changes:message !== "ready", state:message === "ready:state"});
         this.publish();
         this.schedule();
         return;

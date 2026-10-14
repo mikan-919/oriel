@@ -383,7 +383,7 @@ function connectProgress() {
     const current = () => currentAccount(epoch) && progressSocket === connection;
     connection.addEventListener("open", () => {
         if (!current()) return;
-        connection.send("ready:changes");
+        connection.send("ready:state");
         progressKeepalive = setInterval(() => {
             if (current() && connection.readyState === WebSocket.OPEN) connection.send("oriel:ping");
         }, 15000);
@@ -407,6 +407,23 @@ function connectProgress() {
                 return;
             }
             const frame = JSON.parse(event.data);
+            if (frame.type === "device-changed") {
+                refreshDevices().catch(error => { if (current()) status.textContent = errorText(error); });
+                return;
+            }
+            if (frame.type === "workflow-snapshot") {
+                if (frame.device_id !== repositoryDeviceId || !Array.isArray(frame.snapshot?.workflows)) return;
+                let result = frame.snapshot;
+                if (Number.isSafeInteger(frame.issue_number)) {
+                    if (!workflowSnapshot || workflowSnapshot.repository_id !== result.repository_id) { scheduleWorkflowRefresh(); return; }
+                    const previous = workflowSnapshot.workflows.find(row => row.issue.number === frame.issue_number);
+                    const updated = result.workflows.map(row => row.phase === "running" && !row.how_comments.length && previous ? {...row, how_comments:previous.how_comments} : row);
+                    result = {...result, workflows:[...workflowSnapshot.workflows.filter(row => row.issue.number !== frame.issue_number), ...updated].sort((a,b) => a.issue.number-b.issue.number)};
+                }
+                if (frame.issue_number === undefined) lastWorkflowPoll = Date.now();
+                refreshWorkflow(result).catch(error => { if (current()) status.textContent = errorText(error); });
+                return;
+            }
             if (frame.type === "workflow-changed") {
                 scheduleWorkflowRefresh();
                 return;
@@ -853,7 +870,7 @@ function appendDescription(item, label, text) {
     item.append(details);
 }
 
-async function refreshWorkflow() {
+async function refreshWorkflow(pushed) {
     const device = devices.find((device) => device.device_id === repositoryDeviceId);
     if (!user || !device) return;
     const epoch = accountEpoch;
@@ -861,7 +878,7 @@ async function refreshWorkflow() {
     repositoryDetails.textContent = `${device.name} (${device.device_id})`;
     repositoryStatus.textContent = "Issue → Linear → PRの状態を読み込み中…";
     try {
-        const result = await integrationApi(`/api/workflows/${device.device_id}`);
+        const result = pushed ?? await integrationApi(`/api/workflows/${device.device_id}`);
         if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
         workflowSnapshot = result;
         device.repository = result.repository;
@@ -1133,7 +1150,7 @@ function scheduleDevices() {
             try { await refreshDevices(); } catch (_) {}
         }
         if (currentAccount(epoch)) scheduleDevices();
-    }, 300000);
+    }, 900000);
 }
 render();
 perform(async () => {

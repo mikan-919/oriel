@@ -633,6 +633,21 @@ impl Drop for Control {
     }
 }
 
+fn batchable_output(event: &Value) -> bool {
+    event["type"] == "event"
+        && event["message"].get("id").is_none()
+        && matches!(
+            event["message"]["method"].as_str(),
+            Some(
+                "item/agentMessage/delta"
+                    | "item/commandExecution/outputDelta"
+                    | "item/fileChange/outputDelta"
+                    | "item/reasoning/textDelta"
+                    | "item/reasoning/summaryTextDelta"
+            )
+        )
+}
+
 pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -> Result<Control> {
     let hub = Hub::new();
     ensure!(
@@ -735,7 +750,12 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 let mut request = url.as_str().into_client_request()?;
                 let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", identity.host_token))?;
                 token.set_sensitive(true); request.headers_mut().insert("Authorization", token);
-                let (mut socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+                let (mut socket, response) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+                let batching = response.headers().get("x-oriel-output-batch").is_some_and(|value| value == "200");
+                let mut pending = Vec::<Value>::new();
+                let mut pending_bytes = 0;
+                let mut flush = tokio::time::interval(Duration::from_millis(200));
+                flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 opened = Some(tokio::time::Instant::now());
                 socket.send(Message::Text(hub.state().to_string().into())).await?;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
@@ -743,11 +763,32 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 loop {
                     tokio::select! {
                         _ = stopping.changed() => return Ok(()),
+                        _ = flush.tick(), if !pending.is_empty() => {
+                            socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                            pending_bytes = 0;
+                        },
                         _ = heartbeat.tick() => { socket.send(Message::Text(KEEPALIVE_PING.into())).await?; },
                         _ = tokio::time::sleep_until(deadline) => bail!("Codex Relay keepalive timed out"),
                         event = events.recv() => { match event {
-                            Ok(event) => socket.send(Message::Text(event.to_string().into())).await?,
-                            Err(broadcast::error::RecvError::Lagged(_)) => socket.send(Message::Text(hub.state().to_string().into())).await?,
+                            Ok(event) => {
+                                let output = batching && batchable_output(&event);
+                                let size = event.to_string().len();
+                                if !pending.is_empty() && (!output || pending.len() >= 128 || pending_bytes + size > 256 * 1024) {
+                                    socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                                    pending_bytes = 0;
+                                }
+                                if output && size <= 256 * 1024 {
+                                    pending_bytes += size;
+                                    pending.push(event);
+                                } else { socket.send(Message::Text(event.to_string().into())).await?; }
+                            },
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                if !pending.is_empty() {
+                                    socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                                    pending_bytes = 0;
+                                }
+                                socket.send(Message::Text(hub.state().to_string().into())).await?;
+                            },
                             Err(_) => break,
                         } },
                         frame = socket.next() => {
@@ -810,6 +851,32 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batching_accepts_output_only_and_keeps_approval_and_control_immediate() {
+        for method in [
+            "item/agentMessage/delta",
+            "item/commandExecution/outputDelta",
+            "item/fileChange/outputDelta",
+            "item/reasoning/textDelta",
+            "item/reasoning/summaryTextDelta",
+        ] {
+            assert!(batchable_output(
+                &json!({"type":"event", "engine":"engine", "message":{"method":method,"params":{"delta":"output"}}})
+            ));
+            assert!(!batchable_output(
+                &json!({"type":"event", "message":{"method":method,"id":"approval"}})
+            ));
+        }
+        for event in [
+            json!({"type":"response"}),
+            json!({"type":"state"}),
+            json!({"type":"event","message":{"method":"item/commandExecution/requestApproval","id":1}}),
+            json!({"type":"event","message":{"method":"turn/completed"}}),
+        ] {
+            assert!(!batchable_output(&event));
+        }
+    }
 
     #[test]
     fn capacity_before_turn_start_keeps_native_approval() {

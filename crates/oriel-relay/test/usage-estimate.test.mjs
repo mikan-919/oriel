@@ -4,8 +4,8 @@ import test from "node:test";
 import { connect, device, hostHeaders, origin, pair, runtime } from "./helpers.mjs";
 import { workflowFixture } from "./workflow-fixture.mjs";
 
-// This measures a design prototype, not a deployed implementation. Expiry
-// checks and native provider approval reads remain live in all variants.
+// This measures the production implementation with all three connections.
+// The previous design measurements remain in usage-measurement.json.
 test("Continuous usage with workflow, dashboard and terminal connections", async () => {
   const report = {};
   const accountSource = await readFile(new URL("../src/account.ts", import.meta.url), "utf8");
@@ -17,7 +17,7 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
   // initialization statement separately rather than omit prior row scans.
   const initializationQueries = [schema, "PRAGMA table_info(devices)", integrationSchema]
     .flatMap(query => query.split(";").map(statement => statement.trim()).filter(Boolean));
-  for (const [name, mode] of [["current", true], ["authStatePrototype", "auth-state-prototype"], ["combinedPrototype", "combined-prototype"]]) {
+  for (const [name, mode] of [["implemented", true]]) {
     const fixture = workflowFixture();
     let outbound = 0;
     const worker = await runtime(fixture.env, request => { outbound++; return fixture.fetch(request); }, mode);
@@ -70,7 +70,11 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       const started = await daemon.api(`/api/workflows/${device}/actions`, { lease_id: admitted.lease_id, action: "begin" }, hostHeaders);
       assert.equal(started.status, 200);
       assert.equal(how.state.name, "In Progress");
-      const snapshot = () => rpc({ type: "snapshot", lease_id: admitted.lease_id, changes: true });
+      const snapshot = async () => {
+        const result = await daemon.api(`/api/workflows/${device}/snapshot`, { lease_id: admitted.lease_id }, hostHeaders);
+        assert.equal(result.status, 200, JSON.stringify(result.data));
+        return result.data;
+      };
       const samples = {};
       const measure = async (label, operation) => {
         await settle();
@@ -120,7 +124,8 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       await worker.dispose();
     }
   }
-  assert.ok(report.authStatePrototype.activeSnapshot.rowsRead < report.current.activeSnapshot.rowsRead);
+  assert.equal(report.implemented.activeSnapshot.rowsRead, 0);
+  assert.equal(report.implemented.codexOutput.rowsRead, 0);
   console.log("Continuous usage SQL measurements:", JSON.stringify(report));
   if (process.env.ORIEL_USAGE_REPORT) await writeFile(process.env.ORIEL_USAGE_REPORT, `${JSON.stringify(report, null, 2)}\n`);
 });

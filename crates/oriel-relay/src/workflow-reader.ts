@@ -1,0 +1,440 @@
+import { digest, githubIssueLink, OID, parseConfiguration, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
+import type { Auth, IntegrationEnv, WorkflowContext, WorkflowFacts, WorkflowHow, Page, LinkedIssue, GithubPull, GithubComment, LinearComment, SnapshotPreparation } from "./integrations";
+const SECRET = /^[a-f0-9]{64}$/;
+const GITHUB_COMMAND = "/oriel";
+const githubCommand = (body: string) => /^[\/／]oriel(?:\s|$)/i.test(body.trimStart()) ? { planning: /^[\/／]oriel\s+how(?:\s|$)/i.test(body.trimStart()) } : null;
+const encoder = new TextEncoder();
+const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+
+/** Provider reads can execute in a Worker without retaining a Durable Object. */
+export class WorkflowReader {
+  constructor(protected readonly env: IntegrationEnv, protected readonly auth: Pick<Auth, "fail">) {}
+  async read(preparation: SnapshotPreparation): Promise<WorkflowSnapshot> {
+    const context = { ...preparation.context, check: () => {} };
+    let accessible = false;
+    for (let page = 1; ; page++) {
+      const response = await fetch(`https://api.github.com/user/installations/${context.repository.installation_id}/repositories?per_page=100&page=${page}`, {
+        headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${preparation.github_user}`, "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28" }, redirect: "manual",
+      });
+      if (!response.ok) this.auth.fail(502, "GitHub repository access could not be confirmed");
+      const result = await response.json() as { repositories: { id: number }[] };
+      if (!Array.isArray(result.repositories)) this.auth.fail(502, "GitHub repository access could not be confirmed");
+      if (result.repositories.some(repository => repository.id === context.repository.repository_id)) accessible = true;
+      if (result.repositories.length < 100) break;
+    }
+    if (!accessible) this.auth.fail(403, "GitHub repository is no longer accessible");
+    return this.snapshot(context, preparation.issue_number);
+  }
+  async snapshot(context: WorkflowContext, issueNumber?: number): Promise<WorkflowSnapshot> {
+    return (await this.workflowFacts(context, issueNumber)).snapshot;
+  }
+  protected async workflowGithub<T>(context: WorkflowContext, path: string, method = "GET", body?: unknown, missing = false): Promise<T | null> {
+    context.check();
+    const response = await fetch(`https://api.github.com${path}`, { method, headers: {
+      Accept: "application/vnd.github+json", Authorization: `Bearer ${context.github}`, "User-Agent": "Oriel", "X-GitHub-Api-Version": "2022-11-28",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "manual" });
+    context.check();
+    if (missing && response.status === 404) return null;
+    if (!response.ok) this.auth.fail(502, `GitHub workflow ${method} failed (HTTP ${response.status}); provider state could not be confirmed`);
+    const result = await response.json() as T;
+    context.check();
+    return result;
+  }
+
+  protected async workflowList<T>(context: WorkflowContext, path: string): Promise<T[]> {
+    const nodes: T[] = [];
+    for (let page = 1; ; page++) {
+      const rows = await this.workflowGithub<T[]>(context, `${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`);
+      if (!Array.isArray(rows)) this.auth.fail(502, "GitHub workflow collection is unavailable");
+      nodes.push(...rows);
+      if (rows.length < 100) return nodes;
+    }
+  }
+
+  protected async workflowLinear<T>(context: WorkflowContext, query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    context.check();
+    try {
+      const result = await this.linear<T>(context.linear, query, variables);
+      context.check();
+      return result;
+    } catch (error) {
+      context.check();
+      if (error instanceof Error && ("status" in error || ("missingIssue" in error && error.missingIssue === true))) throw error;
+      const code = error instanceof Error && "providerCode" in error && typeof error.providerCode === "string" &&
+        /^(?:http_[0-9]{3}|graphql_error)$/.test(error.providerCode) ? error.providerCode : "transport_or_response_error";
+      this.auth.fail(502, `Linear workflow request failed (${code}); provider state could not be confirmed`);
+    }
+  }
+
+  protected async workflowHow(context: WorkflowContext, id: string): Promise<WorkflowHow | null> {
+    let result: { issue: (LinearHow & { team: { id: string }; attachments: Page<{ url: string }> }) | null };
+    try {
+      result = await this.workflowLinear<typeof result>(context,
+        "query($id:String!){issue(id:$id){id identifier title description url state{id name type} team{id} attachments(first:100,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}}}", { id });
+    } catch (error) {
+      context.check();
+      if (error instanceof Error && "missingIssue" in error && error.missingIssue === true) return null;
+      throw error;
+    }
+    if (!result.issue) return null;
+    const { attachments, ...issue } = result.issue;
+    const all = [...attachments.nodes];
+    let page = attachments;
+    const seen = new Set<string>();
+    while (page.pageInfo.hasNextPage) {
+      const after = page.pageInfo.endCursor;
+      if (!after || seen.has(after)) this.auth.fail(502, "Linear attachment pagination is unavailable");
+      seen.add(after);
+      const next = await this.workflowLinear<{ issue: { attachments: Page<{ url: string }> } | null }>(context,
+        "query($id:String!,$after:String!){issue(id:$id){attachments(first:100,after:$after,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}}}", { id, after });
+      if (!next.issue) this.auth.fail(502, "Linear issue disappeared");
+      page = next.issue.attachments;
+      all.push(...page.nodes);
+    }
+    return { ...issue, attachments: all };
+  }
+
+  protected async workflowStates(context: WorkflowContext): Promise<LinearState[]> {
+    const nodes: LinearState[] = [];
+    let after: string | null = null;
+    const seen = new Set<string>();
+    do {
+      const data: { team: { states: Page<LinearState> } | null } = await this.workflowLinear(context,
+        "query($id:String!,$after:String){team(id:$id){states(first:100,after:$after){nodes{id name type} pageInfo{hasNextPage endCursor}}}}", { id: context.team.team_id, after });
+      if (!data.team) this.auth.fail(409, "Selected Linear team is unavailable");
+      nodes.push(...data.team.states.nodes);
+      after = data.team.states.pageInfo.hasNextPage ? data.team.states.pageInfo.endCursor : null;
+      if (data.team.states.pageInfo.hasNextPage && (!after || seen.has(after))) this.auth.fail(502, "Linear state pagination is unavailable");
+      if (after) seen.add(after);
+    } while (after);
+    return nodes;
+  }
+
+  protected async workflowHows(context: WorkflowContext): Promise<WorkflowHow[]> {
+    const hows: WorkflowHow[] = [];
+    let after: string | null = null;
+    const cursors = new Set<string>();
+    do {
+      // Do not filter the team: a foreign-team formal link must block, not look unlinked.
+      const data: { issues: Page<{ id: string }> } = await this.workflowLinear(context,
+        "query($prefix:String!,$after:String){issues(first:100,after:$after,includeArchived:true,orderBy:createdAt,filter:{attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id} pageInfo{hasNextPage endCursor}}}",
+        { prefix: `https://github.com/${context.repository.owner}/${context.repository.name}/issues/`, after });
+      const ids = [...new Set(data.issues.nodes.map(candidate => candidate.id))].filter(id => !hows.some(how => how.id === id));
+      for (let offset = 0; offset < ids.length; offset += 4) {
+        const batch = await Promise.all(ids.slice(offset, offset + 4).map(id => this.workflowHow(context, id)));
+        context.check();
+        for (const how of batch) {
+          if (!how) this.auth.fail(502, "Linked HOW is unavailable");
+          hows.push(how);
+        }
+      }
+      after = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
+      if (data.issues.pageInfo.hasNextPage && (!after || cursors.has(after))) this.auth.fail(502, "Linear issue pagination is unavailable");
+      if (after) cursors.add(after);
+    } while (after);
+    return hows;
+  }
+
+  protected async workflowFacts(context: WorkflowContext, issueNumber?: number): Promise<WorkflowFacts> {
+    const repository = await this.workflowGithub<{ id: number; node_id: string; default_branch: string }>(context, context.path);
+    if (!repository || repository.id !== context.repository.repository_id || !validBranch(repository.default_branch)) this.auth.fail(409, "Selected repository identity is unavailable");
+    // Read independent provider collections together; every await still checks
+    // the live binding, and a failed read prevents any snapshot or approval.
+    const [{ base, configuration }, issues, pulls, references, hows, states] = await Promise.all([
+      (async () => {
+        const base = await this.workflowGithub<{ object: { sha: string } }>(context, `${context.path}/git/ref/heads/${encodeURIComponent(repository.default_branch)}`);
+        if (!base || !OID.test(base.object.sha)) this.auth.fail(502, "Target commit is unavailable");
+        const configuration = await this.workflowGithub<{ type: string; encoding: string; content: string; sha: string }>(context,
+          `${context.path}/contents/.oriel.yaml?ref=${base.object.sha}`, "GET", undefined, true);
+        return { base, configuration };
+      })(),
+      issueNumber === undefined
+        ? this.workflowList<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues?state=all&sort=created&direction=asc`)
+        : this.workflowGithub<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues/${issueNumber}`, "GET", undefined, true)
+          .then(issue => issue ? [issue] : []),
+      this.workflowList<GithubPull>(context, `${context.path}/pulls?state=all`),
+      this.workflowGithub<{ ref: string; object: { sha: string } }[]>(context, `${context.path}/git/matching-refs/heads/oriel/`),
+      this.workflowHows(context),
+      this.workflowStates(context),
+    ]);
+    context.check();
+    let source: string | null = null;
+    if (configuration) {
+      if (configuration.type !== "file" || configuration.encoding !== "base64" || configuration.content.length > 131072) this.auth.fail(409, "Target .oriel.yaml must be a bounded regular file");
+      try { source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(atob(configuration.content.replace(/\s/g, "")), char => char.charCodeAt(0))); }
+      catch { this.auth.fail(409, "Target .oriel.yaml is not UTF-8"); }
+    }
+    if (!Array.isArray(references) || references.some(ref => !ref.ref.startsWith("refs/heads/oriel/") || !validBranch(ref.ref.slice("refs/heads/".length)) || !OID.test(ref.object.sha))) this.auth.fail(502, "Canonical reference facts are unavailable");
+    const refs = new Map(references.map(ref => [ref.ref.replace(/^refs\/heads\//, ""), ref.object.sha]));
+    const snapshot: WorkflowSnapshot = { repository: context.binding.repository, repository_id: repository.id, repository_node_id: repository.node_id,
+      base_branch: repository.default_branch, target_oid: base.object.sha, team: context.team, configuration: parseConfiguration(source), workflows: [] };
+    const recoveries = new Map<number, string>();
+    for (let offset = 0; offset < issues.length; offset += 4) {
+      const rows = await Promise.all(issues.slice(offset, offset + 4).map(async raw => {
+        if (raw.pull_request) return null;
+        const issue: GithubWhat = { number: raw.number, node_id: raw.node_id, title: raw.title, body: raw.body ?? null, url: raw.html_url, state: raw.state };
+        if (!Number.isSafeInteger(issue.number) || !issue.node_id || !["open", "closed"].includes(issue.state)) this.auth.fail(502, "GitHub WHAT identity is unavailable");
+        const linked = hows.filter(how => how.attachments.some(attachment => {
+          const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/0*([0-9]+)(?:[/?#].*)?$/i.exec(attachment.url);
+          return !!match && match[1].toLowerCase() === context.repository.owner.toLowerCase() && match[2].toLowerCase() === context.repository.name.toLowerCase() && Number(match[3]) === issue.number;
+        }));
+        // Any human GitHub user may request planning, including before deployment.
+        // Commands must start the comment; quotes, code and prose do not opt in.
+        const initialComments = linked.length === 0 && issue.state === "open"
+          ? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
+        const request = await this.workflowIssueFeedback(context, initialComments, true);
+        const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
+          fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : request ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, issue_feedback: null, recovery: null,
+          what_comments: [], how_comments: [] };
+        if (linked.length === 0 && issue.state === "open") {
+          row.version = await digest(["oriel/initial-how-request/v1", row.version, request?.key ?? null]);
+          if (!request) row.blocked_reason = `Waiting for a human GitHub user to start a comment with ${GITHUB_COMMAND} how; this requests planning only, not implementation`;
+        }
+        if (row.phase === "needs-how" && linked.length === 0 && states.filter(state => state.name === "Triage" && state.type === "triage").length !== 1) {
+          row.phase = "blocked"; row.blocked_reason = "Selected Linear team needs one native Triage state; enable Team Settings > Triage before HOW planning";
+        }
+        if (linked.length > 1) { row.phase = "blocked"; row.blocked_reason = "Multiple Linear issues formally link this WHAT"; }
+        if (linked.length === 1) {
+          const how = linked[0];
+          const allLinks = how.attachments.filter(attachment => /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\//i.test(attachment.url)).map(attachment => githubIssueLink(attachment.url));
+          const distinct = new Set(allLinks.filter(link => link !== null).map(link => `${link!.owner}/${link!.name}#${link!.number}`));
+          const validLink = distinct.size === 1 && !allLinks.includes(null) && distinct.has(`${context.repository.owner.toLowerCase()}/${context.repository.name.toLowerCase()}#${issue.number}`);
+          const { team: _team, attachments: _attachments, ...linear } = how;
+          row.linear = linear;
+          row.version = await digest(["oriel/approval-fingerprint/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? "", how.id, how.title, how.description ?? ""]);
+          if (how.team.id !== context.team.team_id || !validLink) {
+            row.phase = "blocked"; row.blocked_reason = "HOW link is foreign, aliased or not one-to-one";
+          } else {
+            row.fingerprint = row.version;
+            row.branch = `oriel/${how.identifier}-gh-${issue.number}-${row.fingerprint}`;
+            if (!validBranch(row.branch)) { row.phase = "blocked"; row.blocked_reason = "Canonical branch is not a valid Git reference"; }
+            else {
+              row.canonical_oid = refs.get(row.branch) ?? null;
+              const matching = pulls.filter(pr => pr.head.ref === row.branch && pr.head.repo?.id === repository.id && pr.base.repo.id === repository.id && pr.base.ref === snapshot.base_branch);
+              const managed = matching.filter(pr => pr.body?.trim() === `Closes #${issue.number}` && !pr.draft);
+              if (matching.length !== managed.length || managed.length > 1) { row.phase = "blocked"; row.blocked_reason = "Canonical PR natural key is ambiguous or not Oriel-managed"; }
+              else {
+                const pr = managed[0];
+                if (pr) row.pull_request = this.workflowPull(pr);
+                const native = states.some(state => state.id === how.state.id && state.name === how.state.name && state.type === how.state.type);
+                const exact = (name: string, type: string) => native && how.state.name === name && how.state.type === type && states.filter(state => state.name === name && state.type === type).length === 1;
+                if (!native) { row.phase = "blocked"; row.blocked_reason = "Unknown Linear native state"; }
+                else if (pr?.merged_at) row.phase = exact("Done", "completed") ? "done" : "merged";
+                else if (exact("Done", "completed")) { row.phase = "blocked"; row.blocked_reason = "Done is not backed by an actual merged PR"; }
+                else if (issue.state === "closed" || how.state.type === "canceled") row.phase = "closed";
+                else if (exact("Triage", "triage")) { row.phase = "triage"; if (pr?.state === "open") row.blocked_reason = "HOW is in Triage; human Todo reapproval is required before continuing the existing PR"; }
+                else if (exact("Todo", "unstarted") && (!pr || pr.state === "open" && row.canonical_oid)) row.phase = pr ? "review" : "approved";
+                else if (row.canonical_oid && (exact("In Progress", "started") || how.state.type === "started" && /review/i.test(how.state.name) && states.filter(state => state.type === "started" && /review/i.test(state.name)).length === 1)) row.phase = pr?.state === "open" ? "review" : pr ? "blocked" : "running";
+                else { row.phase = "blocked"; row.blocked_reason = pr?.state === "closed" ? "PR closed without merge" : "Human Todo or a matching sealed In Progress branch is required"; }
+                const priorPrefix = `oriel/${how.identifier}-gh-${issue.number}-`;
+                const prior = new Set([...refs.keys(), ...pulls.filter(candidate => candidate.head.repo?.id === repository.id && candidate.base.repo.id === repository.id &&
+                  candidate.base.ref === snapshot.base_branch && !candidate.draft && candidate.body?.trim() === `Closes #${issue.number}`).map(candidate => candidate.head.ref)]
+                  .filter(branch => branch !== row.branch && branch.startsWith(priorPrefix) && SECRET.test(branch.slice(priorPrefix.length)) && validBranch(branch)));
+                const obsoleteOpen = pulls.some(candidate => prior.has(candidate.head.ref) && candidate.state === "open" && !candidate.merged_at &&
+                  candidate.head.repo?.id === repository.id && candidate.base.repo.id === repository.id && candidate.base.ref === snapshot.base_branch && !candidate.draft && candidate.body?.trim() === `Closes #${issue.number}`);
+                if (row.phase === "approved" && obsoleteOpen) { row.phase = "blocked"; row.blocked_reason = "Obsolete managed PR must be reconciled before a new approval can execute"; }
+                const activeNative = exact("Todo", "unstarted") || exact("In Progress", "started") || native && how.state.type === "started" && /review/i.test(how.state.name) && states.filter(state => state.type === "started" && /review/i.test(state.name)).length === 1;
+                if (row.phase === "blocked" && !row.canonical_oid && !row.pull_request && activeNative && prior.size) {
+                  if (prior.size === 1) { row.recovery = "invalidate"; recoveries.set(issue.number, [...prior][0]); row.blocked_reason = "Approval content changed; prior canonical work can only be returned to Triage"; }
+                  else row.blocked_reason = "Prior canonical evidence is ambiguous; move this HOW to Triage manually";
+                }
+                if (["approved", "running", "review"].includes(row.phase) && !snapshot.configuration.autonomous) { row.phase = "blocked"; row.blocked_reason = snapshot.configuration.error; }
+                if (row.phase === "review") {
+                  const exhausted: string[] = [];
+                  row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted);
+                  if (exhausted.length) row.blocked_reason = `Check retry limit reached (3 verified attempts): ${exhausted.join(", ")}`;
+                }
+              }
+            }
+          }
+        }
+        if (issue.state === "open") {
+          const comments = linked.length === 0 ? initialComments : await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
+          row.what_comments = comments.map(comment => ({ id: String(comment.id), body: comment.body, author: comment.user?.login ?? null, created_at: comment.created_at }))
+            .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+          row.issue_feedback = await this.workflowIssueFeedback(context, comments);
+          if (row.linear && !(issueNumber !== undefined && row.phase === "running")) {
+            const comments = await this.workflowLinearComments(context, row.linear.id);
+            row.how_comments = comments.map(comment => ({ id: comment.id, body: comment.body, author: comment.user?.name ?? null, created_at: comment.createdAt }))
+              .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+            if (row.phase === "triage") row.how_feedback = await this.workflowHowFeedback(context, row.linear.id, comments);
+          }
+        }
+        return row;
+      }));
+      context.check();
+      snapshot.workflows.push(...rows.filter((row): row is WorkflowRow => row !== null));
+    }
+    context.check();
+    return { snapshot, states, hows, pulls, refs, recoveries };
+  }
+
+  protected workflowPull(pr: GithubPull): PullRequest {
+    return { number: pr.number, url: pr.html_url, branch: pr.head.ref, head_oid: pr.head.sha, base_branch: pr.base.ref, state: pr.state, merged: !!pr.merged_at, draft: pr.draft };
+  }
+
+  protected async workflowMarker(context: WorkflowContext, kind: string, key: string): Promise<string> {
+    const secret = Uint8Array.from(this.env.INTEGRATION_ENCRYPTION_KEY!.match(/../g)!, byte => parseInt(byte, 16));
+    const hmac = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const signature = await crypto.subtle.sign("HMAC", hmac, encoder.encode(JSON.stringify(["oriel/workflow-cursor/v1", context.repository.repository_id, kind === "what" ? null : context.team.team_id, kind, key])));
+    return `<!-- oriel:${kind}:${base64url(encoder.encode(key))}:${base64url(new Uint8Array(signature))} -->`;
+  }
+
+  protected async workflowIssueFeedback(context: WorkflowContext, comments: GithubComment[], planningOnly = false): Promise<WorkflowRow["issue_feedback"]> {
+    for (const comment of [...comments].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id)) {
+      if (comment.user?.type !== "User" || /<!-- oriel:/.test(comment.body)) continue;
+      const command = githubCommand(comment.body);
+      if (!command || planningOnly && !command.planning) continue;
+      const key = `issue-comment:${await digest([comment.id, comment.user.login, comment.body])}`;
+      const marker = await this.workflowMarker(context, "issue-response", key);
+      if (!comments.some(reply => reply.user?.type === "Bot" && reply.body.includes(marker))) return { key, body: comment.body, planning: command.planning };
+    }
+    return null;
+  }
+
+  protected async workflowLinearComments(context: WorkflowContext, id: string): Promise<LinearComment[]> {
+    const comments: LinearComment[] = [];
+    const seen = new Set<string>();
+    let after: string | null = null;
+    do {
+      const result: { issue: { comments: Page<LinearComment> } | null } = await this.workflowLinear(context,
+        "query($id:String!,$after:String){issue(id:$id){comments(first:100,after:$after,includeArchived:true){nodes{id body createdAt user{id name app}} pageInfo{hasNextPage endCursor}}}}", { id, after });
+      if (!result.issue) this.auth.fail(502, "HOW comments are unavailable");
+      comments.push(...result.issue.comments.nodes);
+      after = result.issue.comments.pageInfo.hasNextPage ? result.issue.comments.pageInfo.endCursor : null;
+      if (result.issue.comments.pageInfo.hasNextPage && (!after || seen.has(after))) this.auth.fail(502, "HOW comments pagination is unavailable");
+      if (after) seen.add(after);
+    } while (after);
+    return comments;
+  }
+
+  protected async workflowHowFeedback(context: WorkflowContext, id: string, comments: LinearComment[]): Promise<{ key: string; body: string } | null> {
+    const agent = context.team.agent;
+    if (!agent) return null; // Existing user OAuth connections need app authorization before native mentions.
+    for (const comment of [...comments].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+      if (!comment.user || comment.user.app || comment.user.id === agent.id || /<!-- oriel:/.test(comment.body)) continue;
+      // Profile links identify native mentions. Also accept the explicit
+      // @oriel command in comment text while this app connection is available.
+      const urls = comment.body.match(/https:\/\/linear\.app\/[^\s<>()[\]]+/g) ?? [];
+      const command = /^@oriel(?:\s|[、。，,.!?！？:：]|$)/i.test(comment.body.trimStart());
+      if (!command && !urls.some(url => url.replace(/[.,!?;:]+$/, "") === agent.url)) continue;
+      const key = `how:${await digest([id, comment.id, comment.body])}`;
+      const marker = await this.workflowMarker(context, "how-response", key);
+      if (!comments.some(response => response.body.includes(marker))) return { key, body: comment.body };
+    }
+    return null;
+  }
+
+  protected async workflowCursors(context: WorkflowContext, comments: GithubComment[], kind: "response" | "response-head"): Promise<Map<string, string>> {
+    const cursors = new Map<string, string>();
+    const pattern = new RegExp(`<!-- oriel:${kind}:([A-Za-z0-9_-]+):[A-Za-z0-9_-]+ -->`, "g");
+    for (const comment of comments) for (const marker of comment.body.matchAll(pattern)) {
+      try {
+        const key = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(atob(marker[1].replaceAll("-", "+").replaceAll("_", "/")), char => char.charCodeAt(0)));
+        if (marker[0] === await this.workflowMarker(context, kind, key) && (!cursors.has(key) || comment.created_at < cursors.get(key)!)) cursors.set(key, comment.created_at);
+      } catch { /* Unsigned public comments are never Oriel response cursors. */ }
+    }
+    return cursors;
+  }
+
+  protected async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[]): Promise<Feedback | null> {
+    const [comments, reviews, inline] = await Promise.all([
+      this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`),
+      this.workflowList<{ id: number; state: string; body: string | null; submitted_at: string | null; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`),
+      this.workflowList<{ id: number; pull_request_review_id: number; path: string; line: number | null; original_line?: number | null; body: string; commit_id: string }>(context, `${context.path}/pulls/${pr.number}/comments`),
+    ]);
+    context.check();
+    const cursors = await this.workflowCursors(context, comments, "response");
+    const submitted = reviews.filter(review => review.state !== "PENDING" && review.submitted_at)
+      .sort((a, b) => a.submitted_at!.localeCompare(b.submitted_at!) || a.id - b.id);
+    const latest = new Map<string, typeof reviews[number]>();
+    for (const review of submitted) latest.set(review.user.login, review);
+    for (const review of [...submitted].reverse()) {
+      if (!["CHANGES_REQUESTED", "COMMENTED", "APPROVED"].includes(review.state)) continue;
+      if (review.state === "CHANGES_REQUESTED" && latest.get(review.user.login)?.id !== review.id) continue;
+      const notes = inline.filter(comment => comment.pull_request_review_id === review.id && comment.body.trim()).sort((a, b) => a.id - b.id);
+      if (review.state !== "CHANGES_REQUESTED" && !review.body?.trim() && !notes.length) continue;
+      const key = `review:${await digest([pr.number, review.id, review.body, notes.map(note => [note.id, note.path, note.body])])}`;
+      if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "review", body: review.body ?? "", comments: notes.map(note => ({ path: note.path, line: note.line ?? note.original_line ?? null, body: note.body })) };
+    }
+    for (const comment of [...comments].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id)) {
+      if (!comment.body.trim() || (await this.workflowCursors(context, [comment], "response")).size) continue;
+      const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
+      if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
+    }
+    type Check = { id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; output: { title: string | null; summary: string | null; text: string | null } };
+    const checks: Check[] = [];
+    for (let page = 1; ; page++) {
+      const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${pr.head_oid}/check-runs?filter=all&per_page=100&page=${page}`);
+      if (!result) this.auth.fail(502, "PR checks are unavailable");
+      checks.push(...result.check_runs);
+      if (result.check_runs.length < 100) break;
+    }
+    const responseHeads = await this.workflowCursors(context, comments, "response-head");
+    const heads = new Set([pr.head_oid]);
+    for (const key of responseHeads.keys()) {
+      const head = key.slice(key.lastIndexOf(":") + 1);
+      if (OID.test(head)) heads.add(head);
+    }
+    const history = [...checks];
+    const statusHistory: { id: number; context: string; state: string; description: string | null; created_at: string; head: string }[] = [];
+    for (const head of heads) {
+      if (head !== pr.head_oid) for (let page = 1; ; page++) {
+        const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${head}/check-runs?filter=all&per_page=100&page=${page}`);
+        if (!result) this.auth.fail(502, "Check recovery facts are unavailable");
+        history.push(...result.check_runs);
+        if (result.check_runs.length < 100) break;
+      }
+      const statuses = await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string }>(context, `${context.path}/commits/${head}/statuses`);
+      statusHistory.push(...statuses.map(status => ({ ...status, head })));
+    }
+    const byName = new Map<string, Check>();
+    for (const check of checks.sort((a, b) => a.id - b.id)) byName.set(check.name, check);
+    for (const check of byName.values()) {
+      if (check.head_sha !== pr.head_oid || check.status !== "completed" || !["failure", "timed_out", "action_required", "cancelled", "startup_failure", "stale"].includes(check.conclusion ?? "")) continue;
+      const name = await digest(check.name);
+      const key = `check:${name}:${check.id}:${pr.head_oid}`;
+      if (cursors.has(key)) continue;
+      // Count unique signed response attempts since the latest actual successful run,
+      // including prior response heads. No local history or repeated-comment echoes.
+      const successful = history.filter(run => run.name === check.name && ["success", "neutral", "skipped"].includes(run.conclusion ?? "") && run.completed_at)
+        .map(run => run.completed_at!).sort().at(-1) ?? "";
+      const attempts = [...cursors].filter(([key, time]) => key.startsWith(`check:${name}:`) && time > successful).length;
+      if (attempts >= 3) { exhausted?.push(check.name); continue; }
+      if (requestedKey !== undefined && requestedKey !== key) continue;
+      return { key, kind: "check_failure", body: `${check.name}: ${check.conclusion}\n${[check.output.title, check.output.summary, check.output.text].filter(Boolean).join("\n").slice(0, 16000)}`, comments: [] };
+    }
+    const latestStatus = new Map<string, typeof statusHistory[number]>();
+    for (const status of statusHistory.filter(status => status.head === pr.head_oid).sort((a, b) => a.id - b.id)) latestStatus.set(status.context, status);
+    for (const status of latestStatus.values()) {
+      if (!["error", "failure"].includes(status.state)) continue;
+      const key = `check:${await digest(status.context)}:status-${status.id}:${pr.head_oid}`;
+      if (cursors.has(key)) continue;
+      const prefix = `check:${await digest(status.context)}:`;
+      const successful = statusHistory.filter(run => run.context === status.context && run.state === "success").map(run => run.created_at).sort().at(-1) ?? "";
+      const attempts = [...cursors].filter(([key, time]) => key.startsWith(prefix) && time > successful).length;
+      if (attempts >= 3) exhausted?.push(status.context);
+      if (attempts < 3 && (requestedKey === undefined || requestedKey === key)) return { key, kind: "check_failure", body: `${status.context}: ${status.state}\n${status.description ?? ""}`, comments: [] };
+    }
+    return null;
+  }
+
+  protected async linear<T>(token: string, query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }), redirect: "manual" });
+    if (!response.ok) throw Object.assign(new Error("Linear authorization unavailable"), { providerCode: `http_${response.status}` });
+    const result = await response.json() as { data?: T; errors?: unknown[] };
+    if (!result.data || result.errors?.length) {
+      const data = result.data;
+      const errors = result.errors;
+      const missingIssue = (data == null || typeof data === "object" && "issue" in data && data.issue === null) &&
+        Array.isArray(errors) && errors.length > 0 && errors.every(error =>
+          error !== null && typeof error === "object" && "message" in error && typeof error.message === "string" &&
+          /^Entity not found:\s*Issue\b/i.test(error.message) && "extensions" in error &&
+          error.extensions !== null && typeof error.extensions === "object" && "code" in error.extensions && error.extensions.code === "INPUT_ERROR");
+      throw Object.assign(new Error("Linear request failed"), { providerCode: "graphql_error", missingIssue });
+    }
+    return result.data;
+  }
+
+}

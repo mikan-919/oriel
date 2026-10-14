@@ -24,6 +24,39 @@ async function host(daemon, reply = true) {
   return socket;
 }
 
+test("Automatic host keepalive and terminal frames need no presence reads or writes after hibernation", { timeout: 45000 }, async () => {
+  const worker = await runtime({}, undefined, true);
+  let timer;
+  try {
+    const { owner, daemon } = await pair(worker);
+    const terminal = await host(daemon);
+    await until(owner, "online");
+    const costs = async () => (await worker.dispatchFetch(`${origin}/__terminal-cost-for-test?device=${device}`)).json();
+    terminal.send("oriel:ping");
+    timer = setInterval(() => terminal.send("oriel:ping"), 10000);
+    await wait(50);
+    const before = await costs();
+    await wait(31000);
+    const after = await costs();
+    assert.ok(after.gets <= before.gets, "A wake may reset counters but must not reload presence");
+    assert.ok(after.puts <= before.puts);
+    await worker.unsafeEvictDurableObject("oriel-relay", "RelayDevice", { name: device });
+    assert.equal(await state(owner), "online");
+    const cold = await costs();
+    assert.equal(cold.gets, 0, "Host attachment must restore presence without a storage read");
+    assert.equal(cold.puts, 0);
+    const client = await owner.upgrade("client");
+    client.webSocket.accept();
+    const received = new Promise(resolve => client.webSocket.addEventListener("message", event => resolve(event.data), { once: true }));
+    terminal.send("hibernated output");
+    assert.equal(await received, "hibernated output");
+    const output = await costs();
+    assert.equal(output.gets, 0);
+    assert.equal(output.puts, 0);
+    console.log("Automatic terminal presence operations:", JSON.stringify({ before, after, cold, output }));
+  } finally { clearInterval(timer); await worker.dispose(); }
+});
+
 test("registrations remain offline without a host; internal state route stays private", { timeout: 15000 }, async () => {
   const worker = await runtime();
   try {

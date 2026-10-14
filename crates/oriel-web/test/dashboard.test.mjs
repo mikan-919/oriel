@@ -4,6 +4,41 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../src/assets/dashboard.js', import.meta.url), 'utf8');
 
+test('state notifications reuse provider facts, retain unrelated issues and preserve full reconciliation', async () => {
+  let connection, received, devices = 0, reconciliations = 0;
+  class Socket {
+    static OPEN = 1; readyState = 1; listeners = {};
+    constructor() { connection = this; }
+    addEventListener(name, callback) { this.listeners[name] = callback; }
+    send() {} close() {}
+  }
+  const original = {repository_id:501, workflows:[{issue:{number:42}, how_comments:[{body:'discussion'}]}, {issue:{number:43}, phase:'waiting-how'}]};
+  const c = vm.createContext({user:{id:'owner'}, accountEpoch:1, progressSocket:undefined, progressRetry:undefined,
+    progressReceivedAt:0, progressRetryDelay:5000, progressSnapshot:new Map(), progressStream:'connecting',
+    progressExpiry:undefined, progressKeepalive:undefined, status:{}, repositoryDeviceId:'device', workflowSnapshot:original,
+    currentAccount:epoch => c.accountEpoch === epoch && !!c.user, setProgressStream() {}, WebSocket:Socket, URL,
+    location:{origin:'https://fixture.invalid',protocol:'https:'}, Date:{now:()=>100000},
+    setTimeout:()=>1,clearTimeout() {},setInterval:()=>1,clearInterval() {}, errorText:String,
+    scheduleWorkflowRefresh:()=>reconciliations++, refreshDevices:async()=>devices++,
+    refreshWorkflow:async result=>{received=result;c.workflowSnapshot=result;}, lastWorkflowPoll:0});
+  vm.runInContext(source.slice(source.indexOf('function stopProgress()'), source.indexOf('function updateProgressLink(')), c);
+  c.connectProgress(); connection.listeners.open();
+  const deliver = frame => connection.listeners.message({data:JSON.stringify(frame)});
+  deliver({type:'workflow-snapshot',device_id:'device',issue_number:42,snapshot:{repository_id:501,workflows:[{issue:{number:42},phase:'running',how_comments:[]}]}});
+  assert.deepEqual(Array.from(received.workflows,row=>row.issue.number),[42,43]);
+  assert.equal(received.workflows[0].how_comments[0].body,'discussion');
+  assert.equal(c.lastWorkflowPoll,0,'Scoped checks cannot postpone reconciliation of other issues');
+  deliver({type:'workflow-snapshot',device_id:'foreign',snapshot:{workflows:[]}});
+  assert.equal(received.workflows.length,2);
+  deliver({type:'workflow-snapshot',device_id:'device',snapshot:{repository_id:501,workflows:[]}});
+  assert.equal(c.lastWorkflowPoll,100000);
+  assert.equal(received.workflows.length,0);
+  deliver({type:'device-changed'});
+  assert.equal(devices,1);
+  deliver({type:'workflow-changed'});
+  assert.equal(reconciliations,1);
+});
+
 test('runtime pongs keep unchanged progress live; missing pongs or an initial snapshot expire', () => {
   for (const baseline of [true, false]) {
     let now = 0, serial = 0, connection, answer = true;
@@ -64,7 +99,7 @@ test('background polling stops for hidden tabs and resumes device discovery when
     currentAccount: epoch => !!c.user && epoch === c.accountEpoch,
     refreshDevices: async () => {deviceRequests++;}, refreshWorkflow: async () => {workflowRequests++;},
     setInterval(callback, delay) {assert.equal(delay, 60000); periodic = callback;},
-    setTimeout(callback, delay) {assert.ok([1000, 300000].includes(delay)); timer = callback; return 1;}, clearTimeout() {},
+    setTimeout(callback, delay) {assert.ok([1000, 900000].includes(delay)); timer = callback; return 1;}, clearTimeout() {},
     staleProgress() {throw new Error('Unexpected progress expiry');}, errorText: String});
   vm.runInContext(source.slice(source.indexOf('document.addEventListener("visibilitychange"'),
     source.indexOf('\nrender();\nperform(async () =>')), c);
@@ -159,7 +194,7 @@ test('overview separates online terminal from unconfirmed runner and clears old 
   assert.match(elements.get('overview-next').textContent,/ログイン/);
 });
 test('late workflow responses from a previous target or account cannot overwrite current data',async()=>{
-  const workflow=source.slice(source.indexOf('async function refreshWorkflow()'),source.indexOf('async function createWhat()'));
+  const workflow=source.slice(source.indexOf('async function refreshWorkflow(pushed)'),source.indexOf('async function createWhat()'));
   for(const switchAccount of [false,true]) {
     let resolve;
     const c=vm.createContext({user:{id:'owner'},devices:[{device_id:'a',name:'fixture'}],repositoryDeviceId:'a',

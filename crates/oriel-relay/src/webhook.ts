@@ -29,7 +29,7 @@ export async function workflowChange(request: Request, env: WebhookEnv, provider
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), {name:"HMAC", hash:"SHA-256"}, false, ["verify"]);
   if (!await crypto.subtle.verify("HMAC", key, Uint8Array.from(hex.match(/../g)!, byte => parseInt(byte, 16)), body)) return new Response(null, {status:401});
   let payload;
-  try { payload = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(body)); }
+  try { payload = JSON.parse(new TextDecoder("utf-8", {fatal:true,ignoreBOM:false}).decode(body)); }
   catch { return new Response(null, {status:400}); }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return new Response(null, {status:400});
   if (provider === "github") {

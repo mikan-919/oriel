@@ -900,9 +900,10 @@ test("Leased discovery reads only the current WHAT while still checking approval
     const current = await s.message({type:"snapshot", lease_id});
     const afterScoped = await costs();
     const fullReads = afterFull.reads - beforeFull.reads, scopedReads = afterScoped.reads - beforeScoped.reads;
-    assert.ok(scopedReads < fullReads / 2, JSON.stringify({fullReads, scopedReads}));
+    assert.equal(fullReads, 0);
+    assert.equal(scopedReads, 0);
     const idleReads = afterIdle.reads - beforeIdle.reads;
-    assert.ok(scopedReads < idleReads / 2, JSON.stringify({idleReads, scopedReads}));
+    assert.equal(idleReads, 0);
     console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, idleReads, scopedReads}));
     assert.equal(current.type, "snapshot", JSON.stringify(current));
     assert.deepEqual(current.snapshot.workflows.map(row => row.issue.number), [42]);

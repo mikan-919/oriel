@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const source = process.argv[2] ?? new URL("../crates/oriel-relay/test/usage-measurement.json", import.meta.url);
+const implemented = process.argv.includes("--implemented");
+const paths = process.argv.slice(2).filter(argument => argument !== "--implemented");
+const actual = implemented ? JSON.parse(readFileSync(new URL("../crates/oriel-relay/test/usage-implemented.json", import.meta.url), "utf8")) : null;
+const source = paths[0] ?? new URL("../crates/oriel-relay/test/usage-measurement.json", import.meta.url);
 const measured = JSON.parse(readFileSync(source, "utf8"));
-const old = measured.current, next = measured.combinedPrototype;
+const old = measured.current, next = actual?.implemented ?? measured.combinedPrototype;
 const seconds = 86400, days = 30;
 const counts = { checks: seconds / 5, fullLists: seconds / 900, devices: seconds / 300,
-  accountAlarms: seconds / 40, terminalAlarmsBefore: seconds / 10, terminalAlarmsAfter: seconds / 30 };
+  devicesAfter: implemented ? seconds / 900 : 0, accountAlarms: seconds / 40, terminalAlarmsBefore: seconds / 10, terminalAlarmsAfter: seconds / 30 };
 const assumptions = {
   days, devices: 1, issues: 48, hows: 1, pullRequests: 0, activeHoursPerDay: 24,
   dashboardProgressSockets: 1, codexBrowserSockets: 0, terminalBrowserSockets: 1,
@@ -14,7 +17,7 @@ const assumptions = {
   accountAlarmSeconds: 40, terminalAlarmAfterSeconds: 30, batchSeconds: 0.2,
   durationSeconds: { currentCheck: 1, currentFullList: 5, otherDOEvent: 0.001 },
   durationNotice: "Duration inputs are assumptions, not production measurements. Per-object overlapping intervals are merged.",
-  sqlNotice: "After SQL values below cover steady periodic work only. Add measured reloads (7 rows per active snapshot reload), constructor SQL, bootstrap, writes and management operations.",
+  sqlNotice: "After SQL values below cover steady periodic work only. Add measured reloads, constructor SQL, bootstrap, writes and management operations.",
   outputNotice: "Equally spaced output on each channel; only output data is batched, not approvals, requests or control frames.",
   requestNotice: "Application auto-response messages are included at 20:1 for request budgeting. Initial connections, provider token renewals and task actions are extra.",
   reloadsPerDayForExample: 24,
@@ -63,6 +66,7 @@ function scenario(rate) {
     { period: rate ? 1 / rate : Infinity, duration: 0.001, phase: 0.4 },
   ]);
   const accountAfter = occupied([
+    { period: implemented ? 900 : Infinity, duration: 0.001, phase: 2 },
     { period: 5, duration: 0.001 }, { period: 5, duration: 0.001, phase: 1 },
     { period: 900, duration: 0.001 }, { period: 900, duration: 0.001, phase: 5 },
     { period: 40, duration: 0.001 },
@@ -75,6 +79,7 @@ function scenario(rate) {
     { period: rate ? 1 / rate : Infinity, duration: 0.001, phase: 0.5 },
   ]);
   const terminalAfter = occupied([
+    { period: implemented ? 900 : Infinity, duration: 0.001, phase: 2 },
     { period: 30, duration: 0.001, phase: 5 },
     { period: batchedRate ? 1 / batchedRate : Infinity, duration: 0.001, phase: 0.5 },
   ]);
@@ -93,8 +98,8 @@ function scenario(rate) {
   const after = {
     rowsRead: 0,
     rowsWritten: counts.accountAlarms + counts.terminalAlarmsAfter,
-    workerRequests: counts.checks + counts.fullLists,
-    doRequests: 2 * (counts.checks + counts.fullLists) + counts.accountAlarms + counts.terminalAlarmsAfter
+    workerRequests: counts.checks + counts.fullLists + counts.devicesAfter,
+    doRequests: 2 * (counts.checks + counts.fullLists + counts.devicesAfter) + counts.accountAlarms + counts.terminalAlarmsAfter
       + (2 * seconds / 10 + seconds / 15 + seconds / 10) / 20 + seconds * batchedRate * 2 / 20,
     providerRequests: next.activeSnapshot.providerRequests * counts.checks + next.webList.providerRequests * counts.fullLists,
     gbSeconds: (accountAfter + terminalAfter) * 0.128,
@@ -115,7 +120,7 @@ const reloads = assumptions.reloadsPerDayForExample;
 const primary = scenarios[1];
 const beforeReadTotal = primary.beforeMonth.rowsRead + old.constructorSqlReplay.rowsRead * reloads * days;
 const afterReadTotal = primary.afterMonth.rowsRead + reloadReads * reloads * days;
-const report = { assumptions, samples: measured, scenarios,
+const report = { assumptions, samples: measured, ...(actual ? {implementationSamples:actual} : {}), scenarios,
   primarySqlExample: { reloadReadsPerCycle: reloadReads, reloadsPerDay: reloads,
     beforeRowsReadPerMonth: beforeReadTotal, afterRowsReadPerMonth: afterReadTotal,
     reductionPercent: (1 - afterReadTotal / beforeReadTotal) * 100,
@@ -123,5 +128,5 @@ const report = { assumptions, samples: measured, scenarios,
   reloadSensitivity: [1, 24, counts.checks].map(count => ({ reloadCyclesPerDay: count,
     afterRowsReadPerDay: count * reloadReads, afterRowsReadPerMonth: count * reloadReads * days })) };
 const json = `${JSON.stringify(report, null, 2)}\n`;
-if (process.argv[3]) writeFileSync(process.argv[3], json);
+if (paths[1]) writeFileSync(paths[1], json);
 else process.stdout.write(json);
