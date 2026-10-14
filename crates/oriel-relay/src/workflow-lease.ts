@@ -310,8 +310,10 @@ export class WorkflowLeases {
           // A lease guards one WHAT. Keep all link/PR ambiguity checks, but do
           // not reread every unrelated issue and its discussion while it runs.
           const snapshot = await this.integrations.workflowSnapshot(device, check, attachment.grant?.issue_number);
+          const hash = await digest(snapshot);
           check();
           this.send(ws, { type: "snapshot", request_id: requestId, snapshot, poll_after_seconds:this.eventDriven() ? 900 : 60 });
+          this.publishFacts(device, snapshot, hash, attachment.grant?.issue_number);
         } catch (error) {
           const known = error instanceof Error && "status" in error;
           this.send(ws, { type: "error", request_id: requestId,

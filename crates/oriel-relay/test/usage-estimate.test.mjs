@@ -40,7 +40,13 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       };
       const host = await upgrade(`/api/workflows/${device}/connect`, hostHeaders);
       const codex = await upgrade(`/api/codex/${device}/host`, hostHeaders);
-      await upgrade("/api/workflow-progress/connect", { Origin: origin, Cookie: cookie });
+      const progress = await upgrade("/api/workflow-progress/connect", { Origin: origin, Cookie: cookie });
+      const shared = [];
+      progress.addEventListener("message", event => {
+        const value = JSON.parse(event.data);
+        if (value.type === "workflow-snapshot") shared.push(value);
+      });
+      progress.send("ready:state");
       // Terminal is a separate daemon/process; its presence KV is outside the
       // AccountRegistry SQL cursor counters reported below.
       const terminal = await upgrade(`/device/${device}/host`, hostHeaders);
@@ -71,9 +77,9 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       assert.equal(started.status, 200);
       assert.equal(how.state.name, "In Progress");
       const snapshot = async () => {
-        const result = await daemon.api(`/api/workflows/${device}/snapshot`, { lease_id: admitted.lease_id }, hostHeaders);
-        assert.equal(result.status, 200, JSON.stringify(result.data));
-        return result.data;
+        const result = await rpc({ type: "snapshot", changes: true, lease_id: admitted.lease_id });
+        assert.equal(result.type, "snapshot", JSON.stringify(result));
+        return result;
       };
       const samples = {};
       const measure = async (label, operation) => {
@@ -89,6 +95,9 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       await snapshot();
       const running = await measure("activeSnapshot", snapshot);
       assert.equal(running.snapshot.workflows[0].phase, "running");
+      assert.equal(shared.at(-1).device_id, device);
+      assert.equal(shared.at(-1).issue_number, 42);
+      assert.deepEqual(shared.at(-1).snapshot, running.snapshot, "WebSocket checks still supply the dashboard snapshot");
       await measure("activeSnapshotRepeat", snapshot);
       assert.deepEqual(samples.activeSnapshot, samples.activeSnapshotRepeat);
       const page = await measure("webList", () => owner.api(`/api/workflows/${device}`));
@@ -106,6 +115,8 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       await measure("devicesListAfterConstructorSql", () => owner.api("/api/devices"));
       how.state = { ...fixture.states.find(state => state.name === "Triage") };
       assert.equal((await snapshot()).snapshot.workflows[0].phase, "triage", "Native approval must never be cached");
+      await settle();
+      assert.equal(shared.at(-1).snapshot.workflows[0].phase, "triage");
       // The prototype must observe writes through the actual account path;
       // it cannot keep serving the selected repository after disconnection.
       const disconnected = await owner.api("/api/integrations/linear/disconnect", {});

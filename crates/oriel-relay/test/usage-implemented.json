@@ -49,7 +49,7 @@
       "providerRequests": 0
     },
     "activeSnapshotCold": {
-      "rowsRead": 5,
+      "rowsRead": 6,
       "rowsWritten": 0,
       "alarmSets": 0,
       "providerRequests": 11
@@ -61,13 +61,13 @@
       "providerRequests": 0
     },
     "activeSnapshotAfterConstructorSql": {
-      "rowsRead": 5,
+      "rowsRead": 6,
       "rowsWritten": 0,
       "alarmSets": 0,
       "providerRequests": 11
     },
     "devicesListAfterConstructorSql": {
-      "rowsRead": 4,
+      "rowsRead": 3,
       "rowsWritten": 0,
       "alarmSets": 0,
       "providerRequests": 0
@@ -86,6 +86,8 @@
       "dashboard progress",
       "terminal host"
     ],
-    "notice": "SQL cursor counts are measured. Constructor replay plus cache reload is not a complete cold-start measurement."
+    "notice": "SQL cursor counts are measured. Constructor replay plus cache reload is not a complete cold-start measurement.",
+    "active_snapshot_transport": "websocket",
+    "full_snapshot_transport": "http"
   }
 }

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const implemented = process.argv.includes("--implemented");
-const paths = process.argv.slice(2).filter(argument => argument !== "--implemented");
+const socketChecks = implemented && !process.argv.includes("--http-checks");
+const paths = process.argv.slice(2).filter(argument => !["--implemented", "--http-checks"].includes(argument));
 const actual = implemented ? JSON.parse(readFileSync(new URL("../crates/oriel-relay/test/usage-implemented.json", import.meta.url), "utf8")) : null;
 const source = paths[0] ?? new URL("../crates/oriel-relay/test/usage-measurement.json", import.meta.url);
 const measured = JSON.parse(readFileSync(source, "utf8"));
@@ -14,6 +15,7 @@ const assumptions = {
   days, devices: 1, issues: 48, hows: 1, pullRequests: 0, activeHoursPerDay: 24,
   dashboardProgressSockets: 1, codexBrowserSockets: 0, terminalBrowserSockets: 1,
   webhookUpdatesPerDay: 0, counts,
+  activeSnapshotTransport: socketChecks ? "websocket" : "http",
   accountAlarmSeconds: 40, terminalAlarmAfterSeconds: 30, batchSeconds: 0.2,
   durationSeconds: { currentCheck: 1, currentFullList: 5, otherDOEvent: 0.001 },
   durationNotice: "Duration inputs are assumptions, not production measurements. Per-object overlapping intervals are merged.",
@@ -67,7 +69,8 @@ function scenario(rate) {
   ]);
   const accountAfter = occupied([
     { period: implemented ? 900 : Infinity, duration: 0.001, phase: 2 },
-    { period: 5, duration: 0.001 }, { period: 5, duration: 0.001, phase: 1 },
+    { period: 5, duration: socketChecks ? assumptions.durationSeconds.currentCheck : 0.001 },
+    { period: socketChecks ? Infinity : 5, duration: 0.001, phase: 1 },
     { period: 900, duration: 0.001 }, { period: 900, duration: 0.001, phase: 5 },
     { period: 40, duration: 0.001 },
     { period: batchedRate ? 1 / batchedRate : Infinity, duration: 0.001, phase: 0.4 },
@@ -98,8 +101,9 @@ function scenario(rate) {
   const after = {
     rowsRead: 0,
     rowsWritten: counts.accountAlarms + counts.terminalAlarmsAfter,
-    workerRequests: counts.checks + counts.fullLists + counts.devicesAfter,
-    doRequests: 2 * (counts.checks + counts.fullLists + counts.devicesAfter) + counts.accountAlarms + counts.terminalAlarmsAfter
+    workerRequests: (socketChecks ? 0 : counts.checks) + counts.fullLists + counts.devicesAfter,
+    doRequests: (socketChecks ? counts.checks / 20 : 2 * counts.checks)
+      + 2 * (counts.fullLists + counts.devicesAfter) + counts.accountAlarms + counts.terminalAlarmsAfter
       + (2 * seconds / 10 + seconds / 15 + seconds / 10) / 20 + seconds * batchedRate * 2 / 20,
     providerRequests: next.activeSnapshot.providerRequests * counts.checks + next.webList.providerRequests * counts.fullLists,
     gbSeconds: (accountAfter + terminalAfter) * 0.128,
@@ -136,7 +140,9 @@ const freeQuotaProjection = {
     durationGbSeconds: quotaUse(afterDay.gbSeconds, freeQuotas.gbSecondsPerDay),
   })),
   externalSubrequests: {
-    activeSnapshot: quotaUse(next.activeSnapshot.providerRequests, freeQuotas.externalSubrequestsPerInvocation),
+    activeSnapshot: { execution: socketChecks ? "durable-object-websocket" : "worker-http",
+      workerHttpLimitApplies: !socketChecks,
+      ...quotaUse(next.activeSnapshot.providerRequests, freeQuotas.externalSubrequestsPerInvocation) },
     fullList: quotaUse(next.webList.providerRequests, freeQuotas.externalSubrequestsPerInvocation),
   },
   workerCpuTime: { usage: null, limit: freeQuotas.workerCpuMsPerInvocation, unit: "ms/invocation" },

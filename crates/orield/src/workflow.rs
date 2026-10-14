@@ -612,7 +612,9 @@ impl Session {
         if let Some(lease) = &self.lease {
             request["lease_id"] = json!(lease);
         }
-        let response = if self.snapshot_http {
+        // Keep five-second leased checks on the existing control socket. Full
+        // discovery uses HTTP so its provider waits do not occupy the account DO.
+        let response = if self.snapshot_http && self.lease.is_none() {
             let mut url = self.endpoint.clone();
             url.set_path(&format!("{}/snapshot", self.endpoint.path()));
             let body = self
@@ -3101,9 +3103,18 @@ mod tests {
 
     #[tokio::test]
     async fn writing_child_stops_when_discovery_exceeds_twelve_seconds() {
-        use tokio::io::AsyncReadExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
         for snapshot_http in [false, true] {
+            let snapshot_value = json!({
+                "repository":{"owner":"octocat","name":"connected"},
+                "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+                "target_oid":"1111111111111111111111111111111111111111",
+                "configuration":{"autonomous":true,"verification":[["true"]],"error":null},
+                "workflows":[{"issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
+                    "what_comments":[],"how_comments":[],"version":"approved","phase":"running"}]
+            });
+            let snapshot: Snapshot = serde_json::from_value(snapshot_value.clone()).unwrap();
             let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = Url::parse(&format!(
                 "http://{}/api/workflows/device",
@@ -3116,8 +3127,13 @@ mod tests {
                 let size = stream.read(&mut bytes).await.unwrap();
                 let request = String::from_utf8_lossy(&bytes[..size]);
                 assert!(request.starts_with("POST /api/workflows/device/snapshot "));
-                assert!(request.contains("lease"));
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                assert!(!request.contains("lease"), "Only idle discovery uses HTTP");
+                let body = json!({"snapshot":snapshot_value,"poll_after_seconds":900}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
             });
 
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3144,7 +3160,10 @@ mod tests {
                         .unwrap();
                     }
                 }
-                assert_eq!(discovery, !snapshot_http);
+                assert!(
+                    discovery,
+                    "Leased checks use WebSocket for either Relay capability"
+                );
             });
             let (socket, _) = connect_async(url).await.unwrap();
             let mut session = Session {
@@ -3160,14 +3179,17 @@ mod tests {
                 snapshot_http,
                 lease: Some("lease".into()),
             };
-            let snapshot: Snapshot = serde_json::from_value(json!({
-            "repository":{"owner":"octocat","name":"connected"},
-            "repository_id":1,"repository_node_id":"repo","base_branch":"main",
-            "target_oid":"1111111111111111111111111111111111111111",
-            "configuration":{"autonomous":true,"verification":[["true"]],"error":null},
-            "workflows":[{"issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
-                "what_comments":[],"how_comments":[],"version":"approved","phase":"running"}]
-        })).unwrap();
+            if snapshot_http {
+                session.lease = None;
+                assert_eq!(
+                    session.snapshot().await.unwrap().workflows[0].phase,
+                    "running"
+                );
+                provider.await.unwrap();
+                session.lease = Some("lease".into());
+            } else {
+                provider.abort();
+            }
             let error = tokio::time::timeout(
                 Duration::from_secs(15),
                 session
@@ -3184,7 +3206,6 @@ mod tests {
             assert!(format!("{error:#}").contains("12 seconds"));
             session.socket.close(None).await.unwrap();
             server.await.unwrap();
-            provider.abort();
         }
     }
 
