@@ -35,7 +35,9 @@ Webは取得した状態を通知で共有し、端末一覧の定期取得を5�
 
 測定値は [usage-implemented.json](crates/oriel-relay/test/usage-implemented.json)、計算は `node scripts/estimate-cloudflare-usage.mjs --implemented` で再現できる。試作時の記録は [usage-measurement.json](crates/oriel-relay/test/usage-measurement.json) に保持する。接続が維持された休止復帰は端末の検証で確認し、管理用DOの再読み込みは上記の定義した処理で測定した。
 
-配備後、Webを再読み込みし、利用端末で更新した `orield` を再起動すると、HTTP取得・出力集約・自動在席確認が有効になる。この作業環境では起動中の `orield` を確認できなかったため、実端末の再起動は行っていない。
+配備後、Webを再読み込みし、利用端末で更新した `orield` を再起動すると、HTTP取得・出力集約・自動在席確認が有効になる。端末側は現在停止中であることをユーザーに確認した。更新した実行ファイルは `target/release/orield` にビルド済みで、次回の起動で変更が有効になる。
+
+2026-10-14に `cf deploy --prebuilt` で配備した。Relayの版は `ff879b6a-9e26-450e-9002-08bea0ba0a9e`、Webの版は `186b029c-c049-4a62-a723-bb30c9f1c236`。本番で画面・更新したJavaScript・匿名セッションAPIのHTTP 200、未認証のワークフロー取得の401、内部経路の404を確認した。全体のRelay検証84件、追加のHTTP権限更新・出力集約・境界処理の検証、Rust検証、Clippy、型検査、Webの回帰検証と表示検証が通過した。表示検証は375・768・1280ピクセル幅で問題0件だった。
 
 ## Cloudflareの枠と料金
 
