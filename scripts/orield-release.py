@@ -43,12 +43,9 @@ def main():
     crate = registry("crates/orield")
     if crate is not None:
         owners = registry("crates/orield/owners")
-        # crates.io returns individual and team owners through separate endpoints.
-        teams = registry("crates/orield/owner_team")
+        # The public owners endpoint includes both user and team logins.
         logins = {user["login"] for user in owners["users"]} if owners else set()
-        if teams:
-            logins.update(team["login"] for team in teams["teams"])
-        if owners is None or teams is None or owner not in logins:
+        if owners is None or owner not in logins:
             raise RuntimeError("orield name belongs to another owner; human review required")
     existing = registry("crates/orield/" + version)
     if existing is not None:

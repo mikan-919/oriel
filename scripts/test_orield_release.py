@@ -44,11 +44,15 @@ class ReleaseTests(unittest.TestCase):
 
     def test_existing_version_skips_publish_but_verifies(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": [{"login": "owner"}]}, {"teams": []}, {"version": {"yanked": False}},
+            {}, {"users": [{"login": "owner"}]}, {"version": {"yanked": False}},
         ])
-        with env, registry, metadata, run as command, report as summary:
+        with env, registry as lookups, metadata, run as command, report as summary:
             command.return_value.returncode = 0
             release.main()
+            self.assertEqual(
+                [call.args[0] for call in lookups.call_args_list],
+                ["crates/orield", "crates/orield/owners", "crates/orield/0.1.0"],
+            )
             self.assertEqual(command.call_count, 2)
             self.assertEqual(command.call_args_list[0].args[0][:2], ["cargo", "install"])
             install_args = command.call_args_list[0].args[0]
@@ -64,7 +68,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_owner_conflict_stops_before_publish_or_install(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": [{"login": "someone-else"}]}, {"teams": []},
+            {}, {"users": [{"login": "someone-else"}]},
         ])
         with env, registry, metadata, run as command, report:
             with self.assertRaisesRegex(RuntimeError, "another owner"):
@@ -82,7 +86,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_team_owner_can_verify_existing_version(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": []}, {"teams": [{"login": "owner"}]},
+            {}, {"users": [{"login": "owner", "kind": "team"}]},
             {"version": {"yanked": False}},
         ])
         with env, registry, metadata, run as command, report:
@@ -91,9 +95,9 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(command.call_count, 2)
             self.assertEqual(command.call_args_list[0].args[0][:2], ["cargo", "install"])
 
-    def test_team_lookup_failure_stops_before_publication(self):
+    def test_owner_lookup_failure_stops_before_publication(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": [{"login": "owner"}]},
+            {},
             urllib.error.HTTPError("url", 500, "error", {}, None),
         ])
         with env, registry, metadata, run as command, report:
@@ -103,7 +107,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_install_retries_are_bounded(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": [{"login": "owner"}]}, {"teams": []}, {"version": {"yanked": False}},
+            {}, {"users": [{"login": "owner"}]}, {"version": {"yanked": False}},
         ])
         with env, registry, metadata, run as command, report, patch.object(
             release.time, "sleep"
@@ -117,7 +121,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_yanked_version_stops_before_publish_or_install(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": [{"login": "owner"}]}, {"teams": []}, {"version": {"yanked": True}},
+            {}, {"users": [{"login": "owner"}]}, {"version": {"yanked": True}},
         ])
         with env, registry, metadata, run as command, report:
             with self.assertRaisesRegex(RuntimeError, "yanked"):
@@ -135,7 +139,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_help_failure_is_reported_without_retrying_install(self):
         env, registry, metadata, run, report = self.run_release([
-            {}, {"users": [{"login": "owner"}]}, {"teams": []}, {"version": {"yanked": False}},
+            {}, {"users": [{"login": "owner"}]}, {"version": {"yanked": False}},
         ])
         with env, registry, metadata, run as command, report as summary, patch.object(
             release.time, "sleep"
