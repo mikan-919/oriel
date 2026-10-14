@@ -59,7 +59,8 @@ jobs:
           test -f "$package_dir/orield-${version}/README.md"
           test -f "$package_dir/orield-${version}/LICENSE"
           cargo install --path "$package_dir/orield-${version}" --locked --root "$install_dir"
-          "$install_dir/bin/orield" --help
+          # Verify that the installed command does not depend on the checkout.
+          (cd "$install_dir" && ./bin/orield --help)
 
   publish:
     needs: validate

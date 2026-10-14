@@ -55,6 +55,11 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(install_args[install_args.index("--version") + 1], "=0.1.0")
             for call in command.call_args_list:
                 self.assertNotIn("CARGO_REGISTRY_TOKEN", call.kwargs["env"])
+            help_call = command.call_args_list[1]
+            self.assertEqual(
+                Path(help_call.args[0][0]).parent.parent,
+                Path(help_call.kwargs["cwd"]),
+            )
             self.assertIn("Skipped", summary.call_args_list[0].args[0])
 
     def test_owner_conflict_stops_before_publish_or_install(self):

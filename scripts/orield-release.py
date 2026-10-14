@@ -75,7 +75,7 @@ def main():
             if result.returncode == 0:
                 try:
                     subprocess.run([str(Path(root) / "bin" / "orield"), "--help"],
-                                   env=install_env, check=True)
+                                   cwd=root, env=install_env, check=True)
                 except subprocess.CalledProcessError:
                     report(f"Registry verification failed: orield {version} --help.")
                     raise

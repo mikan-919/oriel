@@ -1,6 +1,7 @@
 /target
 .direnv
 node_modules
+__pycache__/
 build
 .dev.vars*
 .cloudflare
