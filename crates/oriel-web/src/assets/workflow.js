@@ -27,7 +27,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
     const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;return element;};
     const list=document.getElementById("repository-issues");
     let model={}, selected=null, filter="all", panel="status", scope="", histories=new Map();
-    const rows=()=>model.snapshot?.workflows ?? [];
+    const rows=()=>[...(model.snapshot?.workflows ?? [])].sort((a,b)=>b.issue.number-a.issue.number);
     const state=row=>workflowState(row,model.progress,model.live);
     const selectedRow=()=>rows().find(row=>row.issue.number===selected);
     function link(label,address,host) {
