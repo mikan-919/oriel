@@ -120,7 +120,30 @@ const reloads = assumptions.reloadsPerDayForExample;
 const primary = scenarios[1];
 const beforeReadTotal = primary.beforeMonth.rowsRead + old.constructorSqlReplay.rowsRead * reloads * days;
 const afterReadTotal = primary.afterMonth.rowsRead + reloadReads * reloads * days;
+const freeQuotas = { workerRequestsPerDay: 100000, doRequestsPerDay: 100000,
+  rowsReadPerDay: 5000000, rowsWrittenPerDay: 100000, gbSecondsPerDay: 13000,
+  workerCpuMsPerInvocation: 10, externalSubrequestsPerInvocation: 50, storedBytes: 5000000000 };
+const quotaUse = (usage, limit) => ({ usage, limit, percent: Number((usage / limit * 100).toFixed(9)), wari: Number((usage / limit * 10).toFixed(9)) });
+const freeQuotaProjection = {
+  notice: "Planned workload, not production usage. Daily ratios assume successful operations; the measured full-list fetch exceeds the Free external subrequest limit. DO requests use the existing 20:1 WebSocket billing conversion. Duration assumes 1 ms per ordinary DO event. CPU and storage are unmeasured.",
+  limits: freeQuotas,
+  scenarios: scenarios.map(({ outputMessagesPerSecondPerChannel, afterDay }) => ({
+    outputMessagesPerSecondPerChannel,
+    workerRequests: quotaUse(afterDay.workerRequests, freeQuotas.workerRequestsPerDay),
+    doRequestsBillingEquivalent: quotaUse(afterDay.doRequests, freeQuotas.doRequestsPerDay),
+    rowsReadWithDefinedReloads: quotaUse(afterDay.rowsRead + reloadReads * reloads, freeQuotas.rowsReadPerDay),
+    rowsWritten: quotaUse(afterDay.rowsWritten, freeQuotas.rowsWrittenPerDay),
+    durationGbSeconds: quotaUse(afterDay.gbSeconds, freeQuotas.gbSecondsPerDay),
+  })),
+  externalSubrequests: {
+    activeSnapshot: quotaUse(next.activeSnapshot.providerRequests, freeQuotas.externalSubrequestsPerInvocation),
+    fullList: quotaUse(next.webList.providerRequests, freeQuotas.externalSubrequestsPerInvocation),
+  },
+  workerCpuTime: { usage: null, limit: freeQuotas.workerCpuMsPerInvocation, unit: "ms/invocation" },
+  storedData: { usage: null, limit: freeQuotas.storedBytes, unit: "bytes/account" },
+};
 const report = { assumptions, samples: measured, ...(actual ? {implementationSamples:actual} : {}), scenarios,
+  freeQuotaProjection,
   primarySqlExample: { reloadReadsPerCycle: reloadReads, reloadsPerDay: reloads,
     beforeRowsReadPerMonth: beforeReadTotal, afterRowsReadPerMonth: afterReadTotal,
     reductionPercent: (1 - afterReadTotal / beforeReadTotal) * 100,
