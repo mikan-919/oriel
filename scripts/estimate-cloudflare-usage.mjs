@@ -129,7 +129,7 @@ const freeQuotas = { workerRequestsPerDay: 100000, doRequestsPerDay: 100000,
   workerCpuMsPerInvocation: 10, externalSubrequestsPerInvocation: 50, storedBytes: 5000000000 };
 const quotaUse = (usage, limit) => ({ usage, limit, percent: Number((usage / limit * 100).toFixed(9)), wari: Number((usage / limit * 10).toFixed(9)) });
 const freeQuotaProjection = {
-  notice: "Planned workload, not production usage. Daily ratios assume successful operations; the measured full-list fetch exceeds the Free external subrequest limit. DO requests use the existing 20:1 WebSocket billing conversion. Duration assumes 1 ms per ordinary DO event. CPU and storage are unmeasured.",
+  notice: "Planned workload, not production usage. Daily ratios assume successful operations; the measured full-list request count must be compared with the Free per-invocation limit; larger histories and linked data require separate measurement. DO requests use the existing 20:1 WebSocket billing conversion. Duration assumes 1 ms per ordinary DO event. CPU and storage are unmeasured.",
   limits: freeQuotas,
   scenarios: scenarios.map(({ outputMessagesPerSecondPerChannel, afterDay }) => ({
     outputMessagesPerSecondPerChannel,

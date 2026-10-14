@@ -10,8 +10,10 @@ const EXPIRY_MS = 45_000;
 const STAGES = ["idle", "discovering", "preparing", "planning", "discussing", "implementing", "reviewing", "verifying",
   "integrating", "pushing", "publishing", "reconciling", "paused"] as const;
 type Stage = typeof STAGES[number];
+type Verification = { issue_number: number; head_oid: string; target_oid: string; status: "running" | "success" | "failure"; completed: number; total: number; updated_at: string };
 type ProgressTask = WorkflowTask & { repository: string };
 type ProgressDevice = {
+  verification?: Verification;
   device_id: string;
   state: "offline" | "idle" | "running" | "paused";
   stage: Stage | null;
@@ -28,6 +30,7 @@ type WatchAttachment = {
   state?: boolean;
 };
 type Attachment = {
+  verification?: Verification;
   protocol: typeof PROTOCOL;
   binding: WorkflowBinding;
   expires_at: number;
@@ -108,7 +111,7 @@ export class WorkflowLeases {
         state: control.stage === "paused" ? "paused" : control.stage === "idle" ? "idle" : "running",
         stage: control.stage, task: control.grant
           ? { repository: `${control.binding.repository.owner}/${control.binding.repository.name}`, ...control.grant.task }
-          : control.task, updated_at: control.updated_at };
+          : control.task, updated_at: control.updated_at, ...(control.verification ? {verification:control.verification} : {}) };
     });
     return JSON.stringify({ type: "workflow-progress", devices, poll_after_seconds:this.eventDriven() ? 900 : 60 });
   }
@@ -230,7 +233,7 @@ export class WorkflowLeases {
     catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
     this.publish();
     this.schedule();
-    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Snapshot-Transport": "http" } });
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Snapshot-Transport": "http", "X-Oriel-Verification": "1" } });
   }
 
   verify(device: Device, leaseId: string): WorkflowGrant {
@@ -330,13 +333,25 @@ export class WorkflowLeases {
         return;
       }
       if (request.type === "progress") {
-        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id"].includes(key)) ||
+        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id", "verification"].includes(key)) ||
             !STAGES.includes(request.stage as Stage)) throw new Error();
         if (attachment.grant) {
           if (request.lease_id !== attachment.grant.lease_id) throw new WorkflowLeaseError();
         } else if (!["idle", "discovering", "paused"].includes(request.stage as string) ||
                    request.lease_id !== undefined) throw new WorkflowLeaseError();
-        if (attachment.stage === request.stage) {
+        if (request.verification !== undefined) {
+          const value = request.verification as Record<string, unknown>;
+          if (!value || typeof value !== "object" || Array.isArray(value) || !attachment.grant || request.stage !== "verifying" ||
+              Object.keys(value).some(key => !["head_oid","target_oid","status","completed","total"].includes(key)) ||
+              typeof value.head_oid !== "string" || !/^[a-f0-9]{40}$/.test(value.head_oid) ||
+              typeof value.target_oid !== "string" || !/^[a-f0-9]{40}$/.test(value.target_oid) ||
+              !["running","success","failure"].includes(value.status as string) ||
+              !Number.isSafeInteger(value.total) || (value.total as number) < 1 || (value.total as number) > 1024 ||
+              !Number.isSafeInteger(value.completed) || (value.completed as number) < 0 || (value.completed as number) > (value.total as number) ||
+              value.status === "success" && value.completed !== value.total) throw new Error();
+          attachment.verification = { ...value, issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
+        }
+        if (attachment.stage === request.stage && request.verification === undefined) {
           this.send(ws, { type: "progressed", request_id: requestId });
           return;
         }
@@ -398,6 +413,7 @@ export class WorkflowLeases {
       }
       const leaseId = crypto.randomUUID();
       attachment.grant = { ...admitted, lease_id: leaseId };
+      attachment.verification = undefined;
       attachment.stage = "preparing";
       attachment.task = null;
       attachment.updated_at = new Date().toISOString();

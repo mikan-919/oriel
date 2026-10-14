@@ -1,5 +1,7 @@
 import { digest, githubIssueLink, OID, parseConfiguration, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
 import type { Auth, IntegrationEnv, WorkflowContext, WorkflowFacts, WorkflowHow, Page, LinkedIssue, GithubPull, GithubComment, LinearComment, SnapshotPreparation } from "./integrations";
+import type { WorkflowCI } from "./workflow";
+type Check = { id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; details_url?: string | null; output: { title: string | null; summary: string | null; text: string | null } };
 const SECRET = /^[a-f0-9]{64}$/;
 const GITHUB_COMMAND = "/oriel";
 const githubCommand = (body: string) => /^[\/／]oriel(?:\s|$)/i.test(body.trimStart()) ? { planning: /^[\/／]oriel\s+how(?:\s|$)/i.test(body.trimStart()) } : null;
@@ -50,6 +52,49 @@ export class WorkflowReader {
       nodes.push(...rows);
       if (rows.length < 100) return nodes;
     }
+  }
+
+  // One request reads up to twenty issue comment pages. Pagination still reads
+  // every comment; partial GraphQL data can never imply approval or no feedback.
+  protected async workflowComments(context: WorkflowContext, issues: GithubWhat[]): Promise<Map<number, GithubComment[]>> {
+    type Issue = { id: string; number: number; comments: Page<{ fullDatabaseId: string | number; body: string; createdAt: string; author: { __typename: string; login: string } | null }> };
+    const comments = new Map<number, GithubComment[]>();
+    for (let offset = 0; offset < issues.length; offset += 20) {
+      let pending = issues.slice(offset, offset + 20).map(issue => ({ issue, after: null as string | null, seen: new Set<string>() }));
+      while (pending.length) {
+        const variables: Record<string, unknown> = { owner: context.repository.owner, name: context.repository.name };
+        const fields = pending.map(({ issue, after }, index) => {
+          variables[`number${index}`] = issue.number; variables[`after${index}`] = after;
+          return `i${index}:issue(number:$number${index}){id number comments(first:100,after:$after${index}){nodes{fullDatabaseId body createdAt author{__typename login}} pageInfo{hasNextPage endCursor}}}`;
+        });
+        const parameters = pending.map((_, index) => `$number${index}:Int!,$after${index}:String`).join(",");
+        const result = await this.workflowGithub<{ data?: { repository: Record<string, Issue> | null }; errors?: unknown[] }>(context, "/graphql", "POST", {
+          query: `query OrielIssueComments($owner:String!,$name:String!,${parameters}){repository(owner:$owner,name:$name){${fields.join(" ")}}}`, variables,
+        });
+        if (!result?.data?.repository || result.errors?.length) this.auth.fail(502, "GitHub issue comments are unavailable");
+        const next: typeof pending = [];
+        for (const [index, state] of pending.entries()) {
+          const row = result.data.repository[`i${index}`];
+          if (!row || row.id !== state.issue.node_id || row.number !== state.issue.number || !Array.isArray(row.comments?.nodes) ||
+              typeof row.comments.pageInfo?.hasNextPage !== "boolean") this.auth.fail(502, "GitHub issue comment identity is unavailable");
+          const collected = comments.get(row.number) ?? [];
+          for (const node of row.comments.nodes) {
+            const id = Number(node.fullDatabaseId);
+            if (!Number.isSafeInteger(id) || id <= 0 || typeof node.body !== "string" || typeof node.createdAt !== "string" ||
+                node.author && (typeof node.author.login !== "string" || typeof node.author.__typename !== "string")) this.auth.fail(502, "GitHub comment identity is unavailable");
+            collected.push({ id, body: node.body, created_at: node.createdAt, user: { login: node.author?.login ?? "", type: node.author?.__typename ?? "Unknown" } });
+          }
+          comments.set(row.number, collected);
+          if (row.comments.pageInfo.hasNextPage) {
+            const after = row.comments.pageInfo.endCursor;
+            if (!after || state.seen.has(after)) this.auth.fail(502, "GitHub comment pagination is unavailable");
+            state.seen.add(after); next.push({ ...state, after });
+          }
+        }
+        pending = next;
+      }
+    }
+    return comments;
   }
 
   protected async workflowLinear<T>(context: WorkflowContext, query: string, variables: Record<string, unknown> = {}): Promise<T> {
@@ -170,6 +215,8 @@ export class WorkflowReader {
     const snapshot: WorkflowSnapshot = { repository: context.binding.repository, repository_id: repository.id, repository_node_id: repository.node_id,
       base_branch: repository.default_branch, target_oid: base.object.sha, team: context.team, configuration: parseConfiguration(source), workflows: [] };
     const recoveries = new Map<number, string>();
+    const commentPages = issueNumber === undefined ? await this.workflowComments(context,
+      issues.filter(issue => !issue.pull_request && issue.state === "open")) : null;
     for (let offset = 0; offset < issues.length; offset += 4) {
       const rows = await Promise.all(issues.slice(offset, offset + 4).map(async raw => {
         if (raw.pull_request) return null;
@@ -182,7 +229,7 @@ export class WorkflowReader {
         // Any human GitHub user may request planning, including before deployment.
         // Commands must start the comment; quotes, code and prose do not opt in.
         const initialComments = linked.length === 0 && issue.state === "open"
-          ? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
+          ? commentPages?.get(issue.number) ?? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`) : [];
         const request = await this.workflowIssueFeedback(context, initialComments, true);
         const row: WorkflowRow = { issue, linear: null, version: await digest(["oriel/what-version/v1", repository.node_id, issue.node_id, issue.title, issue.body ?? ""]),
           fingerprint: null, branch: null, canonical_oid: null, pull_request: null, phase: issue.state === "closed" ? "closed" : request ? "needs-how" : "waiting-how", blocked_reason: null, feedback: null, how_feedback: null, issue_feedback: null, recovery: null,
@@ -242,7 +289,9 @@ export class WorkflowReader {
                 if (["approved", "running", "review"].includes(row.phase) && !snapshot.configuration.autonomous) { row.phase = "blocked"; row.blocked_reason = snapshot.configuration.error; }
                 if (row.phase === "review") {
                   const exhausted: string[] = [];
-                  row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted);
+                  const ci: { value?: WorkflowCI } = {};
+                  row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted, ci);
+                  row.ci = ci.value;
                   if (exhausted.length) row.blocked_reason = `Check retry limit reached (3 verified attempts): ${exhausted.join(", ")}`;
                 }
               }
@@ -250,7 +299,7 @@ export class WorkflowReader {
           }
         }
         if (issue.state === "open") {
-          const comments = linked.length === 0 ? initialComments : await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
+          const comments = linked.length === 0 ? initialComments : commentPages?.get(issue.number) ?? await this.workflowList<GithubComment>(context, `${context.path}/issues/${issue.number}/comments`);
           row.what_comments = comments.map(comment => ({ id: String(comment.id), body: comment.body, author: comment.user?.login ?? null, created_at: comment.created_at }))
             .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
           row.issue_feedback = await this.workflowIssueFeedback(context, comments);
@@ -338,7 +387,31 @@ export class WorkflowReader {
     return cursors;
   }
 
-  protected async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[]): Promise<Feedback | null> {
+  protected async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[], ci?: { value?: WorkflowCI }): Promise<Feedback | null> {
+    const currentChecks: Check[] = [];
+    for (let page = 1; ; page++) {
+      const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${pr.head_oid}/check-runs?filter=all&per_page=100&page=${page}`);
+      if (!result || !Array.isArray(result.check_runs)) this.auth.fail(502, "PR checks are unavailable");
+      currentChecks.push(...result.check_runs);
+      if (result.check_runs.length < 100) break;
+    }
+    const currentStatuses = await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string; target_url?: string | null }>(context, `${context.path}/commits/${pr.head_oid}/statuses`);
+    if (ci) {
+      const newest = new Map<string, Check>();
+      for (const check of [...currentChecks].sort((a,b) => a.id-b.id)) if (check.head_sha === pr.head_oid) newest.set(check.name, check);
+      const statuses = new Map<string, typeof currentStatuses[number]>();
+      for (const status of [...currentStatuses].sort((a,b) => a.id-b.id)) statuses.set(status.context, status);
+      const result = (value: string | null): WorkflowCI["checks"][number]["status"] => value === "success" ? "success" :
+        ["neutral","skipped"].includes(value ?? "") ? "skipped" :
+        ["failure","error","timed_out","action_required","cancelled","startup_failure","stale"].includes(value ?? "") ? "failure" : "unknown";
+      const checks: WorkflowCI["checks"] = [
+        ...[...newest.values()].map(check => ({name:check.name,status:check.status === "completed" ? result(check.conclusion) : "pending" as const,url:check.details_url ?? null})),
+        ...[...statuses.values()].map(status => ({name:status.context,status:status.state === "pending" ? "pending" as const : result(status.state),url:status.target_url ?? null})),
+      ];
+      ci.value = { head_oid: pr.head_oid, checks, status:checks.some(check=>check.status === "failure") ? "failure" :
+        checks.some(check=>check.status === "pending") ? "pending" :
+        checks.length && checks.some(check=>check.status === "success") && checks.every(check=>["success","skipped"].includes(check.status)) ? "success" : "unknown" };
+    }
     const [comments, reviews, inline] = await Promise.all([
       this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`),
       this.workflowList<{ id: number; state: string; body: string | null; submitted_at: string | null; user: { login: string } }>(context, `${context.path}/pulls/${pr.number}/reviews`),
@@ -363,14 +436,7 @@ export class WorkflowReader {
       const key = `comment:${await digest([pr.number, comment.id, comment.body])}`;
       if ((requestedKey === undefined || requestedKey === key) && !cursors.has(key)) return { key, kind: "comment", body: comment.body, comments: [] };
     }
-    type Check = { id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; output: { title: string | null; summary: string | null; text: string | null } };
-    const checks: Check[] = [];
-    for (let page = 1; ; page++) {
-      const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${pr.head_oid}/check-runs?filter=all&per_page=100&page=${page}`);
-      if (!result) this.auth.fail(502, "PR checks are unavailable");
-      checks.push(...result.check_runs);
-      if (result.check_runs.length < 100) break;
-    }
+    const checks = currentChecks;
     const responseHeads = await this.workflowCursors(context, comments, "response-head");
     const heads = new Set([pr.head_oid]);
     for (const key of responseHeads.keys()) {
@@ -386,7 +452,7 @@ export class WorkflowReader {
         history.push(...result.check_runs);
         if (result.check_runs.length < 100) break;
       }
-      const statuses = await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string }>(context, `${context.path}/commits/${head}/statuses`);
+      const statuses = head === pr.head_oid ? currentStatuses : await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string }>(context, `${context.path}/commits/${head}/statuses`);
       statusHistory.push(...statuses.map(status => ({ ...status, head })));
     }
     const byName = new Map<string, Check>();

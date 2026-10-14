@@ -43,6 +43,24 @@ async function setup() {
   return { ...paired, worker, fixture };
 }
 
+test("Batched issue comments preserve later-page human requests and reject partial GraphQL data", async () => {
+  const s = await setup();
+  try {
+    s.fixture.linears.length = 0;
+    s.fixture.commentPageSize = 1;
+    s.fixture.comments.set(42,[{id:1,body:"/oriel how",created_at:"2026-01-01T00:00:00Z",user:{type:"Bot",login:"bot"}},
+      {id:2,body:"/oriel how",created_at:"2026-01-02T00:00:00Z",user:{type:"User",login:"human"}}]);
+    const result = await s.owner.api(`/api/workflows/${device}`);
+    assert.equal(result.status,200,JSON.stringify(result.data));
+    assert.equal(result.data.workflows[0].phase,"needs-how");
+    assert.deepEqual(result.data.workflows[0].what_comments.map(comment=>comment.id),["1","2"]);
+    s.fixture.commentGraphqlErrors = [{message:"private-provider-diagnostic"}];
+    const failed = await s.owner.api(`/api/workflows/${device}`);
+    assert.equal(failed.status,502);
+    assert.doesNotMatch(JSON.stringify(failed.data),/private-provider-diagnostic/);
+  } finally {await s.worker.dispose();}
+});
+
 test("Worker provider reads reject logout and provider changes before delivering a snapshot", async () => {
   const s = await setup();
   try {
@@ -94,6 +112,7 @@ test("Snapshot transport advertises HTTP and refuses unowned or malformed scoped
   try {
     const response = await s.worker.dispatchFetch(`${origin}/api/workflows/${device}/connect`, { headers: { ...hostHeaders, Upgrade: "websocket" } });
     assert.equal(response.headers.get("X-Oriel-Snapshot-Transport"), "http");
+    assert.equal(response.headers.get("X-Oriel-Verification"), "1");
     response.webSocket.accept();
     assert.equal((await s.daemon.api(`/api/workflows/${device}/snapshot`, {}, hostHeaders)).status, 200);
     assert.equal((await s.daemon.api(`/api/workflows/${device}/snapshot`, { lease_id: "forged" }, hostHeaders)).status, 409);

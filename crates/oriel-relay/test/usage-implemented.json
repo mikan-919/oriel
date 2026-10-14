@@ -16,13 +16,13 @@
       "rowsRead": 0,
       "rowsWritten": 0,
       "alarmSets": 0,
-      "providerRequests": 59
+      "providerRequests": 14
     },
     "webListRepeat": {
       "rowsRead": 0,
       "rowsWritten": 0,
       "alarmSets": 0,
-      "providerRequests": 59
+      "providerRequests": 14
     },
     "devicesList": {
       "rowsRead": 1,
@@ -88,6 +88,7 @@
     ],
     "notice": "SQL cursor counts are measured. Constructor replay plus cache reload is not a complete cold-start measurement.",
     "active_snapshot_transport": "websocket",
-    "full_snapshot_transport": "http"
+    "full_snapshot_transport": "http",
+    "comment_transport": "GitHub GraphQL batches of 20 issues, all pages read"
   }
 }

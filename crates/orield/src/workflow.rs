@@ -408,6 +408,7 @@ struct Session {
     changed: bool,
     scan_interval: Duration,
     snapshot_http: bool,
+    verification_metadata: bool,
 }
 impl Session {
     async fn connect(
@@ -459,6 +460,10 @@ impl Session {
                 .headers()
                 .get("x-oriel-snapshot-transport")
                 .is_some_and(|value| value == "http"),
+            verification_metadata: response
+                .headers()
+                .get("x-oriel-verification")
+                .is_some_and(|value| value == "1"),
         })
     }
     async fn exchange(&mut self, mut request: Value, expected: &str) -> Result<Value> {
@@ -570,6 +575,20 @@ impl Session {
             request["lease_id"] = json!(lease);
         }
         self.exchange(request, "progressed").await?;
+        Ok(())
+    }
+    async fn verification(
+        &mut self,
+        head: &str,
+        target: &str,
+        completed: usize,
+        total: usize,
+        status: &str,
+    ) -> Result<()> {
+        if self.verification_metadata && total <= 1024 {
+            self.exchange(json!({"type":"progress","stage":"verifying","lease_id":self.lease,
+                "verification":{"head_oid":head,"target_oid":target,"completed":completed,"total":total,"status":status}}), "progressed").await?;
+        }
         Ok(())
     }
     async fn claim(&mut self, row: &Row, kind: &str) -> Result<()> {
@@ -1598,6 +1617,16 @@ async fn verify(
 ) -> Result<()> {
     checked_configuration(configuration)?;
     session.progress("verifying").await?;
+    let head = git::text(path, &["rev-parse", "HEAD"]).await?;
+    session
+        .verification(
+            &head,
+            &guard.target_oid,
+            0,
+            configuration.verification.len(),
+            "running",
+        )
+        .await?;
     let home = root.join("verification-home");
     git::private_directory(&home)?;
     let package_environment = dependency_cache_environment(&home)?;
@@ -1605,7 +1634,7 @@ async fn verify(
         &std::env::var_os("PATH").unwrap_or_default(),
         &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
     );
-    for argv in &configuration.verification {
+    for (index, argv) in configuration.verification.iter().enumerate() {
         event("Verify", argv.join(" "));
         let logs = root.join("verification").join(random_hex::<12>()?);
         git::private_directory(&logs)?;
@@ -1640,6 +1669,15 @@ async fn verify(
         command.as_std_mut().process_group(0);
         let result = session.run_child(&mut command, guard).await?;
         if !result.status.success() {
+            session
+                .verification(
+                    &head,
+                    &guard.target_oid,
+                    index,
+                    configuration.verification.len(),
+                    "failure",
+                )
+                .await?;
             return Err(VerificationFailure {
                 command: argv.clone(),
                 status: result.status.to_string(),
@@ -1647,7 +1685,25 @@ async fn verify(
             }
             .into());
         }
+        session
+            .verification(
+                &head,
+                &guard.target_oid,
+                index + 1,
+                configuration.verification.len(),
+                "running",
+            )
+            .await?;
     }
+    session
+        .verification(
+            &head,
+            &guard.target_oid,
+            configuration.verification.len(),
+            configuration.verification.len(),
+            "success",
+        )
+        .await?;
     Ok(())
 }
 
@@ -2805,6 +2861,7 @@ mod tests {
             changed: false,
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
+            verification_metadata: false,
         };
         let row = serde_json::from_value(json!({
             "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
@@ -2866,6 +2923,7 @@ mod tests {
             changed: false,
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
+            verification_metadata: false,
         };
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -2951,6 +3009,7 @@ mod tests {
             changed: false,
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
+            verification_metadata: false,
         };
         session.wait(Duration::from_secs(46)).await.unwrap();
         assert!(
@@ -2999,6 +3058,7 @@ mod tests {
             changed: false,
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
+            verification_metadata: false,
             lease: Some("lease".into()),
         };
         let error = session.checked().await.unwrap_err();
@@ -3069,6 +3129,7 @@ mod tests {
             changed: false,
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
+            verification_metadata: false,
             lease: Some("lease".into()),
         };
         let snapshot: Snapshot = serde_json::from_value(json!({
@@ -3195,6 +3256,7 @@ mod tests {
                 changed: false,
                 scan_interval: SCAN_INTERVAL,
                 snapshot_http,
+                verification_metadata: false,
                 lease: Some("lease".into()),
             };
             if snapshot_http {
@@ -3309,6 +3371,7 @@ mod tests {
             changed: false,
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
+            verification_metadata: false,
         };
         let snapshot = session.snapshot().await.unwrap();
         assert!(!snapshot.configuration.autonomous);

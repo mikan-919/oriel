@@ -104,6 +104,7 @@ test("Continuous usage with workflow, dashboard and terminal connections", async
       assert.equal(page.status, 200);
       await measure("webListRepeat", () => owner.api(`/api/workflows/${device}`));
       assert.deepEqual(samples.webList, samples.webListRepeat);
+      assert.ok(samples.webList.providerRequests <= 50, "The 48-issue listing must fit the Free external request limit");
       await measure("devicesList", () => owner.api("/api/devices"));
       await measure("devicesListRepeat", () => owner.api("/api/devices"));
       await measure("codexOutput", async () => codex.send(JSON.stringify({ type: "event", engine: "usage", message: { method: "item/agentMessage/delta", params: { delta: "x" } } })));

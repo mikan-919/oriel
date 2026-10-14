@@ -98,7 +98,7 @@ async function watch(worker, owner) {
     assert.equal(frame.poll_after_seconds, 60);
     assert.equal(frame.type, "workflow-progress");
     for (const device of frame.devices) {
-      assert.deepEqual(Object.keys(device).sort(), ["device_id", "stage", "state", "task", "updated_at"]);
+      assert.deepEqual(Object.keys(device).filter(key=>key!=="verification").sort(), ["device_id", "stage", "state", "task", "updated_at"]);
       if (device.task) assert.deepEqual(Object.keys(device.task).sort(),
         ["how_identifier", "how_url", "issue_number", "repository", "title", "url"]);
     }
@@ -202,6 +202,31 @@ test("Workflow snapshots reuse control ownership and report provider failures wi
     unblock?.();
     await worker.dispose();
   }
+});
+
+test("Verification reports require live ownership, complete counts and stay scoped to the admitted issue", async () => {
+  const fixture = workflowFixture(); fixture.addHow("Todo");
+  const {worker,owner} = await setup(fixture);
+  try {
+    const host = await socket(worker), watcher = await watch(worker,owner);
+    const initial = await host.rpc({type:"snapshot"});
+    const grant = await host.rpc(claim(initial.snapshot.workflows[0],"implement"));
+    assert.equal(grant.type,"granted");
+    const proof = {head_oid:"a".repeat(40),target_oid:fixture.target_oid,status:"success",completed:2,total:2};
+    const report = value => host.rpc({type:"progress",stage:"verifying",lease_id:grant.lease_id,verification:value});
+    assert.notEqual((await report({...proof,completed:1})).type,"progressed","Incomplete counts cannot report success");
+    assert.equal((await report(proof)).type,"progressed");
+    const result = await watcher.snapshot(devices=>!!devices[0]?.verification);
+    assert.equal(result.devices[0].verification.issue_number,42);
+    assert.equal(result.devices[0].verification.head_oid,proof.head_oid);
+    assert.equal(result.devices[0].verification.completed,2);
+    assert.notEqual((await host.rpc({type:"progress",stage:"verifying",lease_id:"forged",verification:proof})).type,"progressed");
+    await host.rpc({type:"release",lease_id:grant.lease_id});
+    await host.rpc(claim(initial.snapshot.workflows[0],"implement"));
+    const cleared = await watcher.snapshot(devices=>devices[0]?.stage==="preparing"&&!devices[0].verification);
+    assert.equal(cleared.devices[0].verification,undefined);
+    watcher.ws.close();host.close();
+  } finally {await worker.dispose();}
 });
 
 test("Owner progress streams follow multiple devices, admitted task metadata, pauses and reconnects", { timeout: 60_000 }, async () => {
