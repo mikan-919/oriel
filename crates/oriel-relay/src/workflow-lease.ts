@@ -24,6 +24,7 @@ type WatchAttachment = {
   user_id: string;
   expires_at: number;
   last_snapshot?: string;
+  changes?: boolean;
 };
 type Attachment = {
   protocol: typeof PROTOCOL;
@@ -33,6 +34,8 @@ type Attachment = {
   stage: Stage;
   task: ProgressTask | null;
   updated_at: string;
+  changes?: boolean;
+  dirty?: boolean;
 };
 
 export class WorkflowLeaseError extends Error {
@@ -57,6 +60,7 @@ export class WorkflowLeases {
     private readonly ownedDevices: (userId: string) => Pick<Device, "device_id">[],
     private readonly sessionExpiry: (sessionHash: string, userId: string) => number | null,
     private readonly schedule: () => void,
+    private readonly eventDriven: () => boolean = () => false,
   ) {}
 
   private attachment(ws: WebSocket): Attachment | null {
@@ -104,7 +108,7 @@ export class WorkflowLeases {
           ? { repository: `${control.binding.repository.owner}/${control.binding.repository.name}`, ...control.grant.task }
           : control.task, updated_at: control.updated_at };
     });
-    return JSON.stringify({ type: "workflow-progress", devices });
+    return JSON.stringify({ type: "workflow-progress", devices, poll_after_seconds:this.eventDriven() ? 900 : 60 });
   }
 
   private async notify(ws: WebSocket): Promise<void> {
@@ -127,6 +131,23 @@ export class WorkflowLeases {
     for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
       // Persist only a hash, so unchanged progress stays silent after hibernation.
       this.ctx.waitUntil(this.notify(ws).catch(() => this.stopAll()));
+    }
+  }
+
+  changed(users: Set<string>): void {
+    for (const ws of this.ctx.getWebSockets(SOCKET_TAG)) {
+      const saved = this.attachment(ws);
+      if (!saved?.changes || saved.dirty || !users.has(saved.binding.user_id)) continue;
+      try {
+        const current = this.live(ws);
+        ws.serializeAttachment({...current, dirty:true});
+        this.send(ws, {type:"changed"});
+      } catch { /* Revoked connections cannot receive notifications. */ }
+    }
+    for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+      const saved = ws.deserializeAttachment() as WatchAttachment | null;
+      if (!saved?.changes || !users.has(saved.user_id)) continue;
+      try { this.liveWatch(ws); this.send(ws, {type:"workflow-changed"}); } catch { /* Revoked. */ }
     }
   }
 
@@ -211,7 +232,8 @@ export class WorkflowLeases {
 
   async message(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (this.ctx.getTags(ws).includes(WATCH_TAG)) {
-      if (message === "ready") {
+      if (message === "ready" || message === "ready:changes") {
+        if (message === "ready:changes") ws.serializeAttachment({...this.liveWatch(ws), changes:true});
         this.publish();
         this.schedule();
         return;
@@ -228,7 +250,8 @@ export class WorkflowLeases {
       requestId = request.request_id;
       let attachment = this.live(ws);
       if (request.type === "snapshot") {
-        if (Object.keys(request).some(key => !["type", "request_id", "lease_id"].includes(key))) throw new Error();
+        if (Object.keys(request).some(key => !["type", "request_id", "lease_id", "changes"].includes(key)) ||
+            request.changes !== undefined && request.changes !== true) throw new Error();
         const binding = attachment.binding;
         const leaseId = attachment.grant?.lease_id;
         const check = () => {
@@ -239,13 +262,17 @@ export class WorkflowLeases {
         try {
           check();
           attachment.expires_at = Date.now() + EXPIRY_MS;
+          attachment.changes = request.changes === true;
+          attachment.dirty = false;
           ws.serializeAttachment(attachment);
           this.schedule();
           const device = this.device(binding.device_id);
           if (!device) throw new WorkflowLeaseError();
-          const snapshot = await this.integrations.workflowSnapshot(device, check);
+          // A lease guards one WHAT. Keep all link/PR ambiguity checks, but do
+          // not reread every unrelated issue and its discussion while it runs.
+          const snapshot = await this.integrations.workflowSnapshot(device, check, attachment.grant?.issue_number);
           check();
-          this.send(ws, { type: "snapshot", request_id: requestId, snapshot });
+          this.send(ws, { type: "snapshot", request_id: requestId, snapshot, poll_after_seconds:this.eventDriven() ? 900 : 60 });
         } catch (error) {
           const known = error instanceof Error && "status" in error;
           this.send(ws, { type: "error", request_id: requestId,

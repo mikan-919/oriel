@@ -64,7 +64,7 @@ function authenticator(publicOrigin = origin) {
   };
 }
 
-async function runtime(env = {}, outbound) {
+async function runtime(env = {}, outbound, measureSql = false) {
   const base = ".cloudflare/output/v0/workers/default/";
   const config = JSON.parse(await readFile(`${base}worker.config.json`, "utf8"));
   const modules = {};
@@ -73,9 +73,27 @@ async function runtime(env = {}, outbound) {
       ...metadata,
       contents: await readFile(`${base}bundle/${name}`, metadata.type === "esm" ? "utf8" : undefined),
     };
+    if (measureSql && metadata.type === "esm" && modules[name].contents.includes("sql = this.ctx.storage.sql;")) {
+      // Test-only instrumentation of the actual workerd SQLite cursor counters.
+      // This method and wrapper are never present in the deployed bundle.
+      modules[name].contents = modules[name].contents.replace("sql = this.ctx.storage.sql;", `
+        cost = {reads:0, writes:0};
+        costForTest() { return this.cost; }
+        sql = {exec:(...args) => {
+          const cursor = this.ctx.storage.sql.exec(...args);
+          let reads = 0, writes = 0;
+          const count = () => {this.cost.reads += cursor.rowsRead - reads; this.cost.writes += cursor.rowsWritten - writes; reads = cursor.rowsRead; writes = cursor.rowsWritten;};
+          count();
+          return new Proxy(cursor, {get:(target, key) => {
+            if (key === 'toArray') return () => {const value = target.toArray(); count(); return value;};
+            const value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
+          }});
+        }};
+      `);
+    }
   }
   const integrationEnv = {
-    GITHUB_CLIENT_ID: "", GITHUB_CLIENT_SECRET: "", GITHUB_APP_ID: "", GITHUB_APP_PRIVATE_KEY: "", LINEAR_CLIENT_ID: "", INTEGRATION_ENCRYPTION_KEY: "",
+    GITHUB_CLIENT_ID: "", GITHUB_CLIENT_SECRET: "", GITHUB_APP_ID: "", GITHUB_APP_PRIVATE_KEY: "", LINEAR_CLIENT_ID: "", INTEGRATION_ENCRYPTION_KEY: "", GITHUB_APP_WEBHOOK_SECRET: "", LINEAR_WEBHOOK_SECRET: "",
     ...env,
   };
   return new Miniflare({ unsafeInspectDurableObjects: true, workers: [{ config: {

@@ -94,7 +94,8 @@ async function watch(worker, owner) {
   ws.addEventListener("message", event => {
     const frame = JSON.parse(event.data);
     history.push(frame);
-    assert.deepEqual(Object.keys(frame).sort(), ["devices", "type"]);
+    assert.deepEqual(Object.keys(frame).sort(), ["devices", "poll_after_seconds", "type"]);
+    assert.equal(frame.poll_after_seconds, 60);
     assert.equal(frame.type, "workflow-progress");
     for (const device of frame.devices) {
       assert.deepEqual(Object.keys(device).sort(), ["device_id", "stage", "state", "task", "updated_at"]);

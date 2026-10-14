@@ -1,6 +1,7 @@
 export { RelayDevice } from "../build/index.js";
 export { AccountRegistry } from "./account";
 import { quotaResponse } from "./quota";
+import { workflowChange, type WebhookEnv } from "./webhook";
 
 interface RelayResponse extends Response {
   webSocket: WebSocket | null;
@@ -11,7 +12,7 @@ interface ObjectNamespace {
   get(id: { toString(): string }): { fetch(request: Request): Promise<RelayResponse> };
 }
 
-interface Env {
+interface Env extends WebhookEnv {
   ACCOUNTS: ObjectNamespace;
   RELAY: ObjectNamespace;
 }
@@ -19,6 +20,15 @@ interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Preserve the original provider URLs as well as the /api routes.
+    const hook = /^(?:\/api)?\/webhooks\/(github|linear)$/.exec(url.pathname);
+    if (hook) {
+      const change = await workflowChange(request, env, hook[1] as "github" | "linear");
+      if (change instanceof Response) return change;
+      return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request("https://internal/workflow-change", {
+        method:"POST", body:JSON.stringify(change),
+      })).catch(error => quotaResponse(error) ?? Promise.reject(error));
+    }
     if (url.pathname.startsWith("/api/")) {
       return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request)
         .catch(error => quotaResponse(error) ?? Promise.reject(error));

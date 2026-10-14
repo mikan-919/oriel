@@ -4,9 +4,9 @@ import test from "node:test";
 import { client, connect, device, hostHeaders, origin, pair, runtime } from "./helpers.mjs";
 import { workflowFixture } from "./workflow-fixture.mjs";
 
-async function setup() {
+async function setup(measureSql = false) {
   const fixture = workflowFixture();
-  const worker = await runtime(fixture.env, request => fixture.fetch(request));
+  const worker = await runtime(fixture.env, request => fixture.fetch(request), measureSql);
   const { owner, daemon } = await pair(worker);
   await connect(owner, fixture, "github"); await connect(owner, fixture, "linear");
   assert.equal((await daemon.api(`/api/integrations/${device}/repository`, { repository: fixture.repository }, hostHeaders)).status, 200);
@@ -874,5 +874,44 @@ test("request deletion during final creation reads prevents initial HOW creation
     const result = await s.action(lease, "proposal", { title: "HOW", description: "Plan for review.", summary: "Prepared the HOW for review." });
     assert.equal(result.status, 409);
     assert.deepEqual(s.fixture.linears, []);
+  } finally { await s.close(); }
+});
+
+test("Leased discovery reads only the current WHAT while still checking approval and ambiguous links", async () => {
+  const s = await setup(true);
+  try {
+    const namespace = await s.worker.getDurableObjectNamespace("ACCOUNTS");
+    const costs = () => namespace.get(namespace.idFromName("accounts")).costForTest();
+    s.fixture.addHow("Todo");
+    for (let number = 43; number < 90; number++) s.fixture.issues.push({...s.fixture.issues[0], number, node_id:`I_${number}`, html_url:`https://github.com/octocat/connected/issues/${number}`});
+    s.fixture.calls.length = 0;
+    const beforeFull = await costs();
+    const full = await s.snapshot();
+    const afterFull = await costs();
+    const fullComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
+    assert.equal(full.workflows.length, 48);
+    const lease_id = await s.claim("implement");
+    s.fixture.calls.length = 0;
+    const beforeScoped = await costs();
+    const current = await s.message({type:"snapshot", lease_id});
+    const afterScoped = await costs();
+    const fullReads = afterFull.reads - beforeFull.reads, scopedReads = afterScoped.reads - beforeScoped.reads;
+    assert.ok(scopedReads < fullReads / 2, JSON.stringify({fullReads, scopedReads}));
+    console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, scopedReads}));
+    assert.equal(current.type, "snapshot", JSON.stringify(current));
+    assert.deepEqual(current.snapshot.workflows.map(row => row.issue.number), [42]);
+    assert.equal(current.snapshot.workflows[0].phase, "approved");
+    const scopedComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
+    assert.equal(scopedComments, 1);
+    assert.equal(fullComments, 48);
+    assert.equal(s.fixture.calls.some(call => call.operation === "whats"), false);
+    s.fixture.linears[0].state = {...s.fixture.states.find(state => state.name === "Triage")};
+    assert.equal((await s.message({type:"snapshot", lease_id})).snapshot.workflows[0].phase, "triage");
+    s.fixture.addHow("Todo").id = "22222222-2222-4222-a222-222222222222";
+    const duplicate = (await s.message({type:"snapshot", lease_id})).snapshot.workflows[0];
+    assert.equal(duplicate.phase, "blocked");
+    assert.match(duplicate.blocked_reason, /Multiple Linear/);
+    s.fixture.issues = s.fixture.issues.filter(issue => issue.number !== 42);
+    assert.deepEqual((await s.message({type:"snapshot", lease_id})).snapshot.workflows, []);
   } finally { await s.close(); }
 });

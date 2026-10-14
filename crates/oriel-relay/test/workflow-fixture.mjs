@@ -194,6 +194,10 @@ export function workflowFixture() {
       return sha ? Response.json({ object: { sha } }) : new Response(null, { status: 404 });
     }
     if (operation === "refs") return Response.json([...fixture.refs].filter(([branch]) => branch.startsWith("oriel/")).map(([branch, sha]) => ({ ref: `refs/heads/${branch}`, object: { sha } })));
+    if (/^\/issues\/\d+$/.test(path) && request.method === "GET") {
+      const issue = fixture.issues.find(issue => issue.number === Number(path.split("/")[2]));
+      return issue ? Response.json(issue) : new Response(null, {status:404});
+    }
     if (operation === "whats") return Response.json(restPage(fixture.issues, url));
     if (operation === "what-create") {
       const number = Math.max(42, ...fixture.issues.map(issue => issue.number)) + 1;

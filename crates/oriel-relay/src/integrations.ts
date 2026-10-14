@@ -8,6 +8,8 @@ export interface IntegrationEnv {
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   LINEAR_CLIENT_ID?: string;
+  GITHUB_APP_WEBHOOK_SECRET?: string;
+  LINEAR_WEBHOOK_SECRET?: string;
 }
 
 export type Device = { device_id: string; name: string; user_id: string; host_hash: string; repository: string | null; repository_generation: string };
@@ -242,7 +244,7 @@ export class Integrations {
     return hows;
   }
 
-  private async workflowFacts(context: WorkflowContext): Promise<WorkflowFacts> {
+  private async workflowFacts(context: WorkflowContext, issueNumber?: number): Promise<WorkflowFacts> {
     const repository = await this.workflowGithub<{ id: number; node_id: string; default_branch: string }>(context, context.path);
     if (!repository || repository.id !== context.repository.repository_id || !validBranch(repository.default_branch)) this.auth.fail(409, "Selected repository identity is unavailable");
     // Read independent provider collections together; every await still checks
@@ -255,7 +257,10 @@ export class Integrations {
           `${context.path}/contents/.oriel.yaml?ref=${base.object.sha}`, "GET", undefined, true);
         return { base, configuration };
       })(),
-      this.workflowList<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues?state=all&sort=created&direction=asc`),
+      issueNumber === undefined
+        ? this.workflowList<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues?state=all&sort=created&direction=asc`)
+        : this.workflowGithub<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues/${issueNumber}`, "GET", undefined, true)
+          .then(issue => issue ? [issue] : []),
       this.workflowList<GithubPull>(context, `${context.path}/pulls?state=all`),
       this.workflowGithub<{ ref: string; object: { sha: string } }[]>(context, `${context.path}/git/matching-refs/heads/oriel/`),
       this.workflowHows(context),
@@ -602,14 +607,14 @@ export class Integrations {
     return `${truncated ? "[Download limited to 4 MiB; excerpt may omit later output]\n" : ""}${excerpt.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")}`;
   }
 
-  async workflowSnapshot(device: Device, check: () => void): Promise<WorkflowSnapshot> {
-    return (await this.workflowFacts(await this.workflowContext(device, check))).snapshot;
+  async workflowSnapshot(device: Device, check: () => void, issueNumber?: number): Promise<WorkflowSnapshot> {
+    return (await this.workflowFacts(await this.workflowContext(device, check), issueNumber)).snapshot;
   }
 
   async workflowAdmission(device: Device, claim: WorkflowClaim, check: () => void): Promise<WorkflowAdmission> {
     if (!["plan", "discuss", "implement", "respond", "reconcile"].includes(claim.kind) || !Number.isSafeInteger(claim.issue_number) || claim.issue_number <= 0 || !SECRET.test(claim.version) || claim.branch !== null && typeof claim.branch !== "string") this.auth.fail(400, "Invalid workflow claim");
     const context = await this.workflowContext(device, check);
-    const { snapshot, recoveries } = await this.workflowFacts(context);
+    const { snapshot, recoveries } = await this.workflowFacts(context, claim.issue_number);
     const row = snapshot.workflows.find(row => row.issue.number === claim.issue_number);
     if (!row || row.version !== claim.version || row.branch !== claim.branch) this.auth.fail(409, "Workflow content or canonical branch changed");
     const allowed = claim.kind === "plan" ? ["needs-how", "triage"].includes(row.phase) && (!row.issue_feedback || row.issue_feedback.planning) :
@@ -715,7 +720,7 @@ export class Integrations {
   }
 
   private async workflowCurrent(context: WorkflowContext, grant: WorkflowGrant, phases?: WorkflowRow["phase"][], changed = false): Promise<{ facts: WorkflowFacts; row: WorkflowRow }> {
-    const facts = await this.workflowFacts(context);
+    const facts = await this.workflowFacts(context, grant.issue_number);
     const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
     if (!row || (row.linear?.id ?? null) !== grant.linear_id && !(grant.kind === "plan" && grant.linear_id === null && row.phase === "triage")) this.auth.fail(409, "Formal workflow identity changed");
     const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === (grant.initial_what_version ?? grant.version);
@@ -871,7 +876,7 @@ export class Integrations {
   private async workflowIssuePlanReply(context: WorkflowContext, grant: WorkflowGrant, linear: LinearHow, summary: unknown): Promise<void> {
     if (!grant.issue_feedback) return;
     if (typeof summary !== "string" || !summary.trim() || summary.length > 12000) this.auth.fail(400, "A bounded model reply is required for Issue planning");
-    const { snapshot } = await this.workflowFacts(context);
+    const { snapshot } = await this.workflowFacts(context, grant.issue_number);
     const row = snapshot.workflows.find(row => row.issue.number === grant.issue_number);
     if (!row || row.phase !== "triage" || row.linear?.id !== linear.id || row.linear.title !== linear.title || row.linear.description !== linear.description) this.auth.fail(409, "HOW changed before the Issue reply");
     if (await digest(["oriel/what-version/v1", snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) !== grant.initial_what_version) this.auth.fail(409, "WHAT changed before the Issue reply");
@@ -914,7 +919,7 @@ export class Integrations {
         const marker = await this.workflowMarker(context, "issue-response", grant.issue_feedback.key);
         const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${grant.issue_number}/comments`);
         if (comments.some(comment => comment.user?.type === "Bot" && comment.body.includes(marker))) {
-          const { snapshot } = await this.workflowFacts(context);
+          const { snapshot } = await this.workflowFacts(context, grant.issue_number);
           return { linear: snapshot.workflows.find(row => row.issue.number === grant.issue_number)?.linear ?? null };
         }
       }
@@ -922,7 +927,7 @@ export class Integrations {
       try { initial = await this.workflowCurrent(context, grant, ["needs-how", "triage"]); }
       catch (error) {
         if (!(error instanceof Error) || !("status" in error) || error.status !== 409 || grant.linear_id === null) throw error;
-        const facts = await this.workflowFacts(context);
+        const facts = await this.workflowFacts(context, grant.issue_number);
         const row = facts.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
         if (row?.phase !== "triage" || row.linear?.id !== grant.linear_id || row.linear.title !== body.title || row.linear.description !== body.description) throw error;
         if (row.how_feedback && !grant.issue_feedback) {
@@ -971,7 +976,7 @@ export class Integrations {
         how = await this.workflowHow(context, id);
         if (!how?.attachments.some(attachment => attachment.url === url)) this.auth.fail(502, "HOW formal link is unconfirmed; retry the same workflow");
       }
-      const current = await this.workflowFacts(context);
+      const current = await this.workflowFacts(context, grant.issue_number);
       const row = current.snapshot.workflows.find(row => row.issue.number === grant.issue_number);
       if (row?.phase !== "triage" || row.linear?.id !== id || row.issue.title !== initial.row.issue.title || row.issue.body !== initial.row.issue.body) this.auth.fail(409, "HOW formal identity changed during proposal");
       await this.workflowIssuePlanReply(context, grant, row.linear, body.summary);

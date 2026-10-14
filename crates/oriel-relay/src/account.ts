@@ -302,7 +302,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           sessionHash, userId, now(),
         ).toArray()[0];
         return session ? session.expires_at * 1000 : null;
-      }, () => this.scheduleSockets());
+      }, () => this.scheduleSockets(), () => !!env.GITHUB_APP_WEBHOOK_SECRET && !!env.LINEAR_WEBHOOK_SECRET);
     this.codex = new CodexConnections(this.ctx,
       id => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0],
       (hash, user) => {
@@ -316,6 +316,17 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     let response: Response;
     try {
       const url = new URL(request.url);
+      // Only the Worker can route here, after verifying the provider signature.
+      // The public entrypoint does not expose /workflow-change.
+      if (url.pathname === "/workflow-change" && request.method === "POST") {
+        const change = await request.json() as {provider:"github" | "linear"; scope:string};
+        const users = this.sql.exec<{user_id:string}>(
+          "SELECT user_id FROM account_integrations WHERE provider = ? AND active IS NOT NULL AND CAST(json_extract(target, ?) AS TEXT) = ?",
+          change.provider, change.provider === "github" ? "$.repository_id" : "$.workspace_id", change.scope,
+        ).toArray();
+        this.workflows.changed(new Set(users.map(user => user.user_id)));
+        return new Response(null, {status:200});
+      }
       if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS.includes(url.hostname))) {
         fail(403, "HTTPS is required outside loopback development");
       }
