@@ -59,7 +59,7 @@ export function workflowFixture() {
   };
   const record = async (provider, operation, request, body) => {
     fixture.calls.push({ provider, operation, method: request.method, ...(body === undefined ? {} : { body: structuredClone(body) }) });
-    if (request.method === "GET" || body?.query?.startsWith("query")) await fixture.holdReads?.({ provider, operation });
+    if (request.method === "GET" || body?.query?.startsWith("query")) await fixture.holdReads?.({ provider, operation, body });
     const failure = fixture.failures.get(operation);
     return failure ? new Response("private-provider-diagnostic", { status: typeof failure === "number" ? failure : 503 }) : null;
   };

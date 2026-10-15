@@ -400,6 +400,10 @@ export class Integrations extends WorkflowReader {
     if (!current.row.linear) this.auth.fail(409, "A unique HOW is required");
     const id = current.row.linear.id;
     const before = current.row.linear;
+    // Approval depends on formal WHAT links, not attachment order or PR links
+    // added by the GitHub integration during publication. Keep URL checks exact.
+    const issueLinks = (how: WorkflowHow) => how.attachments.map(attachment => attachment.url)
+      .filter(url => /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\//i.test(url)).sort();
     let expected = input;
     const matches = (how: LinearHow) => (expected.stateId === undefined || how.state.id === expected.stateId) &&
       (expected.title === undefined || how.title === expected.title) && (expected.description === undefined || how.description === expected.description);
@@ -435,7 +439,7 @@ export class Integrations extends WorkflowReader {
         ["title", fresh.title !== baseline.title],
         ["description", fresh.description !== baseline.description],
         ["state", fresh.state.id !== baseline.state.id || fresh.state.name !== baseline.state.name || fresh.state.type !== baseline.state.type],
-        ["attachments", fresh.attachments.length !== baseline.attachments.length || fresh.attachments.some((attachment, index) => attachment.url !== baseline.attachments[index].url)],
+        ["attachments", JSON.stringify(issueLinks(fresh)) !== JSON.stringify(issueLinks(baseline))],
       ].filter(([, differs]) => differs).map(([field]) => field);
       if (differences.length) this.auth.fail(409, `Human changes prevented the HOW update (${differences.join(", ")})`);
       context.check();

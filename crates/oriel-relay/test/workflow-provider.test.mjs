@@ -236,6 +236,41 @@ test("native Markdown formatting is acknowledged once without granting Todo", as
   } finally { await s.close(); }
 });
 
+test("HOW transitions ignore attachment order and PR links but preserve formal Issue links", async () => {
+  for (const [change, allowed] of [
+    [how => how.attachments.reverse(), true],
+    [how => how.attachments.unshift({ url: "https://github.com/octocat/connected/pull/90" }), true],
+    [how => how.attachments.shift(), false],
+    [how => { how.attachments[0].url += "?alias=1"; }, false],
+    [how => how.attachments.push({ url: "https://github.com/foreign/repo/issues/9" }), false],
+  ]) {
+    const s = await setup();
+    try {
+      const how = s.fixture.addHow();
+      how.attachments.push({ url: "https://example.com/reference" });
+      const approved = (await s.snapshot()).workflows[0];
+      s.fixture.refs.set(approved.branch, s.fixture.target_oid);
+      const lease = await s.claim("implement");
+      let lastScan = -1, injected = false;
+      s.fixture.holdReads = ({ provider, operation, body }) => {
+        if (provider !== "linear" || operation !== "how" || !body.query.includes("attachments(")) return;
+        const scan = s.fixture.calls.filter(call => call.provider === "linear" && call.operation === "hows").length;
+        if (scan !== lastScan) { lastScan = scan; return; }
+        // The direct read before issueUpdate follows the last facts scan.
+        if (!injected) { change(how); injected = true; }
+      };
+      const result = await s.action(lease, "begin");
+      assert.equal(injected, true);
+      assert.equal(result.status, allowed ? 200 : 409, JSON.stringify(result.data));
+      assert.equal(how.state.name, allowed ? "In Progress" : "Todo");
+      if (!allowed) {
+        assert.match(result.data.error, /HOW update \(attachments\)/);
+        assert.equal(s.fixture.calls.filter(call => call.operation === "how-update").length, 0);
+      }
+    } finally { await s.close(); }
+  }
+});
+
 test("canonical update receipts do not hide intervening human edits", async () => {
   const s = await setup();
   try {
