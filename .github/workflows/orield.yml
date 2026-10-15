@@ -19,6 +19,11 @@ on:
       - "scripts/orield-release.py"
       - "scripts/test_orield_release.py"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the manifest version to crates.io after validation"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -66,7 +71,10 @@ jobs:
 
   publish:
     needs: validate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ORIELD_RELEASE_ENABLED == 'true'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.ORIELD_RELEASE_ENABLED == 'true' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish))
     runs-on: ubuntu-latest
     environment: crates-io
     concurrency:

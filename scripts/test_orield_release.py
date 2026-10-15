@@ -81,7 +81,7 @@ class ReleaseTests(unittest.TestCase):
             command.return_value.returncode = 0
             release.main()
             self.assertEqual(command.call_args_list[0].args[0],
-                             ["cargo", "publish", "-p", "orield", "--locked"])
+                             ["cargo", "publish", "-p", "orield", "--locked", "--registry", "crates-io"])
             self.assertEqual(command.call_count, 3)
 
     def test_team_owner_can_verify_existing_version(self):

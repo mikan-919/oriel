@@ -6,6 +6,7 @@ license.workspace = true
 description = "Local daemon connecting Codex sessions to Oriel's web and relay services"
 readme = "README.md"
 repository = "https://github.com/mikan-919/oriel"
+publish = ["crates-io"]
 include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [dependencies]

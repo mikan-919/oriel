@@ -54,7 +54,7 @@ def main():
         report(f"Skipped publication: orield {version} already exists.")
     else:
         try:
-            subprocess.run(["cargo", "publish", "-p", "orield", "--locked"], check=True)
+            subprocess.run(["cargo", "publish", "-p", "orield", "--locked", "--registry", "crates-io"], check=True)
         except subprocess.CalledProcessError:
             report(f"Publication failed: orield {version}.")
             raise
@@ -66,7 +66,7 @@ def main():
     for attempt in range(10):
         with tempfile.TemporaryDirectory(prefix="orield-registry-install-") as root:
             result = subprocess.run([
-                "cargo", "install", "orield", "--locked", "--version", "=" + version,
+                "cargo", "install", "orield", "--locked", "--registry", "crates-io", "--version", "=" + version,
                 "--root", root,
             ], env=install_env)
             if result.returncode == 0:

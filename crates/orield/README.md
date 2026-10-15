@@ -27,19 +27,18 @@ cargo install --path crates/orield --locked
 orield --help
 ```
 
-The package validation workflow checks Ubuntu x86_64 with stable Rust. This is a
-validation environment, not a promise of support for other environments or a
-minimum Rust version. The daemon contains Unix-specific code. Supported OS/CPU
-combinations and the minimum Rust version still need a release-owner decision.
+The initial release targets Linux x86_64 with stable Rust. The package validation
+workflow checks Ubuntu x86_64. The daemon contains Unix-specific code; other
+OS/CPU combinations and a minimum Rust version are not covered by release checks.
 Release acceptance checks installation and `--help`; it does not validate normal
 startup, pairing, integrations, or workflow execution.
 
 ## Release preparation
 
-The current manifest inherits version `0.1.0` and MIT licensing from the workspace.
-Before the first release, confirm these values, supported environments, the
-release owner, and the CI authentication method. Do not publish until those
-decisions and the crates.io name/ownership check have been completed.
+The initial manifest inherits version `0.1.0` and MIT licensing from the workspace.
+The release owner is `mikan-919`. Publication is restricted to crates.io. The
+release script checks the crate's name/ownership and the exact version before
+uploading, and verifies installation from crates.io afterward.
 
 Versions are updated manually in the root `Cargo.toml` under
 `[workspace.package]`; that changes the inherited version of all workspace
@@ -50,20 +49,33 @@ Web/relay deployment workflow is independent.
 
 ## Enable automatic publication (release owner)
 
-First publication and CI execution are owner tasks after repository review.
-Confirm 0.1.0, MIT, supported OS/CPU and Rust version, and record the named
-release/version-update owner before enabling publication. CI currently validates
-Ubuntu x86_64 with stable Rust; no minimum Rust version is promised.
+Sign in to crates.io with the `mikan-919` GitHub account and verify the account's
+email address. Create a token that can publish the new `orield` crate and future
+versions. Keep the token out of source, command arguments and chat messages.
 
-Create the GitHub environment `crates-io`. Configure its secret
+Create the GitHub environment `crates-io` and restrict its deployment branches to
+`main`. Configure its secret
 `ORIELD_CRATES_IO_TOKEN` with a crates.io token scoped to publishing `orield`, and
 its variable `ORIELD_CRATES_IO_OWNER` with the exact crates.io owner login (user
 or team). Supply these settings through the hosting UI; never put the token in
 repository files or logs. This implementation uses a scoped token; rotate it
-according to the owner's policy. For automatic publication, permit main in the
+according to the owner's policy. For automatic publication, permit `main` in the
 environment without a required reviewer. Finally set the repository variable
 `ORIELD_RELEASE_ENABLED` to `true`. Leaving it unset keeps validation active
 while publication is disabled.
+
+After merging the workflow into `main`, perform the first publication with:
+
+```sh
+gh workflow run orield.yml --ref main -f publish=true
+gh run list --workflow orield.yml --branch main --limit 1
+gh run watch <run-id> --exit-status
+```
+
+The manual publication runs the same validation as automatic publication. Leave
+the `publish` input false for validation only. Pull requests and non-main branches
+cannot publish. Check the `Publish missing version and verify registry installation`
+step and the job summary before treating a release as published.
 
 Every relevant main push then publishes after validation, serialized across
 release jobs. The script checks existing crate ownership and the exact version
@@ -83,7 +95,8 @@ results and rerun the publish job at the same version to confirm the skip path.
 A failed verification after successful publication cannot undo the release;
 rerun verification and investigate before changing the version.
 
-Manually update the workspace version for the next release through review.
-Use the workflow's manual trigger to rerun validation only; manual runs and pull
-requests never publish. Re-run failed main-push jobs from the hosting UI when
-needed, including to verify an already published version.
+For the next release, update `[workspace.package].version` in the root
+`Cargo.toml` and the corresponding workspace entries in `Cargo.lock`, then merge
+to `main`. A version bump is required for new code: a push with the same version
+verifies the existing release without overwriting it. Re-run a failed publication
+with the manual trigger above; already published versions are verified again.
