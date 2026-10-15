@@ -958,3 +958,42 @@ test("Leased discovery reads only the current WHAT while still checking approval
     assert.deepEqual((await s.message({type:"snapshot", lease_id})).snapshot.workflows, []);
   } finally { await s.close(); }
 });
+
+test("JSON limits protect authenticated creation while preserving Japanese field boundaries", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    const path = `/api/workflows/${device}/issues`;
+    const create = (title, body, extra = {}) => s.owner.api(path, { title, body, request_id: randomUUID(), ...extra });
+    assert.equal((await create("日".repeat(256), "日".repeat(60000))).status, 200);
+    assert.equal((await create("日".repeat(257), "ok")).status, 400);
+    assert.equal((await create("ok", "日".repeat(60001))).status, 400);
+    assert.equal((await s.daemon.api("/api/pair/start", { device_id: device, name: "日".repeat(255) }, hostHeaders)).status, 200);
+    assert.equal((await s.daemon.api("/api/pair/start", { device_id: device, name: "日".repeat(256) }, hostHeaders)).status, 400);
+    assert.equal((await client(s.worker).api(path, { padding: "x".repeat(65537) })).status, 401);
+    const before = s.fixture.issues.length;
+    const body = { title: "上限", body: "日".repeat(60000), request_id: randomUUID(), padding: "" };
+    body.padding = "日".repeat(65536 - JSON.stringify(body).length);
+    assert.equal(JSON.stringify(body).length, 65536);
+    assert.equal((await s.owner.api(path, body)).status, 200);
+    assert.equal(s.fixture.issues.length, before + 1);
+    const creations = s.fixture.calls.filter(call => call.operation === "what-create").length;
+    body.request_id = randomUUID();
+    body.padding += "日";
+    const rejected = await s.owner.api(path, body);
+    assert.equal(rejected.status, 413);
+    assert.deepEqual(rejected.data, { error: "Request is too large" });
+    assert.equal(s.fixture.calls.filter(call => call.operation === "what-create").length, creations);
+    assert.equal(s.fixture.issues.length, before + 1);
+
+    for (const [client, route, valid, headers] of [
+      [s.owner, "/api/auth/login/options", {}, {}],
+      [s.daemon, "/api/pair/start", { device_id: device, name: "日" }, hostHeaders],
+      [s.owner, "/api/integrations/linear/select", { team_id: "team" }, {}],
+    ]) {
+      assert.equal((await client.api(route, valid, headers)).status, 200);
+      const response = await client.api(route, { ...valid, padding: "日".repeat(65536) }, headers);
+      assert.equal(response.status, 413, route);
+      assert.deepEqual(response.data, { error: "Request is too large" });
+    }
+  } finally { await s.close(); }
+});

@@ -102,8 +102,37 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     fail(415, "Expected application/json");
   }
-  const text = await request.text();
-  if (text.length > 65536) fail(413, "Request is too large");
+  // This UTF-16 limit includes JSON syntax, keys, escapes and all fields;
+  // individual field limits (including the 60,000-unit issue body) still apply.
+  const maximumUnits = 65536;
+  const maximumBytes = 262144;
+  let text = "";
+  let bytes = 0;
+  const reader = request.body?.getReader();
+  if (reader) {
+    const decoder = new TextDecoder();
+    const append = (chunk: string) => {
+      if (chunk.length > maximumUnits - text.length) tooLarge();
+      text += chunk;
+    };
+    const tooLarge = (): never => {
+      // A peer's cancellation may reject or never settle. Neither may delay 413.
+      void reader.cancel().catch(() => {});
+      fail(413, "Request is too large");
+    };
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value.byteLength > maximumBytes - bytes) tooLarge();
+        bytes += value.byteLength;
+        append(decoder.decode(value, { stream: true }));
+      }
+      append(decoder.decode());
+    } finally {
+      reader.releaseLock();
+    }
+  }
   let body: unknown;
   try {
     body = JSON.parse(text);
