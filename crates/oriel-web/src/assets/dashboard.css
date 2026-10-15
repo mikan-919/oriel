@@ -176,3 +176,10 @@ input:not([type=checkbox]),textarea { max-width:100%; }
 #terminal { flex:1; min-height:0; width:100%; }
 @media(max-width:900px) { .sidebar { flex-wrap:wrap; gap:5px; } .sidebar .brand { margin:0 16px 0 0; } .sidebar button { padding:7px 9px; } .codex-grid { grid-template-columns:1fr; } }
 @media(max-width:760px) { .overview-grid { grid-template-columns:1fr; } }
+
+/* Native selects use the longest option as their intrinsic width. */
+select { min-width:0; max-width:100%; }
+#devices>li,#repository-details,#terminal-title { overflow-wrap:anywhere; }
+#terminal-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+#terminal-title { flex:1; min-width:0; }
+#close-terminal { flex-shrink:0; }
