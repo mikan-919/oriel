@@ -50,7 +50,21 @@ try {
   for(const viewport of viewports) {
     await page.setViewportSize(viewport);await page.waitForTimeout(100);
     const measurement=await page.evaluate(()=>{const r=document.querySelector('.xterm-screen').getBoundingClientRect();const t=document.getElementById('terminal').getBoundingClientRect();return {clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,terminalRight:r.right,terminalBottom:r.bottom,containerBottom:t.bottom,viewportHeight:innerHeight};});
-    results.push({state:'normal',screen:'terminal',...viewport,...measurement});
+    const close=page.locator('#close-terminal');
+    await close.focus();
+    const control=await close.evaluate(button=>{
+      const r=button.getBoundingClientRect();
+      const style=getComputedStyle(button);
+      return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,
+        focused:document.activeElement===button,outline:style.outlineStyle,
+        unobstructed:button.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};
+    });
+    if(stage==='after') {
+      assert.ok(control.left>=0 && control.top>=0 && control.right<=viewport.width && control.bottom<=viewport.height,'close button within viewport');
+      assert.ok(control.unobstructed,'close button can be clicked');
+      assert.ok(control.focused && control.outline!=='none','close button has visible keyboard focus');
+    }
+    results.push({state:'normal',screen:'terminal',...viewport,...measurement,close:control});
     if(viewport.width===320 || viewport.width===844)writeFileSync(new URL(`normal-terminal-${viewport.width}x${viewport.height}.png`,output),await captureNlAssertImage({target:page}));
   }
   await page.locator('#close-terminal').focus();await page.keyboard.press('Enter');
