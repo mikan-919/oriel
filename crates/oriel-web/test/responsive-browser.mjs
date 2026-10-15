@@ -1,6 +1,6 @@
 // Generate assets and review fixtures first. No external accounts or connections.
 import assert from 'node:assert/strict';
-import {readFileSync, mkdirSync, writeFileSync} from 'node:fs';
+import {readFileSync, mkdirSync, writeFileSync, renameSync} from 'node:fs';
 import {chromium} from '../../oriel-relay/node_modules/playwright/index.mjs';
 import {captureNlAssertImage} from '../../oriel-relay/node_modules/@mizchi/vlmkit/dist/playwright.mjs';
 
@@ -40,7 +40,6 @@ try {
       }
     }
   }
-  writeFileSync(new URL('results.json',output),JSON.stringify({browser:browser.version(),results,errors},null,2)+'\n');
   // Exercise real xterm with a mock WebSocket and both width and height changes.
   await page.goto('https://fixture.invalid/normal.html');
   await page.waitForTimeout(300);
@@ -51,6 +50,9 @@ try {
     await page.setViewportSize(viewport);await page.waitForTimeout(100);
     const measurement=await page.evaluate(()=>{const r=document.querySelector('.xterm-screen').getBoundingClientRect();const t=document.getElementById('terminal').getBoundingClientRect();return {clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,terminalRight:r.right,terminalBottom:r.bottom,containerBottom:t.bottom,viewportHeight:innerHeight};});
     const close=page.locator('#close-terminal');
+    // Switch to keyboard input before testing :focus-visible. Programmatic
+    // focus after the mouse click intentionally retains pointer modality.
+    await page.keyboard.press('Tab');
     await close.focus();
     const control=await close.evaluate(button=>{
       const r=button.getBoundingClientRect();
@@ -81,7 +83,9 @@ try {
   await page.locator('#what-form button[type="submit"]').click();
   await page.locator('#workflow-create-dialog').waitFor({state:'hidden'});
   assert.ok(await page.evaluate(()=>window.fixtureRequests.some(r=>r.method==='POST')));
-  writeFileSync(new URL('results.json',output),JSON.stringify({browser:browser.version(),results,errors,focus},null,2)+'\n');
+  // Keep the last complete evidence if a run fails or is interrupted.
+  writeFileSync(new URL('results.json.tmp',output),JSON.stringify({browser:browser.version(),results,errors,focus},null,2)+'\n');
+  renameSync(new URL('results.json.tmp',output),new URL('results.json',output));
   console.log(JSON.stringify({cases:results.length,overflow:results.filter(r=>r.scrollWidth>r.clientWidth+1),errors,focus},null,2));
   if(stage==='after') {
     assert.deepEqual(errors,[]);

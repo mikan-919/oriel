@@ -2880,7 +2880,176 @@
       "clientWidth": 844,
       "scrollWidth": 844,
       "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "terminalRight": 302,
+      "terminalBottom": 793.078125,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 202,
+        "top": 133.34375,
+        "right": 312,
+        "bottom": 173.734375,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "terminalRight": 344,
+      "terminalBottom": 788.6875,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 242,
+        "top": 122.140625,
+        "right": 352,
+        "bottom": 162.53125,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "terminalRight": 370,
+      "terminalBottom": 793.515625,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 272,
+        "top": 88.5625,
+        "right": 382,
+        "bottom": 128.953125,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "terminalRight": 748,
+      "terminalBottom": 789.5625,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 650,
+        "top": 32.578125,
+        "right": 760,
+        "bottom": 72.96875,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "terminalRight": 882,
+      "terminalBottom": 785.171875,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 782,
+        "top": 21.390625,
+        "right": 892,
+        "bottom": 61.78125,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "terminalRight": 882,
+      "terminalBottom": 785.171875,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 783,
+        "top": 21.390625,
+        "right": 893,
+        "bottom": 61.78125,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "terminalRight": 1420,
+      "terminalBottom": 798.78125,
+      "containerBottom": 800,
+      "viewportHeight": 800,
+      "close": {
+        "left": 1322,
+        "top": 10.1875,
+        "right": 1432,
+        "bottom": 50.578125,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "terminalRight": 823,
+      "terminalBottom": 389.171875,
+      "containerBottom": 390,
+      "viewportHeight": 390,
+      "close": {
+        "left": 726,
+        "top": 21.390625,
+        "right": 836,
+        "bottom": 61.78125,
+        "focused": true,
+        "outline": "solid",
+        "unobstructed": true
+      }
     }
   ],
-  "errors": []
+  "errors": [],
+  "focus": "端末を開く"
 }
