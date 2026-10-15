@@ -540,26 +540,26 @@ impl Session {
                     _ = tokio::time::sleep_until(heartbeat_deadline), if heartbeat.is_some() => {
                         bail!("workflow admission heartbeat timed out after 8 seconds");
                     }
-                    _ = tokio::signal::ctrl_c() => return Err(anyhow!(Stop::Interrupted)),
                 }
             }
         };
-        let result = tokio::time::timeout(wait, response)
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "workflow {operation} response timed out after {} seconds",
-                    wait.as_secs()
-                )
-                .context(Stop::Uncertain)
-            })?
-            .map_err(|error: anyhow::Error| {
-                if error.downcast_ref::<Stop>().is_some() {
-                    error
-                } else {
-                    error.context(Stop::Uncertain)
-                }
-            });
+        // Include writes in cancellation: a stalled send must not require a
+        // second Ctrl-C or wait for the provider-read timeout.
+        let result = tokio::select! {
+            result = tokio::time::timeout(wait, response) => result
+                .map_err(|_| {
+                    anyhow!("workflow {operation} response timed out after {} seconds", wait.as_secs())
+                        .context(Stop::Uncertain)
+                })?
+                .map_err(|error: anyhow::Error| {
+                    if error.downcast_ref::<Stop>().is_some() {
+                        error
+                    } else {
+                        error.context(Stop::Uncertain)
+                    }
+                }),
+            _ = tokio::signal::ctrl_c() => Err(anyhow!(Stop::Interrupted)),
+        };
         if result.is_ok() {
             self.exchange_pending = false;
         }
@@ -2760,8 +2760,6 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(interrupted(&result));
-
             assert!(interrupted(&result));
             assert_eq!(
                 fs::read_to_string(root.join("unsent")).unwrap(),
