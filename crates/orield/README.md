@@ -1,102 +1,63 @@
 # orield
 
-`orield` connects local Codex sessions to Oriel's browser and relay services.
-Codex and a running Oriel Web/relay deployment are required separately; installing
-this crate does not install or deploy them. Workflow features also require the
-GitHub and Linear integrations to be configured.
+`orield`は、ローカルで動くCodexをOrielのブラウザー画面と中継サービス（Relay）に接続するデーモンです。
 
-`orield workflow` keeps HOW planning read-only and requires human approval in
-Linear Todo plus repository opt-in before implementation. Approved implementation
-uses Codex's `auto_review` reviewer with the `on-request` approval policy, so
-eligible execution requests are reviewed automatically. Sandbox boundaries still
-apply; rejected actions and questions requiring a human decision can still block
-progress. The installed `codex` must support `auto_review`. Read-only planning and
-manual conversations continue to use the user reviewer.
+## 前提
 
-Once a version has been published to crates.io, install without a checkout:
+- Linux x86_64とRust stable。初回リリースの検証環境はUbuntu x86_64です。他のOS・CPUと、最低Rustバージョンは検証対象外です。
+- `codex`コマンドが実行できること。自動実装には`auto_review`に対応したCodexが必要です。
+- OrielのWeb・Relayが稼働していること。これらの配備は`orield`のインストールには含まれません。
+
+## インストール
+
+crates.ioへの公開後は、次のコマンドで導入できます。
 
 ```sh
 cargo install orield --locked --version '=0.1.0'
 orield --help
 ```
 
-For a source checkout before publication:
+公開前やソースから導入する場合は、リポジトリのルートで実行します。
 
 ```sh
 cargo install --path crates/orield --locked
 orield --help
 ```
 
-The initial release targets Linux x86_64 with stable Rust. The package validation
-workflow checks Ubuntu x86_64. The daemon contains Unix-specific code; other
-OS/CPU combinations and a minimum Rust version are not covered by release checks.
-Release acceptance checks installation and `--help`; it does not validate normal
-startup, pairing, integrations, or workflow execution.
+## 使い方
 
-## Release preparation
+作業するリポジトリで`orield`を起動します。初回はブラウザーでパスキーのアカウントに端末を接続し、端末側でも接続先を確認します。接続済みの端末は、次回から自動で再接続します。
 
-The initial manifest inherits version `0.1.0` and MIT licensing from the workspace.
-The release owner is `mikan-919`. Publication is restricted to crates.io. The
-release script checks the crate's name/ownership and the exact version before
-uploading, and verifies installation from crates.io afterward.
+| コマンド | 動作 |
+| --- | --- |
+| `orield` | Codexを起動し、ブラウザーに端末を接続する |
+| `orield codex` | Codex app-serverを起動し、ブラウザーの会話画面に接続する |
+| `orield integrations` | GitHub・Linearの接続状況を表示する |
+| `orield workflow` | Issueの変更を監視して、計画・承認済み作業を進める。Ctrl-Cで終了する |
+| `orield workflow --once` | 監視を続けず、作業の確認と処理を1回行う |
+| `orield --help` | コマンドと設定を表示する |
 
-Versions are updated manually in the root `Cargo.toml` under
-`[workspace.package]`; that changes the inherited version of all workspace
-packages. Only `orield` is intended for publication. The dedicated workflow runs
-formatting, Clippy, tests, packaging, a publishing dry run, and installation from
-the unpacked package on relevant pull requests and main pushes. The existing
-Web/relay deployment workflow is independent.
+同じ端末の`orield codex`と`orield workflow`は同時に起動できません。
 
-## Enable automatic publication (release owner)
+## 自動実装の条件
 
-Sign in to crates.io with the `mikan-919` GitHub account and verify the account's
-email address. Create a token that can publish the new `orield` crate and future
-versions. Keep the token out of source, command arguments and chat messages.
+Web画面でGitHub・Linearの連携を設定し、対象リポジトリのコミットに`.oriel.yaml`を含めてください。設定形式は[Orielリポジトリの例](https://github.com/mikan-919/oriel/blob/main/.oriel.yaml)を参照できます。検証コマンドは対象プロジェクトに合わせて指定します。
 
-Create the GitHub environment `crates-io` and restrict its deployment branches to
-`main`. Configure its secret
-`ORIELD_CRATES_IO_TOKEN` with a crates.io token scoped to publishing `orield`, and
-its variable `ORIELD_CRATES_IO_OWNER` with the exact crates.io owner login (user
-or team). Supply these settings through the hosting UI; never put the token in
-repository files or logs. This implementation uses a scoped token; rotate it
-according to the owner's policy. For automatic publication, permit `main` in the
-environment without a required reviewer. Finally set the repository variable
-`ORIELD_RELEASE_ENABLED` to `true`. Leaving it unset keeps validation active
-while publication is disabled.
+計画（HOW）の作成は読み取り専用です。実装には、人によるLinear Todoでの承認と、`.oriel.yaml`での自律実行の許可が必要です。
 
-After merging the workflow into `main`, perform the first publication with:
+承認後の実装は、Codexの`auto_review`で実行要求を自動審査します。実行権限の境界は維持され、審査で拒否された操作や人の判断が必要な質問では停止する場合があります。計画作成と手動の会話は、利用者による承認を使います。
 
-```sh
-gh workflow run orield.yml --ref main -f publish=true
-gh run list --workflow orield.yml --branch main --limit 1
-gh run watch <run-id> --exit-status
-```
+## 設定と保存先
 
-The manual publication runs the same validation as automatic publication. Leave
-the `publish` input false for validation only. Pull requests and non-main branches
-cannot publish. Check the `Publish missing version and verify registry installation`
-step and the job summary before treating a release as published.
+| 設定 | 既定値・用途 |
+| --- | --- |
+| `ORIEL_RELAY_URL` | 接続先。既定値は`https://oriel-relay.mikan-919.workers.dev`。パスや認証情報を含まない接続先を指定する |
+| `ORIEL_IDENTITY_FILE` | 端末の認証ファイルの保存先を上書きする |
+| `XDG_CONFIG_HOME` | 認証ファイルを`oriel/device.json`に保存する。未設定時は`~/.config/oriel/device.json` |
+| `XDG_STATE_HOME` | 作業用チェックアウトと実行記録を`oriel/workflow`に保存する。未設定時は`~/.local/state/oriel/workflow` |
 
-Every relevant main push then publishes after validation, serialized across
-release jobs. The script checks existing crate ownership and the exact version
-immediately before publishing. An ownership conflict, lookup failure, or yanked
-version fails the job; an existing version skips publication successfully. A
-404 does not reserve the name: a competing first publication can still make
-`cargo publish` fail, requiring owner review. Only `orield` is published.
+認証ファイルには端末の秘密情報が含まれます。共有や公開をしないでください。中断時の作業は保存先に残ります。
 
-Both new and skipped versions undergo registry installation in an empty install
-root with an exact version requirement and `--help` verification. This prevents
-verification from installing a newer release instead of the version just checked.
-Installation is retried at most ten times, with
-30 seconds between attempts. Job summaries distinguish publication, publication
-failure, skip, and registry verification failure. Initial lookup errors also fail
-the job with their diagnostic. After the first enabled main push, check these
-results and rerun the publish job at the same version to confirm the skip path.
-A failed verification after successful publication cannot undo the release;
-rerun verification and investigate before changing the version.
+## 開発・公開
 
-For the next release, update `[workspace.package].version` in the root
-`Cargo.toml` and the corresponding workspace entries in `Cargo.lock`, then merge
-to `main`. A version bump is required for new code: a push with the same version
-verifies the existing release without overwriting it. Re-run a failed publication
-with the manual trigger above; already published versions are verified again.
+[Orielの開発手順](https://github.com/mikan-919/oriel#開発する)と[crates.ioへの公開手順](https://github.com/mikan-919/oriel/blob/main/docs/orield-release.md)を参照してください。ライセンスは[MIT](https://github.com/mikan-919/oriel/blob/main/crates/orield/LICENSE)です。
