@@ -20,6 +20,7 @@ fn overview_card(
 }
 
 pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
+    let workflow = crate::workflow::page(__cx).single().await?;
     let target_card = overview_card(
         __cx,
         "選択対象",
@@ -57,16 +58,16 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
             </head>
 
             <body>
-                <main id="dashboard">
-                    <nav aria-label="メインナビゲーション">
-                        <strong>"Oriel"</strong>
+                <main id="dashboard" class="shell">
+                    <nav class="sidebar" aria-label="メインナビゲーション">
+                        <strong class="brand"><span class="brand-mark" aria-hidden="true">"o"</span>"Oriel"</strong>
                         <button type="button" data-page="overview" aria-current="page">"概要"</button>
                         <button type="button" data-page="workflow">"ワークフロー"</button>
                         <button type="button" data-page="codex">"Codex"</button>
                         <button type="button" data-page="devices">"端末"</button>
                         <button type="button" data-page="settings">"設定"</button>
                     </nav>
-                    <div class="dashboard-content">
+                    <div class="dashboard-content content">
                     <h1 id="page-title" tabindex="-1">"概要"</h1>
                     <p id="account">"ログイン状態を確認中…"</p>
                     <div id="anonymous-actions">
@@ -136,27 +137,7 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                         <p id="workflow-progress-status" role="status" aria-live="polite" aria-atomic="true">"ログインすると実行状況を確認できます。"</p>
                         <ul id="devices"></ul>
                     </section>
-                    <section id="repository-work" hidden="" data-region="workflow">
-                        <h2>"開発ワークフロー"</h2>
-                        <details><summary>"ワークフローの進め方"</summary>
-                            <p>"GitHub IssueがWHAT、LinearがHOW、PRがDOです。端末のチェックアウトで orield workflow を実行してください。runnerの接続と端末の接続は別です。"</p>
-                            <p>"LinearでHOWを確認し、Todoへの移動で実装を承認します。GitHubでPRをレビューし、マージしてください。この画面には承認・マージ操作はありません。コード実行には .oriel.yaml の明示的な設定と検証コマンドが必要です。"</p>
-                        </details>
-                        <p id="repository-details"></p>
-                        <button id="refresh-repository" type="button">"ワークフローを更新"</button>
-                        <p id="repository-status" role="status"></p>
-                        <form id="what-form">
-                            <fieldset id="what-fields" disabled="">
-                                <legend>"GitHub WHATを作成"</legend>
-                                <label for="what-title">"WHATのタイトル"</label>
-                                <input id="what-title" type="text" required="" />
-                                <label for="what-body">"WHATの本文"</label>
-                                <textarea id="what-body" rows="6"></textarea>
-                                <button type="submit">"GitHub Issueを作成"</button>
-                            </fieldset>
-                        </form>
-                        <ul id="repository-issues" aria-label="Issue・Linear・PRのワークフロー"></ul>
-                    </section>
+                    (workflow)
                     <section data-region="codex" aria-labelledby="codex-heading">
                         <h2 id="codex-heading">"Codexを操作"</h2>
                         <p>"端末で orield codex または orield workflow を実行してください。相談とレビューは読み取り専用です。ワークフローの実装にはHOWの承認が必要です。"</p>

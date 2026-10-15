@@ -1,6 +1,6 @@
 import type { Device, Integrations } from "./integrations";
 import { digest } from "./workflow";
-import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask } from "./workflow";
+import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask, WorkflowSnapshot } from "./workflow";
 
 const SOCKET_TAG = "workflow";
 const WATCH_TAG = "workflow-progress";
@@ -10,8 +10,10 @@ const EXPIRY_MS = 45_000;
 const STAGES = ["idle", "discovering", "preparing", "planning", "discussing", "implementing", "reviewing", "verifying",
   "integrating", "pushing", "publishing", "reconciling", "paused"] as const;
 type Stage = typeof STAGES[number];
+type Verification = { issue_number: number; head_oid: string; target_oid: string; status: "running" | "success" | "failure"; completed: number; total: number; updated_at: string };
 type ProgressTask = WorkflowTask & { repository: string };
 type ProgressDevice = {
+  verification?: Verification;
   device_id: string;
   state: "offline" | "idle" | "running" | "paused";
   stage: Stage | null;
@@ -25,8 +27,10 @@ type WatchAttachment = {
   expires_at: number;
   last_snapshot?: string;
   changes?: boolean;
+  state?: boolean;
 };
 type Attachment = {
+  verification?: Verification;
   protocol: typeof PROTOCOL;
   binding: WorkflowBinding;
   expires_at: number;
@@ -53,6 +57,7 @@ function sameBinding(left: WorkflowBinding, right: WorkflowBinding): boolean {
 
 /** Ownership lives only in hibernating WebSocket attachments, never in SQL. */
 export class WorkflowLeases {
+  private lastFacts = new Map<string, string>();
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly integrations: Integrations,
@@ -106,7 +111,7 @@ export class WorkflowLeases {
         state: control.stage === "paused" ? "paused" : control.stage === "idle" ? "idle" : "running",
         stage: control.stage, task: control.grant
           ? { repository: `${control.binding.repository.owner}/${control.binding.repository.name}`, ...control.grant.task }
-          : control.task, updated_at: control.updated_at };
+          : control.task, updated_at: control.updated_at, ...(control.verification ? {verification:control.verification} : {}) };
     });
     return JSON.stringify({ type: "workflow-progress", devices, poll_after_seconds:this.eventDriven() ? 900 : 60 });
   }
@@ -121,8 +126,12 @@ export class WorkflowLeases {
       // Recheck ownership and metadata across hashing; only send current data.
       if (payload !== this.snapshot(watcher.user_id)) continue;
       if (watcher.last_snapshot === hash) return;
-      ws.serializeAttachment({ ...watcher, last_snapshot: hash });
-      ws.send(payload);
+      // The browser can disconnect while the snapshot is being hashed. Its
+      // transport failure must not reach publish's authority-failure handler.
+      try {
+        ws.serializeAttachment({ ...watcher, last_snapshot: hash });
+        ws.send(payload);
+      } catch { this.stop(ws); }
       return;
     }
   }
@@ -131,6 +140,25 @@ export class WorkflowLeases {
     for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
       // Persist only a hash, so unchanged progress stays silent after hibernation.
       this.ctx.waitUntil(this.notify(ws).catch(() => this.stopAll()));
+    }
+  }
+
+  publishFacts(device: Device, snapshot: WorkflowSnapshot, hash: string, issueNumber?: number): void {
+    const payload = JSON.stringify({ type: "workflow-snapshot", device_id: device.device_id, issue_number: issueNumber, snapshot });
+    const key = `${device.device_id}:${issueNumber ?? "all"}`;
+    if (this.lastFacts.get(key) === hash) return;
+    if (this.lastFacts.size >= 64) this.lastFacts.clear();
+    this.lastFacts.set(key, hash);
+    for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+      try { const watcher = this.liveWatch(ws); if (watcher.state && watcher.user_id === device.user_id) ws.send(payload); }
+      catch { /* Revoked sessions cannot receive provider facts. */ }
+    }
+  }
+
+  deviceChanged(userId: string): void {
+    for (const ws of this.ctx.getWebSockets(WATCH_TAG)) {
+      try { const watcher = this.liveWatch(ws); if (watcher.state && watcher.user_id === userId) this.send(ws, { type: "device-changed" }); }
+      catch { /* Revoked. */ }
     }
   }
 
@@ -209,7 +237,7 @@ export class WorkflowLeases {
     catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
     this.publish();
     this.schedule();
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Snapshot-Transport": "http", "X-Oriel-Verification": "1" } });
   }
 
   verify(device: Device, leaseId: string): WorkflowGrant {
@@ -226,14 +254,32 @@ export class WorkflowLeases {
     throw new WorkflowLeaseError();
   }
 
+  readScope(device: Device, leaseId: unknown, renew = false): { issue_number?: number; check: () => void } {
+    const ws = this.ctx.getWebSockets(SOCKET_TAG).find(socket => this.attachment(socket)?.binding.device_id === device.device_id);
+    if (!ws) throw new WorkflowLeaseError();
+    const check = () => {
+      const current = this.live(ws);
+      if (current.grant?.lease_id !== leaseId) throw new WorkflowLeaseError();
+      if (current.binding.user_id !== device.user_id || current.binding.host_hash !== device.host_hash ||
+          current.binding.repository_generation !== device.repository_generation) throw new WorkflowLeaseError();
+    };
+    check();
+    const current = this.live(ws);
+    if (renew) {
+      ws.serializeAttachment({ ...current, expires_at: Date.now() + EXPIRY_MS, changes: true, dirty: false });
+      this.schedule();
+    }
+    return { issue_number: current.grant?.issue_number, check };
+  }
+
   private send(ws: WebSocket, response: Record<string, unknown>): void {
     try { ws.send(JSON.stringify(response)); } catch { this.stop(ws); }
   }
 
   async message(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (this.ctx.getTags(ws).includes(WATCH_TAG)) {
-      if (message === "ready" || message === "ready:changes") {
-        if (message === "ready:changes") ws.serializeAttachment({...this.liveWatch(ws), changes:true});
+      if (message === "ready" || message === "ready:changes" || message === "ready:state") {
+        ws.serializeAttachment({...this.liveWatch(ws), changes:message !== "ready", state:message === "ready:state"});
         this.publish();
         this.schedule();
         return;
@@ -271,8 +317,10 @@ export class WorkflowLeases {
           // A lease guards one WHAT. Keep all link/PR ambiguity checks, but do
           // not reread every unrelated issue and its discussion while it runs.
           const snapshot = await this.integrations.workflowSnapshot(device, check, attachment.grant?.issue_number);
+          const hash = await digest(snapshot);
           check();
           this.send(ws, { type: "snapshot", request_id: requestId, snapshot, poll_after_seconds:this.eventDriven() ? 900 : 60 });
+          this.publishFacts(device, snapshot, hash, attachment.grant?.issue_number);
         } catch (error) {
           const known = error instanceof Error && "status" in error;
           this.send(ws, { type: "error", request_id: requestId,
@@ -289,13 +337,25 @@ export class WorkflowLeases {
         return;
       }
       if (request.type === "progress") {
-        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id"].includes(key)) ||
+        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id", "verification"].includes(key)) ||
             !STAGES.includes(request.stage as Stage)) throw new Error();
         if (attachment.grant) {
           if (request.lease_id !== attachment.grant.lease_id) throw new WorkflowLeaseError();
         } else if (!["idle", "discovering", "paused"].includes(request.stage as string) ||
                    request.lease_id !== undefined) throw new WorkflowLeaseError();
-        if (attachment.stage === request.stage) {
+        if (request.verification !== undefined) {
+          const value = request.verification as Record<string, unknown>;
+          if (!value || typeof value !== "object" || Array.isArray(value) || !attachment.grant || request.stage !== "verifying" ||
+              Object.keys(value).some(key => !["head_oid","target_oid","status","completed","total"].includes(key)) ||
+              typeof value.head_oid !== "string" || !/^[a-f0-9]{40}$/.test(value.head_oid) ||
+              typeof value.target_oid !== "string" || !/^[a-f0-9]{40}$/.test(value.target_oid) ||
+              !["running","success","failure"].includes(value.status as string) ||
+              !Number.isSafeInteger(value.total) || (value.total as number) < 1 || (value.total as number) > 1024 ||
+              !Number.isSafeInteger(value.completed) || (value.completed as number) < 0 || (value.completed as number) > (value.total as number) ||
+              value.status === "success" && value.completed !== value.total) throw new Error();
+          attachment.verification = { ...value, issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
+        }
+        if (attachment.stage === request.stage && request.verification === undefined) {
           this.send(ws, { type: "progressed", request_id: requestId });
           return;
         }
@@ -357,6 +417,7 @@ export class WorkflowLeases {
       }
       const leaseId = crypto.randomUUID();
       attachment.grant = { ...admitted, lease_id: leaseId };
+      attachment.verification = undefined;
       attachment.stage = "preparing";
       attachment.task = null;
       attachment.updated_at = new Date().toISOString();

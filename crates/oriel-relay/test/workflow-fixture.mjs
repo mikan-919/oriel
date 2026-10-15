@@ -160,6 +160,16 @@ export function workflowFixture() {
     if (url.origin === "https://api.github.com" && url.pathname === "/graphql") {
       assert.equal(request.headers.get("Authorization"), "Bearer limited-installation-token");
       const body = await request.json();
+      if (body.query?.startsWith("query OrielIssueComments")) {
+        const failure = await record("github", "pr-comments", request, body); if (failure) return failure;
+        const repository = {};
+        for (const [key, number] of Object.entries(body.variables).filter(([key]) => key.startsWith("number"))) {
+          const index = key.slice(6), issue = fixture.issues.find(issue => issue.number === number);
+          const comments = page(fixture.comments.get(number) ?? [], body.variables[`after${index}`], fixture.commentPageSize ?? 100);
+          repository[`i${index}`] = issue ? { id: issue.node_id, number, comments: { ...comments, nodes: comments.nodes.map(comment => ({fullDatabaseId:comment.id,body:comment.body,createdAt:comment.created_at,author:comment.user ? {__typename:comment.user.type,login:comment.user.login} : null})) } } : null;
+        }
+        return Response.json(fixture.commentGraphqlErrors ? {data:{repository},errors:fixture.commentGraphqlErrors} : {data:{repository}});
+      }
       const failure = await record("github", "seal", request, body); if (failure) return failure;
       if (!fixture.sealSupported) return Response.json({ errors: [{ message: "unsupported" }] });
       assert.equal(body.variables.input.repositoryId, fixture.repository_node_id);

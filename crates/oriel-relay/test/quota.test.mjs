@@ -39,7 +39,7 @@ test("Quota inside the account handler closes control without more storage reads
 });
 
 test("Local workflow authority stays fresh with bounded SQL reads", async () => {
-  const c = vm.createContext({TextEncoder, TextDecoder, URL, crypto});
+  const c = vm.createContext({TextEncoder, TextDecoder, URL, crypto, WorkflowReader:class {}});
   const source = stripTypeScriptTypes(readFileSync(new URL("../src/integrations.ts", import.meta.url), "utf8"), {mode:"transform"});
   vm.runInContext(source.replace(/^import[\s\S]*?;/gm, "").replace(/^export /gm, "") + "\nglobalThis.Integrations = Integrations;", c);
   const integrations = Object.create(c.Integrations.prototype);

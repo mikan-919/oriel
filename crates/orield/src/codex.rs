@@ -29,6 +29,10 @@ use tokio_tungstenite::{
 use url::Url;
 
 const MAX_MESSAGE: usize = 512 * 1024;
+// Local completion notifications repeat the entire command output. The Relay's
+// frame limit must not terminate the app-server when that output is large.
+const MAX_APP_SERVER_MESSAGE: usize = 16 * 1024 * 1024;
+const COMMAND_OUTPUT_TAIL: usize = 64 * 1024;
 const KEEPALIVE_PING: &str = "oriel:ping";
 const KEEPALIVE_PONG: &str = "oriel:pong";
 static HUB: OnceLock<Hub> = OnceLock::new();
@@ -309,6 +313,27 @@ fn rpc_error(message: &Value) -> anyhow::Error {
     }
 }
 
+fn trim_command_output(value: &mut Value) {
+    if value["type"] == "commandExecution"
+        && let Some(output) = value["aggregatedOutput"].as_str()
+        && output.len() > COMMAND_OUTPUT_TAIL
+    {
+        let mut start = output.len() - COMMAND_OUTPUT_TAIL;
+        while !output.is_char_boundary(start) {
+            start += 1;
+        }
+        value["aggregatedOutput"] = json!(format!(
+            "[Oriel: earlier command output omitted; full output in private transcript]\n{}",
+            &output[start..]
+        ));
+    }
+    match value {
+        Value::Object(fields) => fields.values_mut().for_each(trim_command_output),
+        Value::Array(items) => items.iter_mut().for_each(trim_command_output),
+        _ => {}
+    }
+}
+
 pub(super) struct Engine {
     pub client: Client,
     cancel: watch::Sender<bool>,
@@ -433,9 +458,12 @@ impl Engine {
                         _ = cancelled.changed() => break,
                         next = lines.next_line() => {
                             let line = next?.context("Codex process ended")?;
-                            ensure!(line.len() <= MAX_MESSAGE, "Codex output exceeds size limit");
+                            ensure!(line.len() <= MAX_APP_SERVER_MESSAGE, "Codex output exceeds local size limit");
                             writeln!(log, "{line}")?;
-                            let message: Value = serde_json::from_str(&line)?;
+                            let mut message: Value = serde_json::from_str(&line)?;
+                            // Preserve raw output above, including in thread/read replies;
+                            // subscribers only need a bounded display tail.
+                            trim_command_output(&mut message);
                             if let Some(id) = message["id"].as_u64() && message["method"].is_null() {
                                 if let Some((method, reply)) = calls.remove(&id) {
                                     if let Some(thread) = message["result"]["thread"]["id"].as_str() && !threads.iter().any(|id| id == thread) {
@@ -510,7 +538,12 @@ impl Engine {
             let _ = child.wait().await;
             process_hub.engines.lock().unwrap().remove(&engine_id);
             process_hub.changed();
-            if process.is_err() {
+            if let Err(error) = process {
+                let _ = writeln!(
+                    log,
+                    "{}",
+                    json!({"method":"oriel/engineEnded","params":{"error":format!("{error:#}")}})
+                );
                 let _ = events.send(json!({"method":"oriel/engineEnded","params":{"error":"Codex process ended; local work preserved"}}));
             }
             for (_, (_, reply)) in calls {
@@ -633,6 +666,21 @@ impl Drop for Control {
     }
 }
 
+fn batchable_output(event: &Value) -> bool {
+    event["type"] == "event"
+        && event["message"].get("id").is_none()
+        && matches!(
+            event["message"]["method"].as_str(),
+            Some(
+                "item/agentMessage/delta"
+                    | "item/commandExecution/outputDelta"
+                    | "item/fileChange/outputDelta"
+                    | "item/reasoning/textDelta"
+                    | "item/reasoning/summaryTextDelta"
+            )
+        )
+}
+
 pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -> Result<Control> {
     let hub = Hub::new();
     ensure!(
@@ -735,7 +783,12 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 let mut request = url.as_str().into_client_request()?;
                 let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", identity.host_token))?;
                 token.set_sensitive(true); request.headers_mut().insert("Authorization", token);
-                let (mut socket, _) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+                let (mut socket, response) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+                let batching = response.headers().get("x-oriel-output-batch").is_some_and(|value| value == "200");
+                let mut pending = Vec::<Value>::new();
+                let mut pending_bytes = 0;
+                let mut flush = tokio::time::interval(Duration::from_millis(200));
+                flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 opened = Some(tokio::time::Instant::now());
                 socket.send(Message::Text(hub.state().to_string().into())).await?;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
@@ -743,11 +796,32 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 loop {
                     tokio::select! {
                         _ = stopping.changed() => return Ok(()),
+                        _ = flush.tick(), if !pending.is_empty() => {
+                            socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                            pending_bytes = 0;
+                        },
                         _ = heartbeat.tick() => { socket.send(Message::Text(KEEPALIVE_PING.into())).await?; },
                         _ = tokio::time::sleep_until(deadline) => bail!("Codex Relay keepalive timed out"),
                         event = events.recv() => { match event {
-                            Ok(event) => socket.send(Message::Text(event.to_string().into())).await?,
-                            Err(broadcast::error::RecvError::Lagged(_)) => socket.send(Message::Text(hub.state().to_string().into())).await?,
+                            Ok(event) => {
+                                let output = batching && batchable_output(&event);
+                                let size = event.to_string().len();
+                                if !pending.is_empty() && (!output || pending.len() >= 128 || pending_bytes + size > 256 * 1024) {
+                                    socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                                    pending_bytes = 0;
+                                }
+                                if output && size <= 256 * 1024 {
+                                    pending_bytes += size;
+                                    pending.push(event);
+                                } else { socket.send(Message::Text(event.to_string().into())).await?; }
+                            },
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                if !pending.is_empty() {
+                                    socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                                    pending_bytes = 0;
+                                }
+                                socket.send(Message::Text(hub.state().to_string().into())).await?;
+                            },
                             Err(_) => break,
                         } },
                         frame = socket.next() => {
@@ -810,6 +884,57 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_output_tails_fit_relay_frames_in_events_and_thread_replies() {
+        // Control bytes expand to six bytes each in JSON; multibyte characters
+        // must also survive truncation at a byte boundary.
+        for output in ["\0".repeat(700 * 1024), "あ".repeat(300 * 1024)] {
+            let item = json!({"id":"command","type":"commandExecution","status":"completed","aggregatedOutput":output});
+            for mut message in [
+                json!({"type":"event","engine":"engine","message":{"method":"item/completed","params":{"item":item}}}),
+                json!({"type":"response","result":{"thread":{"turns":[{"items":[item]}]}}}),
+            ] {
+                trim_command_output(&mut message);
+                assert!(message.to_string().len() < MAX_MESSAGE);
+                let tail = message
+                    .pointer("/message/params/item/aggregatedOutput")
+                    .or_else(|| message.pointer("/result/thread/turns/0/items/0/aggregatedOutput"))
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
+                let (_, tail) = tail.split_once('\n').unwrap();
+                assert!(tail.len() <= COMMAND_OUTPUT_TAIL);
+                assert!(output.ends_with(tail));
+            }
+        }
+    }
+
+    #[test]
+    fn batching_accepts_output_only_and_keeps_approval_and_control_immediate() {
+        for method in [
+            "item/agentMessage/delta",
+            "item/commandExecution/outputDelta",
+            "item/fileChange/outputDelta",
+            "item/reasoning/textDelta",
+            "item/reasoning/summaryTextDelta",
+        ] {
+            assert!(batchable_output(
+                &json!({"type":"event", "engine":"engine", "message":{"method":method,"params":{"delta":"output"}}})
+            ));
+            assert!(!batchable_output(
+                &json!({"type":"event", "message":{"method":method,"id":"approval"}})
+            ));
+        }
+        for event in [
+            json!({"type":"response"}),
+            json!({"type":"state"}),
+            json!({"type":"event","message":{"method":"item/commandExecution/requestApproval","id":1}}),
+            json!({"type":"event","message":{"method":"turn/completed"}}),
+        ] {
+            assert!(!batchable_output(&event));
+        }
+    }
 
     #[test]
     fn capacity_before_turn_start_keeps_native_approval() {
@@ -941,6 +1066,7 @@ mod tests {
               if(!initialized)process.exit(2);
               if(m.method==='model/list'){send({id:m.id,result:{initialized}});return;}
               if(m.method==='thread/start'){
+                if(m.params.developerInstructions==='invalid'){process.stdout.write('{invalid}\n');return;}
                 if(m.params.developerInstructions && m.params.sandbox!==null)process.exit(3);
                 if(m.params.developerInstructions)for(let i=0;i<600;i++)send({method:'item/commandExecution/outputDelta',params:{delta:'compiling\n'}});
                 if(m.params.developerInstructions==='overflow')for(let i=0;i<600;i++)send({method:'configWarning',params:{message:'notice'}});
@@ -949,6 +1075,7 @@ mod tests {
               }
               if(m.method==='turn/start'){
                 send({id:m.id,result:{turn:{id:'turn'}}});
+                send({method:'item/completed',params:{threadId:'owned',item:{id:'large-output',type:'commandExecution',status:'completed',aggregatedOutput:'x'.repeat(700*1024)}}});
                 send({method:'item/completed',params:{threadId:'owned',item:{type:'agentMessage',text:'{"summary":"done"}'}}});
                 send({method:'turn/completed',params:{threadId:'owned',turn:{id:'turn',status:'completed'}}});return;
               }
@@ -1008,6 +1135,25 @@ mod tests {
                 .unwrap(),
             "{\"summary\":\"done\"}"
         );
+        let output = loop {
+            let event = events.try_recv().unwrap();
+            if event["params"]["item"]["id"] == "large-output" {
+                break event;
+            }
+        };
+        assert_eq!(output["params"]["item"]["status"], "completed");
+        assert!(output.to_string().len() < MAX_MESSAGE);
+        assert!(
+            fs::read_to_string(&transcript)
+                .unwrap()
+                .lines()
+                .any(|line| {
+                    let event: Value = serde_json::from_str(line).unwrap();
+                    event["params"]["item"]["aggregatedOutput"]
+                        .as_str()
+                        .is_some_and(|output| output.len() == 700 * 1024)
+                })
+        );
         let overflow = engine
             .run("overflow", json!({"type":"object"}), false)
             .await
@@ -1016,7 +1162,21 @@ mod tests {
             overflow.downcast_ref::<workflow::Stop>(),
             Some(workflow::Stop::Uncertain)
         ));
+        assert!(
+            engine
+                .run("invalid", json!({"type":"object"}), false)
+                .await
+                .is_err()
+        );
         engine.stop().await;
+        let log = fs::read_to_string(&transcript).unwrap();
+        let failure: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(failure["method"], "oriel/engineEnded");
+        assert!(
+            failure["params"]["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
         assert!(engine.hub.engines.lock().unwrap().is_empty());
         assert!(
             engine

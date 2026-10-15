@@ -6,9 +6,9 @@
     "dev": "cf dev",
     "build": "cf build",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run build && node ../../scripts/deploy-worker.mjs --dry-run",
-    "deploy": "npm run build && node ../../scripts/deploy-worker.mjs",
-    "deploy:prebuilt": "node ../../scripts/deploy-worker.mjs"
+    "check": "npm run build && cf deploy --prebuilt --dry-run",
+    "deploy": "npm run build && cf deploy --prebuilt",
+    "deploy:prebuilt": "cf deploy --prebuilt"
   },
   "devDependencies": {
     "@cloudflare/build-output-utils": "0.8.2",

@@ -5,9 +5,9 @@
   "scripts": {
     "dev": "cargo run --release -p oriel-web && cf dev",
     "build": "cargo run --release -p oriel-web && cf build",
-    "check": "npm run build && node ../../scripts/deploy-worker.mjs --dry-run",
-    "deploy": "npm run build && node ../../scripts/deploy-worker.mjs",
-    "deploy:prebuilt": "node ../../scripts/deploy-worker.mjs",
+    "check": "npm run build && cf deploy --prebuilt --dry-run",
+    "deploy": "npm run build && cf deploy --prebuilt",
+    "deploy:prebuilt": "cf deploy --prebuilt",
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {

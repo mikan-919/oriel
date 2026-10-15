@@ -773,9 +773,17 @@ where
     let (mut sender, mut receiver) = socket.split();
 
     let mut output = terminal.output.subscribe();
+    let mut pending = Vec::new();
+    let mut flush = tokio::time::interval(std::time::Duration::from_millis(200));
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(10));
 
     loop {
         tokio::select! {
+            _ = keepalive.tick() => sender.send(Message::Text("oriel:ping".into())).await?,
+            _ = flush.tick(), if !pending.is_empty() => {
+                sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
+            },
             message = receiver.next() => {
                 match message {
                     Some(Ok(Message::Binary(data))) => {
@@ -850,9 +858,10 @@ where
             data = output.recv() => {
                 match data {
                     Ok(data) => {
-                        sender
-                            .send(Message::Binary(data.into()))
-                            .await?;
+                        pending.extend(data);
+                        if pending.len() >= 65_536 {
+                            sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
+                        }
                     }
 
                     Err(

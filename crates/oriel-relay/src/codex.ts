@@ -3,6 +3,7 @@ import type { Device } from "./integrations";
 const TAG = "codex";
 const PROTOCOL = "oriel/codex/v1";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const OUTPUT = new Set(["item/agentMessage/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta"]);
 const METHODS = new Set(["engines/list", "workflow/pause", "workflow/resume", "workflow/model", "model/list", "thread/list", "thread/read",
   "thread/start", "thread/resume", "thread/fork", "thread/archive", "thread/unarchive", "thread/name/set",
   "turn/start", "turn/steer", "turn/interrupt", "review/start", "skills/list", "mcpServerStatus/list",
@@ -56,7 +57,7 @@ export class CodexConnections {
       if (host) this.send(host, { type: "snapshot" });
     }
     this.schedule();
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Output-Batch": "200" } });
   }
   private send(ws: WebSocket, message: unknown): void { try { ws.send(JSON.stringify(message)); } catch { this.close(ws); } }
   message(ws: WebSocket, raw: string | ArrayBuffer): void {
@@ -71,6 +72,15 @@ export class CodexConnections {
           for (const peer of this.sockets()) {
             const p = this.live(peer);
             if (p.role === "browser" && p.device_id === a.device_id) this.send(peer, message);
+          }
+        } else if (message.type === "events" && Array.isArray(message.events) && message.events.length > 0 && message.events.length <= 128 &&
+            message.events.every((event: { type?: string; engine?: string; message?: { method?: string; id?: unknown } }) =>
+              event.type === "event" && typeof event.engine === "string" && event.message?.id === undefined && OUTPUT.has(event.message?.method ?? ""))) {
+          // Expand for existing browsers. Approvals, replies and control commands
+          // cannot enter this batch and retain their original ordering.
+          for (const peer of this.sockets()) {
+            const p = this.live(peer);
+            if (p.role === "browser" && p.device_id === a.device_id) for (const event of message.events) this.send(peer, event);
           }
         } else if (message.type === "event" && typeof message.engine === "string" && message.message?.method) {
           for (const peer of this.sockets()) {

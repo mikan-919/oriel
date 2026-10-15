@@ -71,18 +71,18 @@ test("Discovery overlaps independent reads and bounded HOW and issue batches wit
       how.identifier = `ENG-${number}`;
     }
     const gate = () => {let release;const ready = new Promise(resolve=>{release=resolve;});releases.push(release);return {ready,release};};
-    const reference = gate(), how = gate(), comment = gate();
+    const reference = gate(), how = gate();
     let howReads = 0, commentReads = 0;
     s.fixture.holdReads = async ({operation}) => {
       if(operation==="ref") await reference.ready;
       if(operation==="whats") reference.release();
       if(operation==="how") {if(++howReads===1) await how.ready;else how.release();}
-      if(operation==="pr-comments") {if(++commentReads===1) await comment.ready;else comment.release();}
+      if(operation==="pr-comments") commentReads++;
     };
     const snapshot = await Promise.race([s.snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("Independent discovery reads were serialized")),3000);})]);
     assert.deepEqual(snapshot.workflows.map(row=>row.issue.number), [42,43,44,45,46,47,48,49]);
     assert.equal(howReads,8); // Four HOWs and their four discussion collections.
-    assert.equal(commentReads,8);
+    assert.equal(commentReads,1,"All eight WHAT discussions fit in one bounded GraphQL batch");
     for(const row of snapshot.workflows.slice(0,4)) assert.equal(row.phase,"approved");
   } finally {
     clearTimeout(timer);s.fixture.holdReads=undefined;for(const release of releases)release();await s.close();
@@ -890,20 +890,27 @@ test("Leased discovery reads only the current WHAT while still checking approval
     const afterFull = await costs();
     const fullComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
     assert.equal(full.workflows.length, 48);
+    const beforeIdle = await costs();
+    const idle = await s.message({ type: "snapshot", changes: true });
+    const afterIdle = await costs();
+    assert.equal(idle.snapshot.workflows.length, 48);
     const lease_id = await s.claim("implement");
     s.fixture.calls.length = 0;
     const beforeScoped = await costs();
     const current = await s.message({type:"snapshot", lease_id});
     const afterScoped = await costs();
     const fullReads = afterFull.reads - beforeFull.reads, scopedReads = afterScoped.reads - beforeScoped.reads;
-    assert.ok(scopedReads < fullReads / 2, JSON.stringify({fullReads, scopedReads}));
-    console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, scopedReads}));
+    assert.equal(fullReads, 0);
+    assert.equal(scopedReads, 0);
+    const idleReads = afterIdle.reads - beforeIdle.reads;
+    assert.equal(idleReads, 0);
+    console.log("SQLite rowsRead for 48 WHATs:", JSON.stringify({fullReads, idleReads, scopedReads}));
     assert.equal(current.type, "snapshot", JSON.stringify(current));
     assert.deepEqual(current.snapshot.workflows.map(row => row.issue.number), [42]);
     assert.equal(current.snapshot.workflows[0].phase, "approved");
     const scopedComments = s.fixture.calls.filter(call => call.operation === "pr-comments").length;
     assert.equal(scopedComments, 1);
-    assert.equal(fullComments, 48);
+    assert.equal(fullComments, 3,"Full comments are read in batches of twenty, without omitting issues");
     assert.equal(s.fixture.calls.some(call => call.operation === "whats"), false);
     s.fixture.linears[0].state = {...s.fixture.states.find(state => state.name === "Triage")};
     assert.equal((await s.message({type:"snapshot", lease_id})).snapshot.workflows[0].phase, "triage");

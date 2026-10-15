@@ -2,10 +2,11 @@
 // Run cargo run -p oriel-web, then node crates/oriel-web/test/review.mjs.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 const root=new URL('../',import.meta.url);
-const html=readFileSync(new URL('build/index.html',root),'utf8');
+const html=readFileSync(new URL('build/public/index.html',root),'utf8');
 const css=readFileSync(new URL('src/assets/dashboard.css',root),'utf8');
 const codex=readFileSync(new URL('src/assets/codex.js',root),'utf8').replace('export function mountCodex', 'function mountCodex');
-const js=codex+'\n'+readFileSync(new URL('src/assets/dashboard.js',root),'utf8').replace(/^import .*codex.js.*;\n/m, '')
+const workflow=readFileSync(new URL('src/assets/workflow.js',root),'utf8').replace(/^export /gm,'');
+const js=workflow+'\n'+codex+'\n'+readFileSync(new URL('src/assets/dashboard.js',root),'utf8').replace(/^import .*;\n/gm, '')
   .replace('import("https://esm.sh/@xterm/xterm@6.0.0")', 'Promise.resolve({Terminal: window.Terminal})')
   .replace('import("https://esm.sh/@xterm/addon-fit@0.11.0")', 'Promise.resolve(window.FitAddon)');
 const xterm=readFileSync(new URL('node_modules/@xterm/xterm/lib/xterm.js',root),'utf8');
@@ -21,13 +22,20 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
   window.orielConnection = {};
   const long='responsive-verification-'.repeat(12);
   const fixtureDevice = {device_id:'fixture',name:'開発端末 '+long,terminal_status:'online',repository:{owner:'demo',name:long}};
-  window.fetch=async path=>{
+  const fixtureHead='a'.repeat(40);
+  const sampleRow=(number,title,phase,ci)=>({issue:{number,title,body:long.repeat(5),url:'https://github.com/mikan-919/oriel/issues/'+number,state:'open'},linear:{identifier:'MIKAN-'+number,title,description:long.repeat(5),url:'https://linear.app/example/issue/MIKAN-'+number,state:{name:phase==='triage'?'Triage':'In Progress'}},phase,canonical_oid:fixtureHead,what_comments:[],how_comments:[],pull_request:phase==='review'?{number:87,url:'https://github.com/mikan-919/oriel/pull/87',head_oid:fixtureHead}:null,ci:ci?{head_oid:fixtureHead,status:ci,checks:[{name:'validate',status:ci,url:'https://github.com/mikan-919/oriel/actions'}]}:undefined,feedback:ci==='failure'?{kind:'check_failure',key:'check:sample:'+fixtureHead,body:'Install unpacked package: archive not found',comments:[]}:null});
+  const fixtureRows=fixtureState==='normal'?[sampleRow(86,long,'review','failure'),sampleRow(92,'端末の接続状態と実行状況を分けて表示する','triage'),sampleRow(84,'セッション失効後に再ログインへ案内する','review','success')]:[];
+  window.fixtureRequests=[];
+  window.fetch=async (path,options={})=>{
+    window.fixtureRequests.push({path,method:options.method||'GET'});
+    if(path.endsWith('/issues')&&options.method==='POST'){const body=JSON.parse(options.body);const row=sampleRow(99,body.title,'waiting-how');row.issue.body=body.body;row.linear=null;fixtureRows.push(row);return {ok:true,json:async()=>({issue:row.issue})};}
+
     if(fixtureState==='loading')return new Promise(()=>{});
     if(fixtureState==='failed' && path!=='/api/session')throw Error('fixture: 状態を取得できません');
     const data=path==='/api/session' ? {user:fixtureState==='signed-out'?null:{id:'fixture-user',display_name:'レビュー用アカウント'}}
       : path==='/api/devices' ? {devices:fixtureState==='empty'||fixtureState==='pairing'?[]:[fixtureDevice]}
       : path==='/api/pair/inspect' ? {device_id:'fixture',name:'開発端末',expires_at:Math.floor(Date.now()/1000)+60}
-      : path.startsWith('/api/workflows/') ? {repository:fixtureDevice.repository,team:{team_name:'開発チーム'},workflows:[{phase:'running',issue:{number:127,title:long,url:'https://github.com/demo/oriel/issues/127',body:long.repeat(5)},linear:{identifier:'HOW-127',url:'https://linear.app/demo/issue/HOW-127',title:long,description:long.repeat(5),state:{name:'Todo',type:'unstarted'}}}],configuration:{autonomous:false,verification:[]}}
+      : path.startsWith('/api/workflows/') ? {repository:fixtureDevice.repository,team:{team_name:'開発チーム'},repository_id:501,target_oid:fixtureHead,workflows:fixtureRows,configuration:{autonomous:true,verification:[['cargo','test','--workspace'],['cargo','clippy','--workspace']],error:null}}
       : {github:null,linear:null,choices:{github:[{owner:'demo',name:long,installation_id:1,repository_id:1}],linear:[{team_name:long,team_id:'fixture',workspace_id:'fixture'}]}};
     return {ok:true,json:async()=>data};
   };

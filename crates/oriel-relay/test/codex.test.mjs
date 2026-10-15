@@ -76,6 +76,22 @@ async function closed(connection) {
   finally { clearTimeout(timer); }
 }
 
+test("Batched output preserves browser order and excludes approval requests", async () => {
+  const worker = await runtime();
+  try {
+    const { owner } = await pair(worker);
+    const host = await socket(worker, "host", hostHeaders);
+    const browser = await socket(worker, "browser", { Cookie: cookies(owner), Origin: origin });
+    const events = ["first", "second"].map(delta => ({ type: "event", engine: "engine", message: { method: "item/agentMessage/delta", params: { delta } } }));
+    host.ws.send(JSON.stringify({ type: "events", events }));
+    for (const delta of ["first", "second"]) assert.equal((await browser.read(message => message.type === "event")).message.params.delta, delta);
+    host.ws.send(JSON.stringify({ type: "events", events: [{ type: "event", engine: "engine", message: { id: 1, method: "item/commandExecution/requestApproval" } }] }));
+    assert.equal((await host.read(message => message.type === "rejected")).type, "rejected");
+    host.ws.send(JSON.stringify({ type: "event", engine: "engine", message: { id: 1, method: "item/commandExecution/requestApproval" } }));
+    assert.equal((await browser.read(message => message.type === "event")).message.id, 1);
+  } finally { await worker.dispose(); }
+});
+
 test("Codex runtime keepalive survives hibernation without renewing browser authentication", {timeout: 60000}, async () => {
   const worker = await runtime();
   let heartbeat;

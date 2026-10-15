@@ -1,4 +1,5 @@
-use worker::*;
+use std::{cell::RefCell, rc::Rc};
+use worker::{wasm_bindgen::JsCast, *};
 
 const HOST_TAG: &str = "host";
 const CLIENT_TAG: &str = "client";
@@ -36,7 +37,7 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
 }
 
 const CONTROL: &str = "oriel-heartbeat:";
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Presence {
     generation: u64,
     #[serde(default)]
@@ -47,6 +48,8 @@ struct Presence {
     offline: bool,
     #[serde(default)]
     disconnected: bool,
+    #[serde(default)]
+    automatic: bool,
 }
 impl Presence {
     fn status(&self, now: u64) -> &'static str {
@@ -67,18 +70,102 @@ impl Presence {
 #[durable_object]
 pub struct RelayDevice {
     state: State,
+    env: Env,
+    cached: Rc<RefCell<Presence>>,
 }
 impl RelayDevice {
-    async fn presence(&self) -> Result<Presence> {
-        Ok(self
-            .state
+    fn notify(&self) {
+        let Some(device_id) = self.state.id().name() else {
+            return;
+        };
+        let env = self.env.clone();
+        self.state.wait_until(async move {
+            let send = async {
+                let namespace = env.durable_object("ACCOUNTS")?;
+                let request = Request::new_with_init(
+                    "https://internal/terminal-change",
+                    RequestInit::new()
+                        .with_method(Method::Post)
+                        .with_body(Some(format!("{{\"device_id\":\"{device_id}\"}}").into())),
+                )?;
+                namespace
+                    .id_from_name("accounts")?
+                    .get_stub()?
+                    .fetch_with_request(request)
+                    .await?;
+                Result::<()>::Ok(())
+            };
+            if send.await.is_err() {
+                console_warn!("Terminal state notification unavailable");
+            }
+        });
+    }
+    fn presence(&self) -> Result<Presence> {
+        let mut p = self.cached.borrow().clone();
+        for socket in self.state.get_websockets_with_tag(HOST_TAG) {
+            if !self.current(&socket, &p) {
+                continue;
+            }
+            if !p.disconnected && !p.offline {
+                if let Ok(Some(saved)) = socket.deserialize_attachment::<Presence>() {
+                    p = saved;
+                }
+                let method = js_sys::Reflect::get(
+                    self.state.as_raw().as_ref(),
+                    &"getWebSocketAutoResponseTimestamp".into(),
+                )?
+                .dyn_into::<js_sys::Function>()?;
+                let timestamp = method.call1(self.state.as_raw().as_ref(), socket.as_ref())?;
+                if !timestamp.is_null() && !timestamp.is_undefined() {
+                    let millis = js_sys::Date::from(timestamp).get_time() as u64;
+                    p.last_reply = Some(p.last_reply.unwrap_or(0).max(millis));
+                    p.automatic = true;
+                    p.deadline = None;
+                }
+            }
+        }
+        Ok(p)
+    }
+    fn remember(&self, p: &Presence) -> Result<()> {
+        *self.cached.borrow_mut() = p.clone();
+        for socket in self.state.get_websockets_with_tag(HOST_TAG) {
+            if self.current(&socket, p) {
+                socket.serialize_attachment(p)?;
+            }
+        }
+        Ok(())
+    }
+    async fn schedule(&self, p: &Presence) -> Result<()> {
+        if p.offline {
+            return Ok(());
+        }
+        let now = Date::now().as_millis();
+        let next = p.deadline.or(p.last_reply.map(|r| r + 30_000));
+        let due = if p.automatic {
+            // Keep a thirty-second cadence even when a ten-second ping and
+            // the alarm coincide. Never schedule beyond the offline deadline.
+            p.deadline.unwrap_or_else(|| {
+                (now + 30_000).min(p.last_reply.map_or(now + 30_000, |r| r + 35_000))
+            })
+        } else {
+            next.map_or(p.next_heartbeat.unwrap_or(now + 10_000), |deadline| {
+                deadline.min(p.next_heartbeat.unwrap_or(now + 10_000))
+            })
+        };
+        self.state
             .storage()
-            .get("presence")
-            .await?
-            .unwrap_or_default())
+            .set_alarm(due.saturating_sub(now).max(1) as i64)
+            .await?;
+        Ok(())
     }
     fn current(&self, socket: &WebSocket, p: &Presence) -> bool {
-        socket.deserialize_attachment::<u64>().ok().flatten() == Some(p.generation)
+        (socket
+            .deserialize_attachment::<Presence>()
+            .ok()
+            .flatten()
+            .map(|saved| saved.generation)
+            .or_else(|| socket.deserialize_attachment::<u64>().ok().flatten()))
+            == Some(p.generation)
             && self
                 .state
                 .get_tags(socket)
@@ -86,19 +173,14 @@ impl RelayDevice {
                 .any(|tag| tag == HOST_TAG)
     }
     async fn save(&self, p: &Presence) -> Result<()> {
+        self.remember(p)?;
         self.state.storage().put("presence", p).await?;
-        let now = Date::now().as_millis();
-        let next = p.deadline.or(p.last_reply.map(|r| r + 30_000));
-        let heartbeat = p.next_heartbeat.unwrap_or(now + 10_000);
-        let due = next.map_or(heartbeat, |deadline| deadline.min(heartbeat));
-        let delay = due.saturating_sub(now).max(1);
-        if !p.offline {
-            self.state.storage().set_alarm(delay as i64).await?;
-        }
-        Ok(())
+        self.notify();
+        self.schedule(p).await
     }
     async fn evaluate(&self) -> Result<Presence> {
-        let mut p = self.presence().await?;
+        let mut p = self.presence()?;
+        let previous = p.clone();
         let now = Date::now().as_millis();
         let hosts = self.state.get_websockets_with_tag(HOST_TAG);
         if (hosts.is_empty()
@@ -119,11 +201,15 @@ impl RelayDevice {
                 let _ = s.close(Some(4001), Some("Terminal host unavailable"));
             }
         }
-        self.save(&p).await?;
+        if p.offline != previous.offline {
+            self.save(&p).await?;
+        } else {
+            self.remember(&p)?;
+        }
         Ok(p)
     }
     async fn disconnected(&self, socket: WebSocket) -> Result<()> {
-        let mut p = self.presence().await?;
+        let mut p = self.presence()?;
         if self.current(&socket, &p) && !p.offline {
             p.disconnected = true;
             if p.deadline.is_none() {
@@ -135,8 +221,34 @@ impl RelayDevice {
     }
 }
 impl DurableObject for RelayDevice {
-    fn new(state: State, _env: Env) -> Self {
-        Self { state }
+    fn new(state: State, env: Env) -> Self {
+        let cached = Rc::new(RefCell::new(Presence::default()));
+        // Hibernation keeps attachments. A connected host needs no KV read
+        // on wake; storage is only the fallback for a disconnect or migration.
+        let attached = state
+            .get_websockets_with_tag(HOST_TAG)
+            .into_iter()
+            .filter(|socket| {
+                js_sys::Reflect::get(socket.as_ref(), &"readyState".into())
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    == Some(1.0)
+            })
+            .filter_map(|socket| socket.deserialize_attachment::<Presence>().ok().flatten())
+            .filter(|p| !p.disconnected && !p.offline)
+            .max_by_key(|p| p.generation);
+        let (slot, storage) = (cached.clone(), state.storage());
+        let _init = state.block_concurrency_while(async move {
+            *slot.borrow_mut() = match attached {
+                Some(p) => p,
+                None => storage.get("presence").await?.unwrap_or_default(),
+            };
+            Ok(())
+        });
+        state.set_websocket_auto_response(
+            &worker_sys::WebSocketRequestResponsePair::new("oriel:ping", "oriel:pong").unwrap(),
+        );
+        Self { state, env, cached }
     }
     async fn fetch(&self, req: Request) -> Result<Response> {
         if req.path() == "/internal/terminal-status" {
@@ -173,8 +285,9 @@ impl DurableObject for RelayDevice {
             }
             p.offline = false;
             p.disconnected = false;
+            p.automatic = false;
             p.challenge = format!("{}:{}", p.generation, Date::now().as_millis());
-            pair.server.serialize_attachment(p.generation)?;
+            pair.server.serialize_attachment(&p)?;
             pair.server
                 .send_with_str(format!("{CONTROL}{}", p.challenge))?;
             self.save(&p).await?;
@@ -186,7 +299,7 @@ impl DurableObject for RelayDevice {
         socket: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
-        let mut p = self.presence().await?;
+        let mut p = self.presence()?;
         let host = self.current(&socket, &p);
         if let WebSocketIncomingMessage::String(text) = &message
             && let Some(reply) = text.strip_prefix(CONTROL)
@@ -198,10 +311,16 @@ impl DurableObject for RelayDevice {
                 && p.status(Date::now().as_millis()) != "offline"
             {
                 // A replayed reply must not extend the host's liveness deadline.
+                let already_online = self.cached.borrow().last_reply.is_some()
+                    && p.status(Date::now().as_millis()) == "online";
                 p.challenge.clear();
                 p.last_reply = Some(Date::now().as_millis());
                 p.deadline = None;
-                self.save(&p).await?;
+                self.remember(&p)?;
+                self.schedule(&p).await?;
+                if !already_online {
+                    self.notify();
+                }
             }
             return Ok(());
         }
@@ -246,18 +365,20 @@ impl DurableObject for RelayDevice {
     async fn alarm(&self) -> Result<Response> {
         let mut p = self.evaluate().await?;
         if !p.offline
+            && !p.automatic
             && p.next_heartbeat
                 .is_none_or(|due| Date::now().as_millis() >= due)
         {
             p.next_heartbeat = Some(Date::now().as_millis() + 10_000);
             p.challenge = format!("{}:{}", p.generation, Date::now().as_millis());
-            self.save(&p).await?;
+            self.remember(&p)?;
             for s in self.state.get_websockets_with_tag(HOST_TAG) {
                 if self.current(&s, &p) {
                     let _ = s.send_with_str(format!("{CONTROL}{}", p.challenge));
                 }
             }
         }
+        self.schedule(&p).await?;
         Response::ok("OK")
     }
 }
