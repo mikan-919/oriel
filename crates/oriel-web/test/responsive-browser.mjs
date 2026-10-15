@@ -1,0 +1,70 @@
+// Generate assets and review fixtures first. No external accounts or connections.
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {readFileSync, mkdirSync, writeFileSync} from 'node:fs';
+import {chromium} from '../../oriel-relay/node_modules/playwright/index.mjs';
+import {captureNlAssertImage} from '../../oriel-relay/node_modules/@mizchi/vlmkit/dist/playwright.mjs';
+
+const stage=process.argv[2] || 'after';
+assert.ok(['before','after'].includes(stage));
+const output=new URL(`./evidence/${stage}/`,import.meta.url);
+mkdirSync(output,{recursive:true});
+const server=createServer((req,res)=>{
+  const name=req.url.slice(1);
+  if(!/^[a-z-]+\.html$/.test(name)){res.writeHead(404).end();return;}
+  try {res.setHeader('Content-Type','text/html; charset=utf-8');res.end(readFileSync(new URL(`../build/review/${name}`,import.meta.url)));}
+  catch {res.writeHead(404).end();}
+});
+await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+let browser;
+const results=[];
+const viewports=[320,360,390,768,900,901,1440].map(width=>({width,height:800})).concat({width:844,height:390});
+try {
+  browser=await chromium.launch({headless:true});
+  const page=await browser.newPage();
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1'?route.continue():route.abort());
+  for(const state of ['signed-out','pairing','normal','empty','loading','failed','reconnecting','codex']) {
+    for(const viewport of viewports) {
+      await page.setViewportSize(viewport);
+      await page.goto(`http://127.0.0.1:${server.address().port}/${state}.html`);
+      await page.waitForTimeout(700);
+      for(const screen of ['overview','workflow','codex','devices','settings']) {
+        await page.evaluate(screen=>showPage(screen,false),screen);
+        await page.locator('details').evaluateAll(nodes=>nodes.forEach(node=>node.open=true));
+        if(screen==='codex' && state==='codex') {
+          await page.evaluate(()=>window.fixtureCodex?.deliver({type:'event',engine:'manual',message:{method:'turn/diff/updated',params:{diff:('+long-diff-line'.repeat(40)+'\n').repeat(5)}}}));
+        }
+        const measurement=await page.evaluate(()=>({clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,offenders:[...document.querySelectorAll('body *')].filter(e=>e.getClientRects().length && e.getBoundingClientRect().right>innerWidth+1).slice(0,12).map(e=>e.id||e.tagName)}));
+        const row={state,screen,...viewport,...measurement};results.push(row);
+        // Keep representative images in git; measurements cover every combination.
+        if((viewport.width===320 && ['normal','codex'].includes(state)) || (state==='normal' && screen==='overview')) {
+          writeFileSync(new URL(`${state}-${screen}-${viewport.width}x${viewport.height}.png`,output),await captureNlAssertImage({target:page,screenshotOptions:{fullPage:true}}));
+        }
+      }
+    }
+  }
+  // Exercise real xterm with a mock WebSocket and both width and height changes.
+  await page.goto(`http://127.0.0.1:${server.address().port}/normal.html`);
+  await page.waitForTimeout(300);
+  await page.evaluate(()=>showPage('devices',false));
+  const opener=page.getByRole('button',{name:'端末を開く',exact:true});
+  await opener.click();await page.locator('#terminal-view').waitFor({state:'visible'});
+  for(const viewport of viewports) {
+    await page.setViewportSize(viewport);await page.waitForTimeout(100);
+    const measurement=await page.evaluate(()=>{const r=document.querySelector('.xterm-screen').getBoundingClientRect();const t=document.getElementById('terminal').getBoundingClientRect();return {clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,terminalRight:r.right,terminalBottom:r.bottom,containerBottom:t.bottom,viewportHeight:innerHeight};});
+    results.push({state:'normal',screen:'terminal',...viewport,...measurement});
+    if(viewport.width===320 || viewport.width===844)writeFileSync(new URL(`normal-terminal-${viewport.width}x${viewport.height}.png`,output),await captureNlAssertImage({target:page}));
+  }
+  await page.locator('#close-terminal').focus();await page.keyboard.press('Enter');
+  await page.locator('#dashboard').waitFor({state:'visible'});
+  const focus=await page.evaluate(()=>document.activeElement.id || document.activeElement.textContent);
+  writeFileSync(new URL('results.json',output),JSON.stringify({browser:browser.version(),results,errors,focus},null,2)+'\n');
+  console.log(JSON.stringify({cases:results.length,overflow:results.filter(r=>r.scrollWidth>r.clientWidth+1),errors,focus},null,2));
+  if(stage==='after') {
+    assert.deepEqual(errors,[]);
+    assert.ok(results.every(r=>r.scrollWidth<=r.clientWidth+1),'page width');
+    assert.ok(results.filter(r=>r.screen==='terminal').every(r=>r.terminalRight<=r.clientWidth+1 && r.terminalBottom<=r.viewportHeight+1),'terminal fit');
+    assert.equal(focus,'端末を開く');
+  }
+} finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}
