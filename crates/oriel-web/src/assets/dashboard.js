@@ -71,6 +71,7 @@ let deviceRefresh = null;
 let deviceTimer;
 let deviceListFailed = false;
 let terminal;
+let terminalOpener;
 let fit;
 let socket;
 let progressSocket;
@@ -165,7 +166,12 @@ function disconnect() {
     connection?.close();
     terminalView.hidden = true;
     dashboard.hidden = false;
-    if (wasVisible) document.getElementById("page-title").focus();
+    if (wasVisible) {
+        const target = terminalOpener?.isConnected && !terminalOpener.disabled
+            && terminalOpener.getClientRects().length ? terminalOpener : document.getElementById("page-title");
+        target.focus();
+    }
+    terminalOpener = undefined;
 }
 
 function setUser(next) {
@@ -966,6 +972,7 @@ function sendResize() {
 }
 
 async function openTerminal(device) {
+    const opener = document.activeElement;
     const epoch = accountEpoch;
     await refreshDevices();
     if (!currentAccount(epoch) || deviceListFailed || devices.find(d => d.device_id === device.device_id)?.terminal_status !== "online") throw new Error("端末が使用不可か、接続状態を確認できません。");
@@ -1003,6 +1010,7 @@ async function openTerminal(device) {
         }).observe(container);
     }
     disconnect();
+    terminalOpener = opener;
     terminal.reset();
     const url = new URL(`/device/${device.device_id}/client`, location.origin);
     url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
