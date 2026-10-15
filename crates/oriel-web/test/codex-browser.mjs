@@ -4,7 +4,7 @@ import {chromium} from "../../oriel-relay/node_modules/playwright/index.mjs";
 
 const browser = await chromium.launch({headless:true});
 try {
-  const page = await browser.newPage(); const errors = [];
+  const page = await browser.newPage({viewport:{width:Number(process.env.REVIEW_WIDTH || 1440),height:Number(process.env.REVIEW_HEIGHT || 800)}}); const errors = [];
   await page.clock.install();
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(new URL("../build/review/codex.html", import.meta.url).href);

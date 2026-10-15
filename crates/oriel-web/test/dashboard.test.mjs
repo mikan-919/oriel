@@ -226,7 +226,7 @@ test('closing a visible terminal restores keyboard focus to the dashboard',()=>{
   const disconnect=source.slice(source.indexOf('function disconnect()'),source.indexOf('function setUser('));
   const heading=element();
   let closed=false;
-  const c=vm.createContext({socket:{close(){closed=true;}},terminalView:{hidden:false},dashboard:{hidden:true},
+  const c=vm.createContext({socket:{close(){closed=true;}},terminalOpener:undefined,terminalView:{hidden:false},dashboard:{hidden:true},
     document:{getElementById(){return heading;}}});
   vm.runInContext(disconnect,c);
   c.disconnect();
@@ -237,6 +237,21 @@ test('closing a visible terminal restores keyboard focus to the dashboard',()=>{
   heading.focused=false;
   c.disconnect();
   assert.equal(heading.focused,false);
+});
+
+test('terminal focus returns to its visible enabled opener, with a heading fallback',()=>{
+  const disconnect=source.slice(source.indexOf('function disconnect()'),source.indexOf('function setUser('));
+  for (const available of [true,false]) {
+    const opener={...element(),isConnected:available,disabled:false,getClientRects:()=>[{}]};
+    const heading=element();
+    const c=vm.createContext({socket:undefined,terminalOpener:opener,terminalView:{hidden:false},dashboard:{hidden:true},
+      document:{getElementById(){return heading;}}});
+    vm.runInContext(disconnect,c);
+    c.disconnect();
+    assert.equal(opener.focused,available);
+    assert.equal(heading.focused,!available);
+    assert.equal(c.terminalOpener,undefined);
+  }
 });
 
 test('initial session loading does not claim the user is signed out',()=>{
