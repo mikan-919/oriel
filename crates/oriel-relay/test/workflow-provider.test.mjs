@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import test from "node:test";
-import { client, connect, device, hostHeaders, origin, pair, runtime } from "./helpers.mjs";
+import { authorize, client, connect, device, hostHeaders, origin, pair, runtime } from "./helpers.mjs";
 import { workflowFixture } from "./workflow-fixture.mjs";
 
 async function setup(measureSql = false) {
@@ -985,15 +985,19 @@ test("JSON limits protect authenticated creation while preserving Japanese field
     assert.equal(s.fixture.calls.filter(call => call.operation === "what-create").length, creations);
     assert.equal(s.fixture.issues.length, before + 1);
 
+    // Selection needs a pending OAuth authorization, not the active connection
+    // already selected by setup. An oversized request must leave it usable.
+    const state = await authorize(s.owner, s.fixture, "linear");
+    assert.equal((await s.owner.callback("linear", state)).headers.get("Location"), `${origin}/#connected=linear`);
     for (const [client, route, valid, headers] of [
       [s.owner, "/api/auth/login/options", {}, {}],
       [s.daemon, "/api/pair/start", { device_id: device, name: "日" }, hostHeaders],
       [s.owner, "/api/integrations/linear/select", { team_id: "team" }, {}],
     ]) {
-      assert.equal((await client.api(route, valid, headers)).status, 200);
       const response = await client.api(route, { ...valid, padding: "日".repeat(65536) }, headers);
       assert.equal(response.status, 413, route);
       assert.deepEqual(response.data, { error: "Request is too large" });
+      assert.equal((await client.api(route, valid, headers)).status, 200, route);
     }
   } finally { await s.close(); }
 });
