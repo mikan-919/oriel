@@ -1,0 +1,2983 @@
+{
+  "browser": "153.0.8010.12",
+  "results": [
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "signed-out",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "pairing",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "empty",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "loading",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "failed",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "reconnecting",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "overview",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "workflow",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "codex",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "devices",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "codex",
+      "screen": "settings",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "offenders": []
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 320,
+      "height": 800,
+      "clientWidth": 320,
+      "scrollWidth": 320,
+      "terminalRight": 285,
+      "terminalBottom": 771,
+      "containerBottom": 784,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 360,
+      "height": 800,
+      "clientWidth": 360,
+      "scrollWidth": 360,
+      "terminalRight": 327,
+      "terminalBottom": 771,
+      "containerBottom": 784,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 390,
+      "height": 800,
+      "clientWidth": 390,
+      "scrollWidth": 390,
+      "terminalRight": 352,
+      "terminalBottom": 774,
+      "containerBottom": 784,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 768,
+      "height": 800,
+      "clientWidth": 768,
+      "scrollWidth": 768,
+      "terminalRight": 733.75,
+      "terminalBottom": 773.25,
+      "containerBottom": 780.25,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 900,
+      "height": 800,
+      "clientWidth": 900,
+      "scrollWidth": 900,
+      "terminalRight": 859.75,
+      "terminalBottom": 765.75,
+      "containerBottom": 780.25,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 901,
+      "height": 800,
+      "clientWidth": 901,
+      "scrollWidth": 901,
+      "terminalRight": 859.75,
+      "terminalBottom": 765.75,
+      "containerBottom": 780.25,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 1440,
+      "height": 800,
+      "clientWidth": 1440,
+      "scrollWidth": 1440,
+      "terminalRight": 1405.75,
+      "terminalBottom": 776.25,
+      "containerBottom": 780.25,
+      "viewportHeight": 800
+    },
+    {
+      "state": "normal",
+      "screen": "terminal",
+      "width": 844,
+      "height": 390,
+      "clientWidth": 844,
+      "scrollWidth": 844,
+      "terminalRight": 809.75,
+      "terminalBottom": 369.75,
+      "containerBottom": 370.25,
+      "viewportHeight": 390
+    }
+  ],
+  "errors": [],
+  "focus": "page-title"
+}
