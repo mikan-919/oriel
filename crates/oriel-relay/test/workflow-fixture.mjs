@@ -147,7 +147,7 @@ export function workflowFixture() {
       if (operation === "states") return Response.json({ data: { team: { states: page(fixture.states, variables.after, fixture.issuePageSize) } } });
       if (operation === "how") {
         const how = fixture.linears.find(how => how.id === variables.id);
-        if (!how) return Response.json(fixture.missingHowErrors ? { data: { issue: null }, errors: fixture.missingHowErrors } : { data: { issue: null } });
+        if (!how) return Response.json(fixture.missingHowErrors ? { data: { issue: null }, errors: fixture.missingHowErrors } : { data: { issue: null } }, { status: fixture.missingHowStatus ?? 200 });
         const node = howNode(how);
         if (query.includes("comments(")) node.comments = page(how.comments ?? [], variables.after, fixture.issuePageSize);
         if (query.includes("attachments(")) node.attachments = page(how.attachments, variables.after, fixture.attachmentPageSize);
