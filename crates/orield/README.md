@@ -5,6 +5,14 @@ Codex and a running Oriel Web/relay deployment are required separately; installi
 this crate does not install or deploy them. Workflow features also require the
 GitHub and Linear integrations to be configured.
 
+`orield workflow` keeps HOW planning read-only and requires human approval in
+Linear Todo plus repository opt-in before implementation. Approved implementation
+uses Codex's `auto_review` reviewer with the `on-request` approval policy, so
+eligible execution requests are reviewed automatically. Sandbox boundaries still
+apply; rejected actions and questions requiring a human decision can still block
+progress. The installed `codex` must support `auto_review`. Read-only planning and
+manual conversations continue to use the user reviewer.
+
 Once a version has been published to crates.io, install without a checkout:
 
 ```sh

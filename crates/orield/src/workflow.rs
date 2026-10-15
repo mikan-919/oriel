@@ -1495,7 +1495,11 @@ async fn agent(
             "-c",
             "approval_policy=\"on-request\"",
             "-c",
-            "approvals_reviewer=\"user\"",
+            if plan {
+                "approvals_reviewer=\"user\""
+            } else {
+                "approvals_reviewer=\"auto_review\""
+            },
             "-c",
             "project_root_markers=[\".git\"]",
             "-c",

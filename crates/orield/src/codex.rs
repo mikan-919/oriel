@@ -354,7 +354,7 @@ impl Engine {
         let model = self.hub.model.lock().unwrap().clone();
         let thread = self.client.request("thread/start", json!({"cwd":self.client.cwd,"model":model["model"],
             "sandbox":if read_only { Some("read-only") } else { None }, "approvalPolicy":"on-request",
-            "approvalsReviewer":"user","developerInstructions":prompt})).await?;
+            "approvalsReviewer":if read_only { "user" } else { "auto_review" },"developerInstructions":prompt})).await?;
         let thread_id = thread["thread"]["id"]
             .as_str()
             .context("Codex returned no thread")?;
@@ -962,6 +962,7 @@ mod tests {
             json!({"cwd":"/elsewhere"}),
             json!({"config":{}}),
             json!({"approvalPolicy":"never"}),
+            json!({"approvalsReviewer":"auto_review"}),
         ] {
             assert!(remote_params("thread/start", &params, cwd, false).is_err());
         }
@@ -1067,7 +1068,10 @@ mod tests {
               if(m.method==='model/list'){send({id:m.id,result:{initialized}});return;}
               if(m.method==='thread/start'){
                 if(m.params.developerInstructions==='invalid'){process.stdout.write('{invalid}\n');return;}
-                if(m.params.developerInstructions && m.params.sandbox!==null)process.exit(3);
+                if(m.params.developerInstructions){
+                  const readOnly=m.params.developerInstructions==='plan';
+                  if(m.params.sandbox!==(readOnly?'read-only':null) || m.params.approvalPolicy!=='on-request' || m.params.approvalsReviewer!==(readOnly?'user':'auto_review'))process.exit(3);
+                }
                 if(m.params.developerInstructions)for(let i=0;i<600;i++)send({method:'item/commandExecution/outputDelta',params:{delta:'compiling\n'}});
                 if(m.params.developerInstructions==='overflow')for(let i=0;i<600;i++)send({method:'configWarning',params:{message:'notice'}});
                 send({id:m.id,result:{thread:{id:'owned'}}});
@@ -1153,6 +1157,13 @@ mod tests {
                         .as_str()
                         .is_some_and(|output| output.len() == 700 * 1024)
                 })
+        );
+        assert_eq!(
+            engine
+                .run("plan", json!({"type":"object"}), true)
+                .await
+                .unwrap(),
+            "{\"summary\":\"done\"}"
         );
         let overflow = engine
             .run("overflow", json!({"type":"object"}), false)
