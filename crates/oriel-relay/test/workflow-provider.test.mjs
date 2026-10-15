@@ -172,6 +172,7 @@ test("native missing-HOW errors permit creation but authorization and mixed fail
   const s = await setup();
   try {
     const lease = await s.claim("plan");
+    s.fixture.missingHowStatus = 404;
     const missing = { message: "Entity not found: Issue", path: ["issue"], extensions: { code: "INPUT_ERROR" } };
     const forbidden = { message: "Entity not found: Issue", path: ["issue"], extensions: { code: "FORBIDDEN" } };
     for (const errors of [[forbidden], [missing, forbidden]]) {

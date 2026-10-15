@@ -4,6 +4,8 @@ import type { WorkflowCI } from "./workflow";
 type Check = { id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; details_url?: string | null; output: { title: string | null; summary: string | null; text: string | null } };
 const SECRET = /^[a-f0-9]{64}$/;
 const GITHUB_COMMAND = "/oriel";
+// Never forward provider messages or arbitrary extension values to the daemon.
+const LINEAR_ERROR_CODES = new Set(["RATELIMITED", "INPUT_ERROR", "FORBIDDEN", "UNAUTHENTICATED", "AUTHENTICATION_ERROR", "GRAPHQL_PARSE_FAILED", "GRAPHQL_VALIDATION_FAILED", "INTERNAL_SERVER_ERROR"]);
 const githubCommand = (body: string) => /^[\/／]oriel(?:\s|$)/i.test(body.trimStart()) ? { planning: /^[\/／]oriel\s+how(?:\s|$)/i.test(body.trimStart()) } : null;
 const encoder = new TextEncoder();
 const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -107,8 +109,9 @@ export class WorkflowReader {
       context.check();
       if (error instanceof Error && ("status" in error || ("missingIssue" in error && error.missingIssue === true))) throw error;
       const code = error instanceof Error && "providerCode" in error && typeof error.providerCode === "string" &&
-        /^(?:http_[0-9]{3}|graphql_error)$/.test(error.providerCode) ? error.providerCode : "transport_or_response_error";
-      this.auth.fail(502, `Linear workflow request failed (${code}); provider state could not be confirmed`);
+        /^(?:http_[0-9]{3}|graphql_error)(?:\/[A-Z_]{1,40})?$/.test(error.providerCode) ? error.providerCode : "transport_or_response_error";
+      const operation = query.match(/\{\s*([A-Za-z][_0-9A-Za-z]*)/)?.[1] ?? "unknown";
+      this.auth.fail(502, `Linear workflow request failed (${code}; ${operation}); provider state could not be confirmed`);
     }
   }
 
@@ -488,17 +491,21 @@ export class WorkflowReader {
 
   protected async linear<T>(token: string, query: string, variables: Record<string, unknown> = {}): Promise<T> {
     const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }), redirect: "manual" });
-    if (!response.ok) throw Object.assign(new Error("Linear authorization unavailable"), { providerCode: `http_${response.status}` });
-    const result = await response.json() as { data?: T; errors?: unknown[] };
-    if (!result.data || result.errors?.length) {
-      const data = result.data;
-      const errors = result.errors;
-      const missingIssue = (data == null || typeof data === "object" && "issue" in data && data.issue === null) &&
-        Array.isArray(errors) && errors.length > 0 && errors.every(error =>
+    // Linear also returns GraphQL error bodies for HTTP 400 (including rate
+    // limits) and 404. Classify those bodies before handling the HTTP status.
+    const result = await response.json().catch(() => null) as { data?: T; errors?: { message?: unknown; extensions?: { code?: unknown } | null }[] } | null;
+    const errors = Array.isArray(result?.errors) ? result.errors : [];
+    if (!response.ok || !result?.data || result.errors && (!Array.isArray(result.errors) || errors.length)) {
+      const data = result?.data;
+      const missingIssue = (response.ok || response.status === 400 || response.status === 404) &&
+        (data == null || typeof data === "object" && "issue" in data && data.issue === null) &&
+        errors.length > 0 && errors.every(error =>
           error !== null && typeof error === "object" && "message" in error && typeof error.message === "string" &&
           /^Entity not found:\s*Issue\b/i.test(error.message) && "extensions" in error &&
           error.extensions !== null && typeof error.extensions === "object" && "code" in error.extensions && error.extensions.code === "INPUT_ERROR");
-      throw Object.assign(new Error("Linear request failed"), { providerCode: "graphql_error", missingIssue });
+      const code = errors.map(error => error?.extensions?.code).find(code => typeof code === "string" && LINEAR_ERROR_CODES.has(code));
+      const providerCode = `${response.ok ? "graphql_error" : `http_${response.status}`}${code ? `/${code}` : ""}`;
+      throw Object.assign(new Error("Linear request failed"), { providerCode, missingIssue });
     }
     return result.data;
   }
