@@ -32,6 +32,39 @@ test("HTTP discovery renews control ownership and final validation preserves pen
   assert.throws(() => leases.readScope(device, undefined, false));
 });
 
+test("Progress notifications isolate browser failures and still revoke unavailable authority", async () => {
+  const c = vm.createContext({ Date, WebSocket: { OPEN: 1 }, digest: async value => value });
+  const source = stripTypeScriptTypes(readFileSync(new URL("../src/workflow-lease.ts", import.meta.url), "utf8"), { mode: "transform" });
+  vm.runInContext(source.replace(/^import[\s\S]*?;/gm, "").replace(/^export /gm, "") + "\nglobalThis.WorkflowLeases = WorkflowLeases;", c);
+  for (const failure of ["serializeAttachment", "send", "authority"]) {
+    const pending = [];
+    const host = { closed: false, serializeAttachment() {}, close() { this.closed = true; } };
+    const watcher = () => ({
+      readyState: 1, closed: false, sent: [],
+      deserializeAttachment: () => ({ protocol: "oriel/workflow-progress/v1", user_id: "user", session_hash: "session" }),
+      serializeAttachment() {}, send(payload) { this.sent.push(payload); }, close() { this.closed = true; },
+    });
+    const disconnected = watcher(), healthy = watcher();
+    if (failure !== "authority") disconnected[failure] = () => { throw new Error("Watcher disconnected during notification"); };
+    const leases = Object.create(c.WorkflowLeases.prototype);
+    leases.ctx = {
+      getWebSockets: tag => tag === "workflow" ? [host] : [disconnected, healthy],
+      waitUntil: promise => pending.push(promise),
+    };
+    leases.sessionExpiry = () => Date.now() + 60_000;
+    leases.snapshot = () => {
+      if (failure === "authority") throw new Error("Account ownership could not be established");
+      return '{"type":"workflow-progress","devices":[]}';
+    };
+    leases.publish();
+    await Promise.all(pending);
+    assert.equal(disconnected.closed, true);
+    assert.equal(host.closed, failure === "authority", "Only an authority failure may revoke the host lease");
+    assert.equal(healthy.closed, failure === "authority");
+    assert.equal(healthy.sent.length, failure === "authority" ? 0 : 1);
+  }
+});
+
 async function setup() {
   const fixture = workflowFixture();
   const worker = await runtime(fixture.env, request => fixture.fetch(request), true);

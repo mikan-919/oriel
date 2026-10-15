@@ -126,8 +126,12 @@ export class WorkflowLeases {
       // Recheck ownership and metadata across hashing; only send current data.
       if (payload !== this.snapshot(watcher.user_id)) continue;
       if (watcher.last_snapshot === hash) return;
-      ws.serializeAttachment({ ...watcher, last_snapshot: hash });
-      ws.send(payload);
+      // The browser can disconnect while the snapshot is being hashed. Its
+      // transport failure must not reach publish's authority-failure handler.
+      try {
+        ws.serializeAttachment({ ...watcher, last_snapshot: hash });
+        ws.send(payload);
+      } catch { this.stop(ws); }
       return;
     }
   }
