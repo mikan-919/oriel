@@ -339,14 +339,11 @@ pub(super) struct Engine {
     cancel: watch::Sender<bool>,
     task: Option<JoinHandle<Result<()>>>,
     stop_error: Option<String>,
-    id: String,
     hub: Hub,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.cancel.send(true);
-        self.hub.engines.lock().unwrap().remove(&self.id);
-        self.hub.changed();
     }
 }
 impl Engine {
@@ -559,8 +556,6 @@ impl Engine {
                 .context("Codex child could not be reaped");
             input.close();
             requests.lock().unwrap().clear();
-            process_hub.engines.lock().unwrap().remove(&engine_id);
-            process_hub.changed();
             if let Err(error) = process {
                 let _ = writeln!(
                     log,
@@ -574,16 +569,27 @@ impl Engine {
             }
             // Dropping queued inputs also resolves their oneshot waiters.
             drop(input);
-            killed.context("Codex process group could not be stopped")?;
-            reaped?;
-            Ok(())
+            process_hub.engines.lock().unwrap().remove(&engine_id);
+            process_hub.changed();
+            let cleanup = match (killed, reaped) {
+                (Err(kill), Err(wait)) => {
+                    Err(kill.context(format!("Codex reap also failed: {wait:#}")))
+                }
+                (Err(error), _) => Err(error.context("Codex process group could not be stopped")),
+                (_, Err(error)) => Err(error),
+                (Ok(()), Ok(_)) => Ok(()),
+            };
+            if let Err(error) = &cleanup {
+                // Drop cannot await or return the task result; retain diagnostics there too.
+                tracing::error!("Codex cleanup failed: {error:#}");
+            }
+            cleanup
         });
         let mut engine = Self {
             client,
             cancel,
             task: Some(task),
             stop_error: None,
-            id,
             hub,
         };
         if let Err(error) = engine.client.request("initialize", json!({"clientInfo":{"name":"oriel","title":"Oriel","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await {
@@ -1083,6 +1089,253 @@ mod tests {
             response_for(&question, "answer", &answers, false).unwrap(),
             json!({"answers":answers})
         );
+    }
+
+    // The child announces readiness only after it has stopped consuming stdin.
+    // Large IDs make even a small valid question answer exceed pipe capacity.
+    async fn blocked_engine(question: bool) -> (Engine, PathBuf, u32, u32) {
+        let path =
+            std::env::temp_dir().join(format!("oriel-blocked-{}", random_hex::<8>().unwrap()));
+        git::private_directory(&path).unwrap();
+        let transcript = path.join("transcript");
+        git::private_file(&transcript, b"").unwrap();
+        let script = r#"
+            const send=m=>process.stdout.write(JSON.stringify(m)+'\n');
+            const lines=require('node:readline').createInterface({input:process.stdin});
+            lines.on('line', line=>{
+                const m=JSON.parse(line);
+                if(m.method==='initialize')send({id:m.id,result:{}});
+                if(m.method==='arm'){
+                    lines.pause(); process.stdin.pause();
+                    const child=require('node:child_process').spawn(process.execPath,
+                        ['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+                    child.on('spawn',()=>{
+                        send({id:m.id,result:{pid:process.pid,descendant:child.pid}});
+                        if(m.params.question)send({id:'q'.repeat(2*1024*1024),
+                            method:'item/tool/requestUserInput',
+                            params:{questions:[{id:'choice',question:'Choose'}]}});
+                        send({method:'fixture/ready'});
+                    });
+                }
+            });
+        "#;
+        let mut command = Command::new("node");
+        command.args(["-e", script]);
+        let engine = Engine::spawn(command, &path, "blocked", false, true, &transcript)
+            .await
+            .unwrap();
+        let mut events = engine.client.subscribe();
+        let info = engine
+            .client
+            .request("arm", json!({"question":question}))
+            .await
+            .unwrap();
+        loop {
+            if tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap()["method"]
+                == "fixture/ready"
+            {
+                break;
+            }
+        }
+        (
+            engine,
+            path,
+            info["pid"].as_u64().unwrap() as u32,
+            info["descendant"].as_u64().unwrap() as u32,
+        )
+    }
+
+    async fn assert_stopped(pid: u32, descendant: u32) {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "direct child was not reaped"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let state = fs::read_to_string(format!("/proc/{descendant}/stat")).ok();
+                if state
+                    .as_ref()
+                    .is_none_or(|s| s.rsplit_once(") ").unwrap().1.starts_with('Z'))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_writes_stop_for_all_workflow_guard_reasons() {
+        for question in [false, true] {
+            for reason in [
+                workflow::Stop::Changed,
+                workflow::Stop::Uncertain,
+                workflow::Stop::WebPaused,
+            ] {
+                let expected = reason.to_string();
+                let (mut engine, path, pid, descendant) = blocked_engine(question).await;
+                let client = engine.client.clone();
+                let mut blocked = tokio::spawn(async move {
+                    if question {
+                        client
+                            .remote(
+                                "request/respond",
+                                json!({
+                                    "requestId":"q".repeat(2*1024*1024), "decision":"answer",
+                                    "answers":{"choice":{"answers":["yes"]}}
+                                }),
+                            )
+                            .await
+                    } else {
+                        client
+                            .request("large", json!({"text":"x".repeat(2*1024*1024)}))
+                            .await
+                    }
+                });
+                // Poll the actual request: a ready fixture and an unfinished request,
+                // rather than a sleep alone, establish the blocked protocol.
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(150), &mut blocked)
+                        .await
+                        .is_err()
+                );
+                let mut queued = Vec::new();
+                for _ in 0..40 {
+                    let client = engine.client.clone();
+                    queued.push(tokio::spawn(async move {
+                        client.request("queued", json!({})).await
+                    }));
+                }
+                let marker = path.join("follow-up");
+                let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+                    workflow::stop_engine(&mut engine, Err(reason.into())).await?;
+                    fs::write(&marker, b"credentials or publication")?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap()
+                .unwrap_err();
+                assert_eq!(
+                    outcome
+                        .downcast_ref::<workflow::Stop>()
+                        .unwrap()
+                        .to_string(),
+                    expected
+                );
+                assert!(!marker.exists());
+                assert!(blocked.await.unwrap().is_err());
+                for request in queued {
+                    assert!(
+                        tokio::time::timeout(Duration::from_secs(5), request)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .is_err()
+                    );
+                }
+                assert!(engine.client.pending.lock().unwrap().is_empty());
+                assert!(engine.hub.engines.lock().unwrap().is_empty());
+                engine.stop().await.unwrap();
+                assert_stopped(pid, descendant).await;
+                fs::remove_dir_all(path).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_blocked_engine_reaps_the_owned_group() {
+        let (engine, path, pid, descendant) = blocked_engine(false).await;
+        let client = engine.client.clone();
+        let hub = engine.hub.clone();
+        drop(engine);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.sender.is_closed() || !hub.engines.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_stopped(pid, descendant).await;
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn initialization_failure_and_natural_exit_reap_descendants() {
+        for invalid in [false, true] {
+            let path =
+                std::env::temp_dir().join(format!("oriel-exit-{}", random_hex::<8>().unwrap()));
+            git::private_directory(&path).unwrap();
+            let transcript = path.join("transcript");
+            git::private_file(&transcript, b"").unwrap();
+            let script = r#"
+                const child=require('node:child_process').spawn(process.execPath,
+                    ['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+                child.on('spawn',()=>{
+                    require('node:fs').writeFileSync('pids',JSON.stringify([process.pid,child.pid]));
+                    require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+                        const m=JSON.parse(line);
+                        if(m.method==='initialize'){
+                            process.stdout.write(JSON.stringify({id:m.id,
+                                ...(process.argv[1]==='invalid'?{error:{message:'fixture failure'}}:{result:{}})})+'\n');
+                        }
+                        if(m.method==='initialized')process.exit(0);
+                    });
+                });
+            "#;
+            let mut command = Command::new("node");
+            command.current_dir(&path).args([
+                "-e",
+                script,
+                if invalid { "invalid" } else { "valid" },
+            ]);
+            let result = Engine::spawn(command, &path, "exit", false, true, &transcript).await;
+            if invalid {
+                assert!(result.is_err());
+            } else {
+                let mut engine = result.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !engine.client.sender.is_closed() {
+                        tokio::task::yield_now().await;
+                    }
+                    engine.stop().await.unwrap();
+                })
+                .await
+                .unwrap();
+                engine.stop().await.unwrap();
+            }
+            let pids: Vec<u32> =
+                serde_json::from_slice(&fs::read(path.join("pids")).unwrap()).unwrap();
+            assert_stopped(pids[0], pids[1]).await;
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_stop_blocks_follow_up_and_retains_reason() {
+        let (mut engine, path, pid, descendant) = blocked_engine(false).await;
+        engine.stop().await.unwrap();
+        // Inject a recorded shutdown failure without sending any signal to a reaped PID.
+        engine.stop_error = Some("fixture wait failure".into());
+        let error = workflow::stop_engine(&mut engine, Err(workflow::Stop::WebPaused.into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<workflow::Stop>(),
+            Some(workflow::Stop::WebPaused)
+        ));
+        assert!(format!("{error:#}").contains("fixture wait failure"));
+        assert!(
+            workflow::stop_engine(&mut engine, Ok("done".into()))
+                .await
+                .is_err()
+        );
+        assert_stopped(pid, descendant).await;
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]
