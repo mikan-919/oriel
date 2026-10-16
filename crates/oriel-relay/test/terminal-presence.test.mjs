@@ -1,4 +1,5 @@
 import test from "node:test";
+import WebSocket from "ws";
 import assert from "node:assert/strict";
 import { origin, device, hostHeaders, runtime, pair, client, authenticator } from "./helpers.mjs";
 
@@ -191,6 +192,27 @@ async function terminalSetup(worker) {
   const account = namespace.get(namespace.idFromName("accounts"));
   return { ...paired, server, account };
 }
+// Miniflare's dispatchFetch socket waits up to 30 seconds for TCP teardown
+// after an idle hibernatable socket receives a close frame. Use the real HTTP
+// transport with a bounded closing handshake. This timeout starts only after
+// close is initiated; a missing server close still times out the test, and an
+// abnormal termination produces 1006 instead of the required 4003.
+async function terminalBrowser(worker, owner) {
+  const endpoint = new URL(`/device/${device}/client`, await worker.ready);
+  endpoint.protocol = "ws:";
+  const socket = new WebSocket(endpoint, "oriel-client", {
+    closeTimeout: 1000,
+    headers: {
+      Origin: origin,
+      Cookie: [...owner.cookies].map(([key, value]) => `${key}=${value}`).join("; "),
+    },
+  });
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return socket;
+}
 function closed(socket) {
   return new Promise(resolve => socket.addEventListener("close", resolve, { once: true }));
 }
@@ -292,13 +314,10 @@ for (const evict of [false, true]) test(`idle session expires with hibernation=$
   try {
     const { owner, account } = await terminalSetup(worker);
     await account.accountSqlForTest("UPDATE sessions SET expires_at = ?", [Math.floor(Date.now()/1000) + 2]);
-    const response = await owner.upgrade("client");
-    assert.equal(response.status, 101);
-    const browser = response.webSocket;
-    browser.accept();
+    const browser = await terminalBrowser(worker, owner);
     const disconnected = closed(browser);
     if (evict) await worker.unsafeEvictDurableObject("oriel-relay", "RelayDevice", {name:device});
-    await disconnected;
+    assert.equal((await disconnected).code, 4003);
     assert.equal((await owner.upgrade("client")).status, 401);
   } finally { await worker.dispose(); }
 });
@@ -307,15 +326,13 @@ test("authorization service failure closes browser without forwarding", {timeout
   const worker = await runtime();
   try {
     const { owner, server, account } = await terminalSetup(worker);
-    const response = await owner.upgrade("client");
-    const browser = response.webSocket;
-    browser.accept();
+    const browser = await terminalBrowser(worker, owner);
     const disconnected = closed(browser);
     let leaked = false;
     browser.addEventListener("message", () => { leaked = true; });
     await account.failTerminalForTest(true);
     server.send("must fail closed");
-    await disconnected;
+    assert.equal((await disconnected).code, 4003);
     assert.equal(leaked, false);
   } finally { await worker.dispose(); }
 });
@@ -324,16 +341,15 @@ test("failed logout retains revocation targets and the same cookie can retry", {
   const worker = await runtime();
   try {
     const { owner, account } = await terminalSetup(worker);
-    const response = await owner.upgrade("client");
-    response.webSocket.accept();
-    const disconnected = closed(response.webSocket);
+    const browser = await terminalBrowser(worker, owner);
+    const disconnected = closed(browser);
     await account.failRevocationForTest(true);
     assert.equal((await owner.api("/api/auth/logout", {})).status, 503);
     assert.equal((await owner.upgrade("client")).status, 401);
     assert.equal((await account.accountSqlForTest("SELECT * FROM terminal_sessions", [])).length, 1);
     await account.failRevocationForTest(false);
     assert.equal((await owner.api("/api/auth/logout", {})).status, 200);
-    await disconnected;
+    assert.equal((await disconnected).code, 4003);
     assert.equal((await account.accountSqlForTest("SELECT * FROM terminal_sessions", [])).length, 0);
   } finally { await worker.dispose(); }
 });
@@ -345,21 +361,19 @@ test("another session and another account logout preserve the current browser", 
     const second = client(worker);
     const options = await second.api("/api/auth/login/options", {});
     assert.equal((await second.api("/api/auth/login/verify", {credential:key.login(options.data.options)})).status, 200);
-    const first = await owner.upgrade("client");
-    first.webSocket.accept();
-    const replaced = closed(first.webSocket);
-    const current = await second.upgrade("client");
-    current.webSocket.accept();
-    await replaced;
+    const first = await terminalBrowser(worker, owner);
+    const replaced = closed(first);
+    const current = await terminalBrowser(worker, second);
+    assert.equal((await replaced).code, 4003);
     assert.equal((await owner.api("/api/auth/logout", {})).status, 200);
     const stranger = client(worker);
     await stranger.enroll(authenticator());
     assert.equal((await stranger.api("/api/auth/logout", {})).status, 200);
-    const output = next(current.webSocket);
+    const output = next(current);
     server.send("unrelated logouts");
     assert.equal(await output, "unrelated logouts");
     const input = next(server);
-    current.webSocket.send("still authorized");
+    current.send("still authorized");
     assert.equal(await input, "still authorized");
   } finally { await worker.dispose(); }
 });
@@ -368,11 +382,10 @@ test("persistSession replacement revokes the previous terminal session", {timeou
   const worker = await runtime();
   try {
     const { owner } = await terminalSetup(worker);
-    const response = await owner.upgrade("client");
-    response.webSocket.accept();
-    const disconnected = closed(response.webSocket);
+    const browser = await terminalBrowser(worker, owner);
+    const disconnected = closed(browser);
     await owner.enroll(authenticator());
-    await disconnected;
+    assert.equal((await disconnected).code, 4003);
     assert.equal((await owner.upgrade("client")).status, 101);
   } finally { await worker.dispose(); }
 });
