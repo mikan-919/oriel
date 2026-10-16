@@ -337,7 +337,8 @@ fn trim_command_output(value: &mut Value) {
 pub(super) struct Engine {
     pub client: Client,
     cancel: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<Result<()>>>,
+    stop_error: Option<String>,
     id: String,
     hub: Hub,
 }
@@ -398,10 +399,20 @@ impl Engine {
             }
         }
     }
-    pub async fn stop(&mut self) {
+    pub async fn stop(&mut self) -> Result<()> {
         let _ = self.cancel.send(true);
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            let result = task
+                .await
+                .context("Codex task could not be collected")
+                .and_then(|result| result);
+            if let Err(error) = result {
+                self.stop_error = Some(format!("{error:#}"));
+            }
+        }
+        match &self.stop_error {
+            Some(error) => bail!("{error}"),
+            None => Ok(()),
         }
     }
     pub async fn spawn(
@@ -417,6 +428,10 @@ impl Engine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        // Complete fallible local setup before acquiring the process group.
+        let mut log = fs::OpenOptions::new().write(true).open(transcript)?;
+        let id = random_hex::<16>()?;
         let mut child = command
             .spawn()
             .context("codex app-server could not start")?;
@@ -424,8 +439,6 @@ impl Engine {
         let mut stdin = child.stdin.take().context("Codex input missing")?;
         let stdout = child.stdout.take().context("Codex output missing")?;
         let mut lines = BufReader::new(stdout).lines();
-        let mut log = fs::OpenOptions::new().write(true).open(transcript)?;
-        let id = random_hex::<16>()?;
         let engine_id = id.clone();
         let (sender, mut input) = mpsc::channel(32);
         let (events, _) = broadcast::channel(256);
@@ -455,7 +468,6 @@ impl Engine {
             let process = async {
                 loop {
                     tokio::select! {
-                        _ = cancelled.changed() => break,
                         next = lines.next_line() => {
                             let line = next?.context("Codex process ended")?;
                             ensure!(line.len() <= MAX_APP_SERVER_MESSAGE, "Codex output exceeds local size limit");
@@ -532,10 +544,21 @@ impl Engine {
                         }
                     }
                 }
-                Ok::<(), anyhow::Error>(())
-            }.await;
-            let _ = git::stop_group(pid);
-            let _ = child.wait().await;
+            };
+            // Dropping the complete protocol future interrupts every stdin write.
+            // A partially written connection is never reused.
+            let process: Result<()> = tokio::select! {
+                biased;
+                _ = cancelled.changed() => Ok(()),
+                result = process => result,
+            };
+            let killed = git::stop_group(pid);
+            let reaped = child
+                .wait()
+                .await
+                .context("Codex child could not be reaped");
+            input.close();
+            requests.lock().unwrap().clear();
             process_hub.engines.lock().unwrap().remove(&engine_id);
             process_hub.changed();
             if let Err(error) = process {
@@ -549,15 +572,26 @@ impl Engine {
             for (_, (_, reply)) in calls {
                 let _ = reply.send(Err(anyhow!("Codex process ended")));
             }
+            // Dropping queued inputs also resolves their oneshot waiters.
+            drop(input);
+            killed.context("Codex process group could not be stopped")?;
+            reaped?;
+            Ok(())
         });
-        let engine = Self {
+        let mut engine = Self {
             client,
             cancel,
             task: Some(task),
+            stop_error: None,
             id,
             hub,
         };
-        engine.client.request("initialize", json!({"clientInfo":{"name":"oriel","title":"Oriel","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await?;
+        if let Err(error) = engine.client.request("initialize", json!({"clientInfo":{"name":"oriel","title":"Oriel","version":"0.1.0"},"capabilities":{"experimentalApi":true}})).await {
+            return match engine.stop().await {
+                Ok(()) => Err(error),
+                Err(stop) => Err(error.context(format!("Codex cleanup failed: {stop:#}"))),
+            };
+        }
         Ok(engine)
     }
 }
@@ -763,7 +797,6 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
         if let Some(key) = std::env::var_os("OPENAI_API_KEY") {
             command.env("OPENAI_API_KEY", key);
         }
-        command.as_std_mut().process_group(0);
         let mut engine =
             match Engine::spawn(command, &cwd, "相談・レビュー", false, false, &transcript).await
             {
@@ -875,7 +908,9 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             }
             tokio::select! { _ = tokio::time::sleep(Duration::from_secs(15)) => {}, _ = stopping.changed() => break }
         }
-        engine.stop().await;
+        if let Err(error) = engine.stop().await {
+            tracing::error!("Codex shutdown failed: {error:#}");
+        }
         drop(auth);
     });
     Ok(Control { shutdown, task })
@@ -1088,7 +1123,6 @@ mod tests {
         "#;
         let mut command = Command::new("node");
         command.args(["-e", script]);
-        command.as_std_mut().process_group(0);
         let mut engine = Engine::spawn(command, &path, "test", true, true, &transcript)
             .await
             .unwrap();
@@ -1179,7 +1213,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        engine.stop().await;
+        engine.stop().await.unwrap();
         let log = fs::read_to_string(&transcript).unwrap();
         let failure: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
         assert_eq!(failure["method"], "oriel/engineEnded");

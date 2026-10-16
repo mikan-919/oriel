@@ -1547,7 +1547,6 @@ async fn agent(
     if let Some(home) = rustup_home() {
         command.env("RUSTUP_HOME", home);
     }
-    command.as_std_mut().process_group(0);
     // Report only at child boundaries, never inside the source-writing guard loop.
     session
         .progress(if guard.discussion {
@@ -1581,7 +1580,12 @@ async fn agent(
             }
         }
     };
-    engine.stop().await;
+    if let Err(stop) = engine.stop().await {
+        return Err(match result {
+            Err(reason) => reason.context(format!("Codex shutdown failed: {stop:#}")),
+            Ok(_) => stop,
+        });
+    }
     // No provider credentials were copied here; discard model auth as soon as
     // the coding process and its descendants have stopped.
     drop(model_auth);
