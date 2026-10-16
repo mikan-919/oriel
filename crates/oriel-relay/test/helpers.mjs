@@ -143,6 +143,7 @@ async function runtime(env = {}, outbound, measureSql = false) {
     }
     if (measureSql && metadata.type === "esm" && modules[name].contents.includes("accountState = new AccountState(this.ctx.storage);")) {
       modules[name].contents = modules[name].contents.replace("this.ctx.storage.setAlarm(deadline)", "this.setAlarmForTest(deadline)");
+      modules[name].contents = modules[name].contents.replace("const valid = this.ctx.storage.sql.exec(", "const valid = this.sqlForTest.exec(");
       modules[name].contents = modules[name].contents.replace("accountState = new AccountState(this.ctx.storage);", `
         cost = {reads:0, writes:0, alarmSets:0};
         costForTest() { return this.cost; }

@@ -359,7 +359,9 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       }
       if (url.pathname === "/terminal-session" && request.method === "POST") {
         const { session_hash, user_id, device_id } = await request.json() as Record<string, string>;
-        const valid = this.sql.exec("SELECT 1 FROM sessions JOIN devices ON devices.user_id = sessions.user_id WHERE sessions.hash = ? AND sessions.user_id = ? AND devices.device_id = ? AND sessions.expires_at > ?", session_hash, user_id, device_id, now()).toArray().length;
+        // Frame authorization must query current SQL authority on every call,
+        // rather than reuse AccountState's positive account lookup cache.
+        const valid = this.ctx.storage.sql.exec("SELECT 1 FROM sessions JOIN devices ON devices.user_id = sessions.user_id WHERE sessions.hash = ? AND sessions.user_id = ? AND devices.device_id = ? AND sessions.expires_at > ?", session_hash, user_id, device_id, now()).toArray().length;
         return new Response(null, { status: valid ? 200 : 403 });
       }
       if (url.pathname === "/terminal-change" && request.method === "POST") {

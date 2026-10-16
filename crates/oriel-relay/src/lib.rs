@@ -353,12 +353,18 @@ impl DurableObject for RelayDevice {
         state.set_websocket_auto_response(
             &worker_sys::WebSocketRequestResponsePair::new("oriel:ping", "oriel:pong").unwrap(),
         );
-        Self {
+        let relay = Self {
             state,
             env,
             cached,
             revoked: RefCell::new(HashMap::new()),
+        };
+        for socket in relay.state.get_websockets_with_tag(CLIENT_TAG) {
+            if relay.live(&socket).is_none() {
+                relay.close_client(&socket);
+            }
         }
+        relay
     }
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         if req.path() == "/internal/revoke" && req.method() == Method::Post {

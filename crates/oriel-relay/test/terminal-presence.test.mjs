@@ -399,3 +399,24 @@ test("a stale host frame authorization cannot cross a host generation", {timeout
     assert.equal(stale, false);
   } finally { await account?.releaseTerminalGateForTest(); await worker.dispose(); }
 });
+
+test("every terminal frame consults account SQL without adding presence storage writes", {timeout:15000}, async () => {
+  const worker = await runtime({}, undefined, true);
+  try {
+    const { owner, server, account } = await terminalSetup(worker);
+    const response = await owner.upgrade("client");
+    response.webSocket.accept();
+    const before = await account.costForTest();
+    for (let i = 0; i < 3; i++) {
+      const input = next(server);
+      response.webSocket.send(`input ${i}`);
+      assert.equal(await input, `input ${i}`);
+      const output = next(response.webSocket);
+      server.send(`output ${i}`);
+      assert.equal(await output, `output ${i}`);
+    }
+    const after = await account.costForTest();
+    assert.ok(after.reads >= before.reads + 6, "No positive frame authorization cache");
+    console.log("Terminal account authorization SQL:", JSON.stringify({before, after}));
+  } finally { await worker.dispose(); }
+});
