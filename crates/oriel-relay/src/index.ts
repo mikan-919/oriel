@@ -69,8 +69,11 @@ export default {
     const authorized = await env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(request)
       .catch(error => quotaResponse(error) ?? Promise.reject(error));
     if (authorized.status !== 200) return authorized;
-    // The frame object sees no browser/daemon credentials or account metadata.
+    // Internal grants come exclusively from AccountRegistry.
     const headers = new Headers(request.headers);
+    headers.delete("X-Oriel-Terminal");
+    const grant = authorized.headers.get("X-Oriel-Terminal");
+    if (grant) headers.set("X-Oriel-Terminal", grant);
     headers.delete("Authorization");
     headers.delete("Cookie");
     headers.delete("Sec-WebSocket-Protocol");

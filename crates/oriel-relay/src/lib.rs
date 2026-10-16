@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use worker::{wasm_bindgen::JsCast, *};
 
 const HOST_TAG: &str = "host";
@@ -34,6 +34,17 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct TerminalSession {
+    connection_id: String,
+    session_hash: String,
+    user_id: String,
+    device_id: String,
+    expires_at: u64,
+    #[serde(default)]
+    revoked: bool,
 }
 
 const CONTROL: &str = "oriel-heartbeat:";
@@ -72,8 +83,79 @@ pub struct RelayDevice {
     state: State,
     env: Env,
     cached: Rc<RefCell<Presence>>,
+    revoked: RefCell<HashMap<String, u64>>,
 }
 impl RelayDevice {
+    fn live(&self, socket: &WebSocket) -> Option<TerminalSession> {
+        let grant = socket
+            .deserialize_attachment::<TerminalSession>()
+            .ok()
+            .flatten()?;
+        let open = js_sys::Reflect::get(socket.as_ref(), &"readyState".into())
+            .ok()
+            .and_then(|v| v.as_f64())
+            == Some(1.0);
+        if !open || grant.revoked || Date::now().as_millis() >= grant.expires_at {
+            return None;
+        }
+        Some(grant)
+    }
+    fn close_client(&self, socket: &WebSocket) {
+        if let Ok(Some(mut grant)) = socket.deserialize_attachment::<TerminalSession>() {
+            if !grant.revoked {
+                self.release(&grant);
+            }
+            grant.revoked = true;
+            let _ = socket.serialize_attachment(&grant);
+        }
+        let _ = socket.close(Some(4003), Some("Terminal session expired or revoked"));
+    }
+    fn release(&self, grant: &TerminalSession) {
+        let env = self.env.clone();
+        let grant = grant.clone();
+        self.state.wait_until(async move {
+            let release = async {
+                let request = Request::new_with_init(
+                    "https://internal/terminal-release",
+                    RequestInit::new()
+                        .with_method(Method::Post)
+                        .with_body(Some(serde_json::to_string(&grant)?.into())),
+                )?;
+                env.durable_object("ACCOUNTS")?
+                    .id_from_name("accounts")?
+                    .get_stub()?
+                    .fetch_with_request(request)
+                    .await?;
+                Result::<()>::Ok(())
+            };
+            // Failed cleanup is harmless: logout can still notify this device,
+            // and the account removes expired registrations later.
+            let _ = release.await;
+        });
+    }
+    async fn authorized(&self, grant: &TerminalSession) -> bool {
+        if self.revoked.borrow().contains_key(&grant.session_hash) {
+            return false;
+        }
+        let check = async {
+            let request = Request::new_with_init(
+                "https://internal/terminal-session",
+                RequestInit::new()
+                    .with_method(Method::Post)
+                    .with_body(Some(serde_json::to_string(grant)?.into())),
+            )?;
+            let response = self
+                .env
+                .durable_object("ACCOUNTS")?
+                .id_from_name("accounts")?
+                .get_stub()?
+                .fetch_with_request(request)
+                .await?;
+            Result::<bool>::Ok(response.status_code() == 200)
+        };
+        let valid = check.await.unwrap_or(false);
+        valid && !self.revoked.borrow().contains_key(&grant.session_hash)
+    }
     fn notify(&self) {
         let Some(device_id) = self.state.id().name() else {
             return;
@@ -136,9 +218,6 @@ impl RelayDevice {
         Ok(())
     }
     async fn schedule(&self, p: &Presence) -> Result<()> {
-        if p.offline {
-            return Ok(());
-        }
         let now = Date::now().as_millis();
         let next = p.deadline.or(p.last_reply.map(|r| r + 30_000));
         let due = if p.automatic {
@@ -151,6 +230,18 @@ impl RelayDevice {
             next.map_or(p.next_heartbeat.unwrap_or(now + 10_000), |deadline| {
                 deadline.min(p.next_heartbeat.unwrap_or(now + 10_000))
             })
+        };
+        let browser_due = self
+            .state
+            .get_websockets_with_tag(CLIENT_TAG)
+            .iter()
+            .filter_map(|s| self.live(s).map(|g| g.expires_at))
+            .min();
+        let due = match (p.offline, browser_due) {
+            (true, None) => return Ok(()),
+            (true, Some(expiry)) => expiry,
+            (false, Some(expiry)) => due.min(expiry),
+            (false, None) => due,
         };
         self.state
             .storage()
@@ -179,6 +270,11 @@ impl RelayDevice {
         self.schedule(p).await
     }
     async fn evaluate(&self) -> Result<Presence> {
+        for socket in self.state.get_websockets_with_tag(CLIENT_TAG) {
+            if self.live(&socket).is_none() {
+                self.close_client(&socket);
+            }
+        }
         let mut p = self.presence()?;
         let previous = p.clone();
         let now = Date::now().as_millis();
@@ -209,6 +305,15 @@ impl RelayDevice {
         Ok(p)
     }
     async fn disconnected(&self, socket: WebSocket) -> Result<()> {
+        if self
+            .state
+            .get_tags(&socket)
+            .iter()
+            .any(|tag| tag == CLIENT_TAG)
+        {
+            self.close_client(&socket);
+            return Ok(());
+        }
         let mut p = self.presence()?;
         if self.current(&socket, &p) && !p.offline {
             p.disconnected = true;
@@ -248,9 +353,46 @@ impl DurableObject for RelayDevice {
         state.set_websocket_auto_response(
             &worker_sys::WebSocketRequestResponsePair::new("oriel:ping", "oriel:pong").unwrap(),
         );
-        Self { state, env, cached }
+        let relay = Self {
+            state,
+            env,
+            cached,
+            revoked: RefCell::new(HashMap::new()),
+        };
+        for socket in relay.state.get_websockets_with_tag(CLIENT_TAG) {
+            if relay.live(&socket).is_none() {
+                relay.close_client(&socket);
+            }
+        }
+        relay
     }
-    async fn fetch(&self, req: Request) -> Result<Response> {
+    async fn fetch(&self, mut req: Request) -> Result<Response> {
+        if req.path() == "/internal/revoke" && req.method() == Method::Post {
+            #[derive(serde::Deserialize)]
+            struct Revocation {
+                session_hash: String,
+                expires_at: u64,
+            }
+            let revocation: Revocation = req.json().await?;
+            let hash = revocation.session_hash;
+            self.revoked
+                .borrow_mut()
+                .retain(|_, expiry| *expiry > Date::now().as_millis());
+            self.revoked
+                .borrow_mut()
+                .insert(hash.clone(), revocation.expires_at);
+            for socket in self.state.get_websockets_with_tag(CLIENT_TAG) {
+                if socket
+                    .deserialize_attachment::<TerminalSession>()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|g| g.session_hash == hash)
+                {
+                    self.close_client(&socket);
+                }
+            }
+            return Response::ok("OK");
+        }
         if req.path() == "/internal/terminal-status" {
             let p = self.evaluate().await?;
             return Response::ok(p.status(Date::now().as_millis()));
@@ -271,11 +413,48 @@ impl DurableObject for RelayDevice {
         if role == CLIENT_TAG && p.status(Date::now().as_millis()) != "online" {
             return Response::error("Terminal host unavailable or not confirmed", 409);
         }
+        let grant = if role == CLIENT_TAG {
+            let grant = req
+                .headers()
+                .get("X-Oriel-Terminal")?
+                .and_then(|v| serde_json::from_str::<TerminalSession>(&v).ok());
+            let Some(grant) = grant else {
+                return Response::error("Session required", 403);
+            };
+            if grant.device_id != parse_route(&path).unwrap().0
+                || grant.revoked
+                || Date::now().as_millis() >= grant.expires_at
+                || !self.authorized(&grant).await
+                || Date::now().as_millis() >= grant.expires_at
+            {
+                return Response::error("Session revoked", 403);
+            }
+            // No await between this check and attachment installation. A logout
+            // that deletes the session after this check will revoke this socket.
+            Some(grant)
+        } else {
+            None
+        };
+        let latest = self.presence()?;
+        if role == CLIENT_TAG
+            && (latest.generation != p.generation
+                || latest.status(Date::now().as_millis()) != "online")
+        {
+            return Response::error("Terminal host changed", 409);
+        }
         for socket in self.state.get_websockets_with_tag(role) {
-            let _ = socket.close(Some(1000), Some("Replaced by a newer connection"));
+            if role == CLIENT_TAG {
+                self.close_client(&socket);
+            } else {
+                let _ = socket.close(Some(1000), Some("Replaced by a newer connection"));
+            }
         }
         let pair = WebSocketPair::new()?;
         self.state.accept_websocket_with_tags(&pair.server, &[role]);
+        if let Some(grant) = grant {
+            pair.server.serialize_attachment(&grant)?;
+            self.schedule(&p).await?;
+        }
         if role == HOST_TAG {
             p.generation += 1;
             p.next_heartbeat = Some(Date::now().as_millis() + 10_000);
@@ -327,24 +506,47 @@ impl DurableObject for RelayDevice {
         if p.status(Date::now().as_millis()) != "online" {
             return Ok(());
         }
-        let tags = self.state.get_tags(&socket);
-        let target = if host {
-            CLIENT_TAG
-        } else if tags.iter().any(|t| t == CLIENT_TAG) {
-            HOST_TAG
+        let clients = if host {
+            self.state.get_websockets_with_tag(CLIENT_TAG)
+        } else if self.state.get_tags(&socket).iter().any(|t| t == CLIENT_TAG) {
+            vec![socket.clone()]
         } else {
             return Ok(());
         };
-        for socket in self.state.get_websockets_with_tag(target) {
-            if target == HOST_TAG && !self.current(&socket, &p) {
+        for client in clients {
+            let Some(grant) = self.live(&client) else {
+                self.close_client(&client);
+                continue;
+            };
+            if !self.authorized(&grant).await {
+                self.close_client(&client);
                 continue;
             }
-            match &message {
-                WebSocketIncomingMessage::String(text) => {
-                    let _ = socket.send_with_str(text);
-                }
-                WebSocketIncomingMessage::Binary(bytes) => {
-                    let _ = socket.send_with_bytes(bytes);
+            let latest = self.presence()?;
+            if self.live(&client).is_none()
+                || latest.generation != p.generation
+                || latest.status(Date::now().as_millis()) != "online"
+                || (host && !self.current(&socket, &latest))
+            {
+                continue;
+            }
+            let targets = if host {
+                vec![client]
+            } else {
+                self.state
+                    .get_websockets_with_tag(HOST_TAG)
+                    .into_iter()
+                    .filter(|s| self.current(s, &latest))
+                    .collect()
+            };
+            for target in targets {
+                match &message {
+                    WebSocketIncomingMessage::String(text) => {
+                        let _ = target.send_with_str(text);
+                    }
+                    WebSocketIncomingMessage::Binary(bytes) => {
+                        let _ = target.send_with_bytes(bytes);
+                    }
                 }
             }
         }

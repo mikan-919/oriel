@@ -278,6 +278,10 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           expires_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+        CREATE TABLE IF NOT EXISTS terminal_sessions (
+          session_hash TEXT NOT NULL, device_id TEXT NOT NULL, expires_at INTEGER NOT NULL, connection_id TEXT NOT NULL,
+          PRIMARY KEY(session_hash, device_id)
+        );
         CREATE TABLE IF NOT EXISTS challenges (
           hash TEXT PRIMARY KEY,
           purpose TEXT NOT NULL,
@@ -348,6 +352,18 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     let response: Response;
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/terminal-release" && request.method === "POST") {
+        const { session_hash, device_id, connection_id } = await request.json() as Record<string, string>;
+        this.sql.exec("DELETE FROM terminal_sessions WHERE session_hash = ? AND device_id = ? AND connection_id = ?", session_hash, device_id, connection_id);
+        return new Response(null, { status: 200 });
+      }
+      if (url.pathname === "/terminal-session" && request.method === "POST") {
+        const { session_hash, user_id, device_id } = await request.json() as Record<string, string>;
+        // Frame authorization must query current SQL authority on every call,
+        // rather than reuse AccountState's positive account lookup cache.
+        const valid = this.ctx.storage.sql.exec("SELECT 1 FROM sessions JOIN devices ON devices.user_id = sessions.user_id WHERE sessions.hash = ? AND sessions.user_id = ? AND devices.device_id = ? AND sessions.expires_at > ?", session_hash, user_id, device_id, now()).toArray().length;
+        return new Response(null, { status: valid ? 200 : 403 });
+      }
       if (url.pathname === "/terminal-change" && request.method === "POST") {
         const { device_id } = await request.json() as { device_id: string };
         const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", device_id).toArray()[0];
@@ -483,13 +499,15 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           break;
         case "POST /api/auth/logout": {
           await readBody(request);
-          const session = await this.session(request);
+          const sessionSecret = cookie(request, this.sessionCookie);
+          const sessionHash = sessionSecret && SECRET.test(sessionSecret) ? await hash(sessionSecret) : null;
           const secret = cookie(request, this.challengeCookie);
           const challengeHash = secret && SECRET.test(secret) ? await hash(secret) : null;
           this.accountState.transaction(() => {
-            if (session) this.sql.exec("DELETE FROM sessions WHERE hash = ?", session.hash);
+            if (sessionHash) this.sql.exec("DELETE FROM sessions WHERE hash = ?", sessionHash);
             if (challengeHash) this.sql.exec("DELETE FROM challenges WHERE hash = ?", challengeHash);
           });
+          if (sessionHash) await this.revokeTerminal(sessionHash);
           this.workflows.publish();
           response = json({ ok: true }, 200, [
             this.setCookie(this.sessionCookie, "", 0), this.setCookie(this.challengeCookie, "", 0),
@@ -629,6 +647,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private cleanupExpired(): void {
     this.sql.exec("DELETE FROM challenges WHERE expires_at <= ?", now());
     this.sql.exec("DELETE FROM sessions WHERE expires_at <= ?", now());
+    this.sql.exec("DELETE FROM terminal_sessions WHERE expires_at <= ?", now() * 1000);
   }
 
   private async storeChallenge(
@@ -680,6 +699,19 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private async newSession(): Promise<{ secret: string; hash: string }> {
     const secret = randomSecret();
     return { secret, hash: await hash(secret) };
+  }
+
+  private async revokeTerminal(sessionHash: string): Promise<void> {
+    // Register before issuing an upgrade grant; delete the session before notifying.
+    // Keep rows on failure so the original cookie can retry logout after deletion.
+    const rows = this.sql.exec<{device_id: string; expires_at: number}>("SELECT device_id, expires_at FROM terminal_sessions WHERE session_hash = ?", sessionHash).toArray();
+    for (const row of rows) {
+      const response = await this.env.RELAY.get(this.env.RELAY.idFromName(row.device_id)).fetch(new Request("https://internal/internal/revoke", {
+        method: "POST", body: JSON.stringify({ session_hash: sessionHash, expires_at: row.expires_at }),
+      }));
+      if (!response.ok) fail(503, "Terminal session revocation unavailable; retry logout");
+    }
+    this.sql.exec("DELETE FROM terminal_sessions WHERE session_hash = ?", sessionHash);
   }
 
   private persistSession(user: User, sessionHash: string, previous: Session | null): void {
@@ -742,6 +774,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       );
       this.persistSession(user, fresh.hash, session);
     });
+    if (session) await this.revokeTerminal(session.hash);
     return json({ user }, 200, [this.setCookie(this.sessionCookie, fresh.secret, SESSION_SECONDS)]);
   }
 
@@ -791,6 +824,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         info.newCounter, info.credentialDeviceType, Number(info.credentialBackedUp), credential.id);
       this.persistSession(user, fresh.hash, session);
     });
+    if (session) await this.revokeTerminal(session.hash);
     return json({ user }, 200, [this.setCookie(this.sessionCookie, fresh.secret, SESSION_SECONDS)]);
   }
 
@@ -901,6 +935,11 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       const session = await this.requireSession(request);
       const device = this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0];
       if (!device || device.user_id !== session.user.id) fail(403, "Device belongs to another account");
+      this.requireLiveSession(session);
+      const expiry = this.sql.exec<{expires_at: number}>("SELECT expires_at FROM sessions WHERE hash = ?", session.hash).toArray()[0];
+      const connection_id = crypto.randomUUID();
+      this.sql.exec("INSERT OR REPLACE INTO terminal_sessions VALUES (?, ?, ?, ?)", session.hash, id, expiry.expires_at * 1000, connection_id);
+      return new Response(null, { headers: { "X-Oriel-Terminal": JSON.stringify({ connection_id, session_hash: session.hash, user_id: session.user.id, device_id: id, expires_at: expiry.expires_at * 1000 }) } });
     }
     return json({ ok: true });
   }

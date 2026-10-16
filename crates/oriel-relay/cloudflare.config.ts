@@ -12,7 +12,8 @@ import {
 // without rotating either. Device pairing requires no manual credential input.
 // AccountRegistry persists auth/ownership and encrypted provider credentials;
 // RelayDevice persists no frames. Relay is the trusted integration credential custodian.
-// Authorization is checked before each upgrade; existing sockets end on close.
+// Terminal sockets belong to a live session: each frame is authorized, and
+// logout/expiry revoke existing sockets. See docs/terminal-session-authorization.md.
 // PUBLIC_ORIGIN is also the WebAuthn origin; changing it requires re-enrollment.
 // Development: .dev.vars PUBLIC_ORIGIN='http://localhost:3001', start both apps
 // with `npm run dev`, then ORIEL_RELAY_URL=http://localhost:8787 orield.
