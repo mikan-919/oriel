@@ -279,7 +279,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         );
         CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
         CREATE TABLE IF NOT EXISTS terminal_sessions (
-          session_hash TEXT NOT NULL, device_id TEXT NOT NULL,
+          session_hash TEXT NOT NULL, device_id TEXT NOT NULL, expires_at INTEGER NOT NULL, connection_id TEXT NOT NULL,
           PRIMARY KEY(session_hash, device_id)
         );
         CREATE TABLE IF NOT EXISTS challenges (
@@ -352,6 +352,11 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
     let response: Response;
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/terminal-release" && request.method === "POST") {
+        const { session_hash, device_id, connection_id } = await request.json() as Record<string, string>;
+        this.sql.exec("DELETE FROM terminal_sessions WHERE session_hash = ? AND device_id = ? AND connection_id = ?", session_hash, device_id, connection_id);
+        return new Response(null, { status: 200 });
+      }
       if (url.pathname === "/terminal-session" && request.method === "POST") {
         const { session_hash, user_id, device_id } = await request.json() as Record<string, string>;
         const valid = this.sql.exec("SELECT 1 FROM sessions JOIN devices ON devices.user_id = sessions.user_id WHERE sessions.hash = ? AND sessions.user_id = ? AND devices.device_id = ? AND sessions.expires_at > ?", session_hash, user_id, device_id, now()).toArray().length;
@@ -640,6 +645,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private cleanupExpired(): void {
     this.sql.exec("DELETE FROM challenges WHERE expires_at <= ?", now());
     this.sql.exec("DELETE FROM sessions WHERE expires_at <= ?", now());
+    this.sql.exec("DELETE FROM terminal_sessions WHERE expires_at <= ?", now() * 1000);
   }
 
   private async storeChallenge(
@@ -696,10 +702,10 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private async revokeTerminal(sessionHash: string): Promise<void> {
     // Register before issuing an upgrade grant; delete the session before notifying.
     // Keep rows on failure so the original cookie can retry logout after deletion.
-    const rows = this.sql.exec<{device_id: string}>("SELECT device_id FROM terminal_sessions WHERE session_hash = ?", sessionHash).toArray();
+    const rows = this.sql.exec<{device_id: string; expires_at: number}>("SELECT device_id, expires_at FROM terminal_sessions WHERE session_hash = ?", sessionHash).toArray();
     for (const row of rows) {
       const response = await this.env.RELAY.get(this.env.RELAY.idFromName(row.device_id)).fetch(new Request("https://internal/internal/revoke", {
-        method: "POST", body: sessionHash,
+        method: "POST", body: JSON.stringify({ session_hash: sessionHash, expires_at: row.expires_at }),
       }));
       if (!response.ok) fail(503, "Terminal session revocation unavailable; retry logout");
     }
@@ -929,8 +935,9 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       if (!device || device.user_id !== session.user.id) fail(403, "Device belongs to another account");
       this.requireLiveSession(session);
       const expiry = this.sql.exec<{expires_at: number}>("SELECT expires_at FROM sessions WHERE hash = ?", session.hash).toArray()[0];
-      this.sql.exec("INSERT OR IGNORE INTO terminal_sessions VALUES (?, ?)", session.hash, id);
-      return new Response(null, { headers: { "X-Oriel-Terminal": JSON.stringify({ session_hash: session.hash, user_id: session.user.id, device_id: id, expires_at: expiry.expires_at * 1000 }) } });
+      const connection_id = crypto.randomUUID();
+      this.sql.exec("INSERT OR REPLACE INTO terminal_sessions VALUES (?, ?, ?, ?)", session.hash, id, expiry.expires_at * 1000, connection_id);
+      return new Response(null, { headers: { "X-Oriel-Terminal": JSON.stringify({ connection_id, session_hash: session.hash, user_id: session.user.id, device_id: id, expires_at: expiry.expires_at * 1000 }) } });
     }
     return json({ ok: true });
   }

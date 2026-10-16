@@ -112,8 +112,28 @@ async function runtime(env = {}, outbound, measureSql = false) {
         if (url.pathname === "/__account-sql-for-test") return env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts")).fetch(new Request("https://internal/test-sql", request));
         if (url.pathname.startsWith("/api/")) {
       `);
+      modules[name].contents = modules[name].contents
+        .replace('return new Response(null, { status: valid ? 200 : 403 });', 'await this.terminalGateForTest("frame"); if (this.terminalFailureForTest) return new Response(null, {status:503}); return new Response(null, { status: valid ? 200 : 403 });')
+        .replace(/return new Response\(null, \{\s*headers: \{\s*"X-Oriel-Terminal":/, match => 'await this.terminalGateForTest("upgrade"); ' + match)
+        .replace('async revokeTerminal(sessionHash) {', 'async revokeTerminal(sessionHash) { if (this.revocationFailureForTest) fail(503, "Test notification failure");');
       modules[name].contents = modules[name].contents.replace("sql = this.accountState.sql;", `
         sql = this.accountState.sql;
+        revocationFailureForTest = false;
+        failRevocationForTest(value) { this.revocationFailureForTest = value; }
+        terminalFailureForTest = false;
+        terminalGatePointForTest = null;
+        terminalGateEnteredForTest = false;
+        terminalGateReleaseForTest = null;
+        setTerminalGateForTest(point) { this.terminalGatePointForTest = point; this.terminalGateEnteredForTest = false; }
+        terminalGateStatusForTest() { return this.terminalGateEnteredForTest; }
+        releaseTerminalGateForTest() { this.terminalGateReleaseForTest?.(); this.terminalGateReleaseForTest = null; }
+        failTerminalForTest(value) { this.terminalFailureForTest = value; }
+        async terminalGateForTest(point) {
+          if (this.terminalGatePointForTest !== point) return;
+          this.terminalGatePointForTest = null;
+          this.terminalGateEnteredForTest = true;
+          await new Promise(resolve => { this.terminalGateReleaseForTest = resolve; });
+        }
         accountSqlForTest(query, bindings) { return this.sql.exec(query, ...bindings).toArray(); }
         rollbackForTest(query, bindings, lookup, arguments_) {
           try { this.accountState.transaction(() => { this.sql.exec(query, ...bindings); this.sql.exec(lookup, ...arguments_).toArray(); throw Error("rollback"); }); }
