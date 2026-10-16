@@ -456,6 +456,7 @@ test("changed approvals and failures return to Triage with reasons and require h
     const returned = (await s.snapshot()).workflows[0];
     assert.equal((await s.message({ type: "claim", kind: "implement", issue_number: 42, version: returned.version, branch: returned.branch })).type, "rejected");
     how.state = { ...s.fixture.states.find(state => state.id === "todo") };
+    assert.equal((await s.snapshot()).workflows[0].version, beforeFailure.version);
     const reapproved = await s.claim("implement");
     assert.equal((await s.action(reapproved, "begin")).status, 200);
     assert.equal((await s.snapshot()).workflows[0].canonical_oid, beforeFailure.canonical_oid);
@@ -474,6 +475,7 @@ test("a failed review returns to Triage with the required decision while retaini
     assert.equal((await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified implementation" })).status, 200);
     await s.message({ type: "release", lease_id: implementation });
     s.fixture.checks.push({ id: 1, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2026-01-01T00:00:01.000Z", output: { title: "Failure", summary: "Fix actual behavior", text: null } });
+    const beforeFailure = (await s.snapshot()).workflows[0];
     const response = await s.claim("respond");
     const reason = "公開認証方式が未確定です。トークン認証か信頼された発行元を選び、HOWに記載してください。";
     const failure = await s.action(response, "fail", { category: "needs-human", reason });
@@ -490,12 +492,15 @@ test("a failed review returns to Triage with the required decision while retaini
     assert.match(waiting.blocked_reason, /human Todo reapproval/);
     const denied = await s.message({ type: "claim", kind: "respond", issue_number: 42, version: waiting.version, branch: waiting.branch });
     assert.equal(denied.type, "rejected", "Failure and an existing PR do not infer renewed approval");
+    assert.equal((await s.snapshot()).workflows[0].phase, "triage");
     how.state = { ...s.fixture.states.find(state => state.id === "todo") };
     const renewed = (await s.snapshot()).workflows[0];
     assert.equal(renewed.phase, "review");
     assert.equal(renewed.pull_request.number, s.fixture.pulls[0].number);
     assert.equal(renewed.branch, row.branch);
     assert.equal(renewed.feedback.kind, "check_failure");
+    assert.equal(renewed.version, beforeFailure.version);
+    assert.equal(renewed.feedback.key, beforeFailure.feedback.key);
     const repair = await s.claim("respond");
     assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: repair }, hostHeaders)).status, 200);
     assert.equal((await s.action(repair, "responded", { head_oid: head, verified: true, feedback_key: renewed.feedback.key, summary: "Verified after human reapproval" })).status, 200);

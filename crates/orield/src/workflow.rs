@@ -2455,7 +2455,11 @@ async fn scan_inner(
                         return Err(reflection
                             .context(format!("could not record workflow failure: {error:#}")));
                     }
-                    suppressed.insert(identity, format!("{error:#}"));
+                    // Code failures are stopped by Relay's confirmed Triage state.
+                    // A human may reapprove identical content before our next scan.
+                    if !matches!(kind, "implement" | "respond") {
+                        suppressed.insert(identity, format!("{error:#}"));
+                    }
                 }
             }
             session.progress("paused").await?;
@@ -2881,6 +2885,162 @@ mod tests {
                 .unwrap()
                 .unwrap();
             fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn failed_work<'a>(
+        _: &'a mut Session,
+        _: &'a Path,
+        _: &'a Snapshot,
+        _: &'a Row,
+        _: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(anyhow!("implementation failed")) })
+    }
+
+    #[tokio::test]
+    async fn failed_code_scans_resume_only_after_reapproval() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for kind in ["implement", "respond", "plan"] {
+            for observe_triage in [false, true] {
+                for reflection_fails in [false, true] {
+                    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let endpoint =
+                        Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+                    let provider = tokio::spawn(async move {
+                        let mut reports = 0;
+                        while let Ok((mut stream, _)) = http.accept().await {
+                            let mut buffer = [0; 8192];
+                            let size = stream.read(&mut buffer).await.unwrap();
+                            let request = String::from_utf8_lossy(&buffer[..size]);
+                            assert!(request.contains("\"action\":\"fail\""));
+                            reports += 1;
+                            let status = if reflection_fails {
+                                "502 Bad Gateway"
+                            } else {
+                                "200 OK"
+                            };
+                            stream.write_all(format!(
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                            ).as_bytes()).await.unwrap();
+                        }
+                        reports
+                    });
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let url = format!("ws://{}", listener.local_addr().unwrap());
+                    let active = match kind {
+                        "respond" => "review",
+                        "plan" => "needs-how",
+                        _ => "approved",
+                    };
+                    let phases = if reflection_fails {
+                        vec![active]
+                    } else if observe_triage {
+                        vec![active, "triage", "triage", active, "triage", "triage"]
+                    } else {
+                        vec![active, active, "triage", "triage"]
+                    };
+                    let scans = phases.len();
+                    let ownership = tokio::spawn(async move {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                        let mut phases = phases.into_iter();
+                        let mut claims = 0;
+                        let mut releases = 0;
+                        while let Some(Ok(Message::Text(text))) = socket.next().await {
+                            let request: Value = serde_json::from_str(&text).unwrap();
+                            let mut reply = json!({"request_id":request["request_id"]});
+                            reply["type"] = json!(match request["type"].as_str().unwrap() {
+                                "snapshot" => {
+                                    let phase = phases.next().unwrap();
+                                    reply["snapshot"] = json!({
+                                        "repository":{"owner":"octocat","name":"connected"},
+                                        "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+                                        "target_oid":"1111111111111111111111111111111111111111",
+                                        "configuration":{"autonomous":true,"verification":[["true"]],"error":null},
+                                        "workflows":[{
+                                            "issue":{"number":42,"title":"WHAT","body":null,"url":"https://example.com"},
+                                            "what_comments":[],"how_comments":[],
+                                            "version":"same-approval","phase":phase,
+                                            "feedback": if kind == "respond" { json!({"key":"same-feedback","kind":"review","body":"Fix it","comments":[]}) } else { Value::Null }
+                                        }]
+                                    });
+                                    "snapshot"
+                                }
+                                "claim" => {
+                                    claims += 1;
+                                    assert_eq!(request["kind"], kind);
+                                    reply["lease_id"] = json!("lease");
+                                    "granted"
+                                }
+                                "check" => {
+                                    reply["lease_id"] = json!("lease");
+                                    "checked"
+                                }
+                                "heartbeat" => "heartbeat",
+                                "progress" => "progressed",
+                                "release" => {
+                                    releases += 1;
+                                    "released"
+                                }
+                                _ => panic!("unexpected request {request}"),
+                            });
+                            socket
+                                .send(Message::Text(reply.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
+                        (claims, releases)
+                    });
+                    let (socket, _) = connect_async(url).await.unwrap();
+                    let mut session = Session {
+                        client: Client::new(),
+                        endpoint,
+                        socket,
+                        repository: Repository {
+                            owner: "octocat".into(),
+                            name: "connected".into(),
+                        },
+                        lease: None,
+                        changed: false,
+                        exchange_pending: false,
+                        scan_interval: SCAN_INTERVAL,
+                        snapshot_http: false,
+                        verification_metadata: false,
+                    };
+                    let mut suppressed = HashMap::new();
+                    for _ in 0..scans {
+                        let result = scan(
+                            &mut session,
+                            Path::new("."),
+                            &mut suppressed,
+                            &mut Console::default(),
+                            failed_work,
+                        )
+                        .await;
+                        if reflection_fails {
+                            assert!(
+                                format!("{:#}", result.unwrap_err())
+                                    .contains("could not record workflow failure")
+                            );
+                        } else {
+                            result.unwrap();
+                        }
+                    }
+                    let expected = if reflection_fails || kind == "plan" && !observe_triage {
+                        1
+                    } else {
+                        2
+                    };
+                    assert!(suppressed.is_empty());
+                    drop(session);
+                    assert_eq!(
+                        ownership.await.unwrap(),
+                        (expected, if reflection_fails { 0 } else { expected })
+                    );
+                    provider.abort();
+                }
+            }
         }
     }
 
