@@ -55,18 +55,34 @@ races, idle expiry with/without hibernation, account lookup failure, retry after
 notification failure, session replacement/isolation, stale host generation and
 per-frame SQL accounting. Existing relay and host presence tests remain required.
 
+## Verification repair: idle WebSocket closing handshake
+
+The host's first full relay run passed 103 tests but timed out six terminal
+lifecycle tests. A real HTTP WebSocket client confirmed that Workerd promptly
+sent the expected 4003 close frame for an idle hibernatable browser, while TCP
+teardown remained pending. Miniflare's dispatchFetch socket exposes the close
+event after its underlying Node ws closing handshake, whose default timeout is
+30 seconds; the regression tests have a 15-second deadline.
+
+The six affected cases now use a real HTTP ws client with a one-second closing
+handshake timeout. This timer starts only when closing begins, so it cannot make
+a missing revocation or expiry notification pass. Each case now also requires
+close code 4003; abnormal termination (1006) fails. No initial terminal frame is
+sent to warm the connection, preserving idle-expiry and idle-revocation coverage.
+The existing Miniflare transport remains covered by the other terminal tests,
+including text/binary forwarding and the controlled logout races. The direct ws
+test dependency is pinned to the version already present in the package lock.
+
 Implementation-worktree checks:
 
-- `cargo clippy -p oriel-relay --target wasm32-unknown-unknown --locked -- -D warnings`: passed.
-- `cargo test -p oriel-relay --lib --locked --offline`: both Rust unit tests passed.
-- TypeScript esbuild transforms, test JavaScript syntax and test injection anchors: passed.
-- `npm ci --offline`: esbuild install validation was denied by the sandbox;
-  `npm ci --offline --ignore-scripts` succeeded.
-- `npm run build`: blocked because wasm-bindgen 0.2.129 is not installed in the
-  available worker-build cache and its download cannot resolve the network host.
-  Build output was therefore unavailable; the relay/presence Node test invocation
-  failed and is not claimed as passing.
+- `cargo clippy -p oriel-relay --target wasm32-unknown-unknown --locked --offline -- -D warnings`: passed.
+- `npm --prefix crates/oriel-relay test`: all 109 tests passed, with zero failures,
+  cancellations or skips (134.6 seconds), using the generated Worker output
+  prepared by the trusted host. This includes the six repaired lifecycle tests,
+  relay tests, presence tests, controlled races and per-frame SQL accounting.
+- `npm run build` in this repair sandbox could not create the worker-build cache
+  under the read-only home directory. No production Rust or TypeScript changed
+  during the verification repair.
 
-The trusted host must build and run `npm test` in `crates/oriel-relay` with its
-normal cached build tools before publishing these commits. Review, merge and
-release remain owner steps.
+The trusted host rebuilds and runs all configured verification before publishing
+these commits. Review, merge and release remain owner steps.
