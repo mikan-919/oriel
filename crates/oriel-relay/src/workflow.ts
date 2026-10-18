@@ -28,7 +28,7 @@ export type LinearHow = { id: string; identifier: string; title: string; descrip
 export type PullRequest = { number: number; url: string; branch: string; head_oid: string; base_branch: string; state: "open" | "closed"; merged: boolean; draft: boolean };
 export type Feedback = { key: string; kind: "review" | "comment" | "check_failure"; body: string; comments: { path: string | null; line: number | null; body: string }[] };
 export type DiscussionComment = { id: string; body: string; author: string | null; created_at: string };
-export type WorkflowCI = { head_oid: string; status: "success" | "failure" | "pending" | "unknown";
+export type WorkflowCI = { acquisition?: "received" | "unavailable"; fetched_at?: string; head_oid: string; status: "success" | "failure" | "pending" | "unknown";
   checks: { name: string; status: "success" | "failure" | "pending" | "unknown" | "skipped"; url: string | null }[] };
 export type WorkflowRow = {
   issue: GithubWhat; linear: LinearHow | null; version: string; fingerprint: string | null;
