@@ -18,6 +18,12 @@ export function workflowFixture() {
     compare: undefined, sealSupported: true, trees: new Map(),
     annotations: new Map(), actionJobs: new Map(), jobLogs: new Map(), logStorage: "https://pipelines.actions.githubusercontent.com",
   });
+  fixture.addCheck = (overrides = {}) => {
+    const check = { app: { id: 101 }, id: 1, name: "test", head_sha: "2".repeat(40), status: "completed", conclusion: "failure",
+      completed_at: "2026-01-01T00:00:01.000Z", output: { title: "Failure", summary: "Fix actual behavior", text: null }, ...overrides };
+    fixture.checks.push(check);
+    return check;
+  };
   fixture.addHow = (state = "Todo", number = 42) => {
     const how = {
       id: "11111111-1111-5111-a111-111111111111", identifier: "ENG-42", title: "Implement the HOW", description: "Change source and verify the requested behavior.",

@@ -474,7 +474,7 @@ test("a failed review returns to Triage with the required decision while retaini
     const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
     assert.equal((await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified implementation" })).status, 200);
     await s.message({ type: "release", lease_id: implementation });
-    s.fixture.checks.push({ id: 1, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2026-01-01T00:00:01.000Z", output: { title: "Failure", summary: "Fix actual behavior", text: null } });
+    s.fixture.checks.push({ app: { id: 101 }, id: 1, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2026-01-01T00:00:01.000Z", output: { title: "Failure", summary: "Fix actual behavior", text: null } });
     const beforeFailure = (await s.snapshot()).workflows[0];
     const response = await s.claim("respond");
     const reason = "公開認証方式が未確定です。トークン認証か信頼された発行元を選び、HOWに記載してください。";
@@ -665,19 +665,80 @@ test("current review facts and signed response cursors bound each failed check t
     await s.message({ type: "release", lease_id: responding });
     assert.equal((await s.snapshot()).workflows[0].feedback, null);
     for (let attempt = 1; attempt <= 3; attempt++) {
-      s.fixture.checks.push({ id: attempt, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: `2026-01-01T00:00:0${attempt}.000Z`, output: { title: "Failure", summary: "Fix actual behavior", text: null } });
+      s.fixture.checks.push({ app: { id: 101 }, id: attempt, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: `2026-01-01T00:00:0${attempt}.000Z`, output: { title: "Failure", summary: "Fix actual behavior", text: null } });
       const feedback = (await s.snapshot()).workflows[0].feedback; assert.equal(feedback.kind, "check_failure");
       const lease = await s.claim("respond");
       const response = await s.action(lease, "responded", { head_oid: head, verified: true, feedback_key: feedback.key, summary: `Verified attempt ${attempt}` });
       assert.equal(response.status, 200, JSON.stringify(response.data));
       await s.message({ type: "release", lease_id: lease });
     }
-    s.fixture.checks.push({ id: 4, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2026-01-01T00:00:04.000Z", output: { title: "Failure", summary: "Still failing", text: null } });
+    s.fixture.checks.push({ app: { id: 101 }, id: 4, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2026-01-01T00:00:04.000Z", output: { title: "Failure", summary: "Still failing", text: null } });
     const exhausted = (await s.snapshot()).workflows[0]; assert.equal(exhausted.feedback, null); assert.match(exhausted.blocked_reason, /3 verified attempts/);
     const rejected = await s.message({ type: "claim", kind: "respond", issue_number: 42, version: exhausted.version, branch: exhausted.branch }); assert.equal(rejected.type, "rejected");
-    s.fixture.checks.push({ id: 5, name: "required-test", head_sha: head, status: "completed", conclusion: "success", completed_at: "2099-01-01T00:00:00.000Z", output: { title: null, summary: null, text: null } });
-    s.fixture.checks.push({ id: 6, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2099-01-01T00:00:01.000Z", output: { title: "New regression", summary: "Fresh failure after success", text: null } });
+    s.fixture.checks.push({ app: { id: 101 }, id: 5, name: "required-test", head_sha: head, status: "completed", conclusion: "success", completed_at: "2099-01-01T00:00:00.000Z", output: { title: null, summary: null, text: null } });
+    s.fixture.checks.push({ app: { id: 101 }, id: 6, name: "required-test", head_sha: head, status: "completed", conclusion: "failure", completed_at: "2099-01-01T00:00:01.000Z", output: { title: "New regression", summary: "Fresh failure after success", text: null } });
     assert.equal((await s.snapshot()).workflows[0].feedback.kind, "check_failure", "Actual success resets the externally reconstructed retry streak");
+  } finally { await s.close(); }
+});
+
+test("same-name checks keep App identity through display, reruns and signed history recovery", { timeout: 60000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const lease = await s.claim("implement");
+    assert.equal((await s.action(lease, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(lease, "publish", { head_oid: head, verified: true, summary: "Verified" });
+    assert.equal(published.status, 200); await s.message({ type: "release", lease_id: lease });
+    const failure = s.fixture.addCheck();
+    const other = s.fixture.addCheck({ app: { id: 202 }, id: 2, conclusion: "success" });
+    const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const expected = `check:${hash(JSON.stringify(["check-run", 101, "test"]))}:1:${head}`;
+    for (const checks of [[failure, other], [other, failure]]) {
+      s.fixture.checks = checks;
+      const current = (await s.snapshot()).workflows[0];
+      assert.equal(current.ci.status, "failure"); assert.equal(current.ci.checks.length, 2);
+      assert.equal(current.feedback.key, expected);
+    }
+    const rerun = s.fixture.addCheck({ id: 3, conclusion: "success" });
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    rerun.status = "in_progress"; rerun.conclusion = null;
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    assert.equal((await s.snapshot()).workflows[0].ci.status, "pending");
+    rerun.head_sha = "9".repeat(40);
+    assert.equal((await s.snapshot()).workflows[0].feedback.key, expected);
+
+    // Legacy signed keys carry no App ID. Recover them from runs on past response heads.
+    const oldHead = "8".repeat(40);
+    const comments = s.fixture.comments.get(published.data.pull_request.number) ?? [];
+    const marker = (kind, key) => {
+      const signature = createHmac("sha256", Buffer.from(s.fixture.env.INTEGRATION_ENCRYPTION_KEY, "hex"))
+        .update(JSON.stringify(["oriel/workflow-cursor/v1", 501, "team", kind, key])).digest("base64url");
+      return `<!-- oriel:${kind}:${Buffer.from(key).toString("base64url")}:${signature} -->`;
+    };
+    for (let id = 10; id < 13; id++) {
+      s.fixture.addCheck({ id, head_sha: oldHead });
+      const key = `check:${hash("test")}:${id}:${oldHead}`;
+      comments.push({ id: 100 + id, user: { login: "oriel", type: "Bot" }, created_at: "2026-02-01T00:00:00Z",
+        body: marker("response", key) + marker("response-head", `${key}:${oldHead}`) });
+    }
+    s.fixture.comments.set(published.data.pull_request.number, comments);
+    assert.equal((await s.snapshot()).workflows[0].feedback, null, "Other App success cannot reset App 101 attempts");
+    other.conclusion = "failure";
+    assert.equal((await s.snapshot()).workflows[0].feedback.key.split(":")[2], "2", "App 101 exhaustion cannot block App 202");
+    s.fixture.statuses.push({ id: 1, context: "test", state: "failure", description: "Status failure", created_at: "2026-02-02T00:00:00Z" });
+    other.conclusion = "success";
+    assert.match((await s.snapshot()).workflows[0].feedback.key, /:status-1:/, "Commit Status attempts are separate");
+    s.fixture.statuses = [];
+    s.fixture.addCheck({ id: 20, conclusion: "neutral", completed_at: "2099-01-01T00:00:00Z" });
+    s.fixture.addCheck({ id: 21 });
+    assert.equal((await s.snapshot()).workflows[0].feedback.key.split(":")[2], "21", "Own successful history resets attempts");
+    s.fixture.checks.find(check => check.id === 10).app = null;
+    const unresolved = (await s.snapshot()).workflows[0];
+    assert.equal(unresolved.feedback, null); assert.match(unresolved.blocked_reason, /history origin unavailable/);
+    comments.length = 0;
+    s.fixture.checks = [s.fixture.addCheck({ id: 30, app: null })];
+    const missing = (await s.snapshot()).workflows[0];
+    assert.equal(missing.ci.status, "failure"); assert.equal(missing.feedback, null); assert.match(missing.blocked_reason, /App ID unavailable/);
   } finally { await s.close(); }
 });
 
@@ -690,8 +751,9 @@ test("failed PR Actions resume with current job steps, annotations and a bounded
     const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
     const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" });
     assert.equal(published.status, 200); await s.message({type:"release",lease_id:implementation});
-    s.fixture.checks.push({id: 10, name:"test", head_sha:head, status:"completed", conclusion:"failure", completed_at:"2026-01-01T00:00:00Z",
+    s.fixture.checks.push({app: { id: 101 }, id: 10, name:"test", head_sha:head, status:"completed", conclusion:"failure", completed_at:"2026-01-01T00:00:00Z",
       details_url:"https://github.com/octocat/connected/actions/runs/20/job/30", output:{title:"Tests failed",summary:null,text:null}});
+    s.fixture.addCheck({ app: { id: 202 }, id: 200, conclusion: "success", name: "test" });
     s.fixture.annotations.set(10, [{path:"src/lib.rs", start_line:7, annotation_level:"failure", message:"Expected true, got false", raw_details:"Assertion failed"}]);
     s.fixture.actionJobs.set(30, {id:30, run_id:20, head_sha:head, check_run_url:"https://api.github.com/repos/octocat/connected/check-runs/10", name:"cargo tests", status:"completed", conclusion:"failure",
       steps:[{number:1,name:"Checkout",conclusion:"success"},{number:2,name:"cargo test --workspace",conclusion:"failure"}]});
