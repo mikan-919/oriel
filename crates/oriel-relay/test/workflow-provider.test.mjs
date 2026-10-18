@@ -687,6 +687,12 @@ test("same-name checks keep App identity through display, reruns and signed hist
     const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
     const published = await s.action(lease, "publish", { head_oid: head, verified: true, summary: "Verified" });
     assert.equal(published.status, 200); await s.message({ type: "release", lease_id: lease });
+    const empty = (await s.snapshot()).workflows[0];
+    assert.equal(empty.phase,"review");
+    assert.equal(empty.ci.acquisition,"received");
+    assert.equal(empty.ci.head_oid,head);
+    assert.deepEqual(empty.ci.checks,[]);
+    assert.ok(Date.parse(empty.ci.fetched_at));
     const failure = s.fixture.addCheck();
     const other = s.fixture.addCheck({ app: { id: 202 }, id: 2, conclusion: "success" });
     const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");

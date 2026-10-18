@@ -12,7 +12,7 @@ export function workflowState(row, progress, live) {
 export function currentCI(row) {
     if (row.pull_request?.head_oid && row.ci?.head_oid === row.pull_request.head_oid && ["success","failure","pending","unknown"].includes(row.ci?.status)) return row.ci;
     if (row.feedback?.kind === "check_failure" && row.pull_request?.head_oid && row.feedback.key?.endsWith(":"+row.pull_request.head_oid)) return {status:"failure",checks:[]};
-    return {status:"unknown",checks:[]};
+    return {status:"unknown",checks:[],acquisition:"unavailable",head_oid:row.pull_request?.head_oid};
 }
 export function verificationEvidence(row, snapshot, progress, live) {
     const value=progress?.verification;
@@ -28,7 +28,7 @@ export function verificationEvidence(row, snapshot, progress, live) {
     if(JSON.stringify(value.commands)!==JSON.stringify(snapshot?.configuration?.verification))reasons.push("現在と検証設定が異なります");
     if(value.head_oid!==(row.pull_request?.head_oid??row.canonical_oid))reasons.push("現在のPRとは異なるコミット（push前を含む）");
     if(value.execution_id!==progress?.execution_id)reasons.push("保存した実行の結果");
-    if(!live&&value.status==="running")reasons.push("最後に受信した進捗・現在は未確認");
+    if((!live || value.execution_id!==progress?.execution_id || progress?.task?.issue_number!==row.issue.number)&&value.status==="running")reasons.push("最後に受信した進捗・現在は未確認");
     return {value,reason:reasons.join(" · "),current:reasons.length===0};
 }
 export function currentVerification(row, snapshot, progress, live) {
@@ -63,7 +63,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
             get("primary").removeAttribute("href");return;
         }
         const info=state(row),ci=currentCI(row);
-        const received=evidence.get(row.issue.number);
+        const received=evidence.get(row.issue.number) ?? (!model.progress?.verification?.execution_id ? model.progress?.verification : undefined);
         const observation=verificationEvidence(row,model.snapshot,{...model.progress,verification:received},model.live);
         const verification=observation.value;
         get("number").textContent="WHAT #"+row.issue.number;get("how-number").textContent=row.linear?"HOW "+row.linear.identifier:"HOWを未作成";
@@ -87,15 +87,17 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         if(row.blocked_reason&&row.phase!=="waiting-how")next[1]=row.blocked_reason;
         get("next").className="next-action"+(info.group==="waiting"?" waiting":"");get("next-title").textContent=next[0];get("next-copy").textContent=next[1];
         const statuses={success:["✓ 成功","green"],failure:["× 失敗","red"],running:["実行中","green"],pending:["実行待ち・実行中","amber"],unknown:["未取得","neutral"],empty:["CI結果なし","neutral"]};
-        const verificationPaused=verification?.status==="running"&&model.progress?.state==="paused";
-        badge("local-badge",...(!model.live&&verification?.status==="running"?["進捗未確認","neutral"]:verificationPaused?["一時停止","amber"]:statuses[verification?.status||"unknown"]));
+        const unconfirmed=verification?.status==="running"&&(!model.live||verification.execution_id!==model.progress?.execution_id||model.progress?.task?.issue_number!==row.issue.number);
+        const verificationPaused=!unconfirmed&&verification?.status==="running"&&model.progress?.state==="paused";
+        badge("local-badge",...(unconfirmed?["進捗未確認","neutral"]:verificationPaused?["一時停止","amber"]:statuses[verification?.status||"unknown"]));
         const local=get("local-checks");local.replaceChildren();
         if(verification) {
             local.append(checkRow("設定した検証コマンド",verification.completed+" / "+verification.total+" 件完了"));
-            for(const [index,argv] of (verification.commands||[]).entries())local.append(checkRow(argv.join(" "),index<verification.completed?"成功":index===verification.completed&&verification.status==="failure"?"失敗":index===verification.completed&&verification.status==="running"?verificationPaused?"一時停止":"実行中":"未実行"));
+            for(const [index,argv] of (verification.commands||[]).entries())local.append(checkRow(argv.join(" "),index<verification.completed?"成功":index===verification.completed&&verification.status==="failure"?"失敗":index===verification.completed&&verification.status==="running"?unconfirmed?"最後の進捗・未確認":verificationPaused?"一時停止":"実行中":"未実行"));
         } else local.append(node("p",observation.reason,"check-note"));
         get("local-note").textContent=verification?"検証したコミット: "+verification.head_oid.slice(0,12)+" · 作業 #"+verification.issue_number+" · 実行 "+verification.execution_id+" · 設定 "+verification.configuration_id+" · 基準 "+verification.target_oid+" · "+observation.reason+" · "+new Date(verification.updated_at).toLocaleString("ja-JP"):"端末側の検証とGitHub CIは、確認する工程が異なります。";
         badge("ci-badge",...statuses[ci.acquisition==="received"&&!ci.checks?.length?"empty":ci.status]);get("ci-checks").replaceChildren();
+        if(ci.head_oid)get("ci-checks").append(node("p","対象コミット: "+ci.head_oid+" · "+(ci.fetched_at?new Date(ci.fetched_at).toLocaleString("ja-JP"):"取得時刻は不明"),"check-note"));
         for(const check of ci.checks||[]) {const item=checkRow(check.name,{success:"成功",failure:"失敗",pending:"実行中",skipped:"省略",unknown:"未取得"}[check.status]||"未取得");if(check.url){const title=link(check.name+" ↗",check.url,"github.com");if(title.hasAttribute("href"))item.firstChild.replaceWith(title);}get("ci-checks").append(item);}
         if(!ci.checks?.length)get("ci-checks").append(node("p",ci.acquisition==="received"?"CI結果なし（取得成功・検査0件）。起動されなかった理由は不明です。":row.pull_request?"CIを取得できません。取得経路または対象コミットを確認してください。":"PRがまだないため、CIの結果はありません。","check-note"));
         get("failure").hidden=row.feedback?.kind!=="check_failure";get("failure-body").textContent=row.feedback?.body||"";
@@ -132,7 +134,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
     get("device").addEventListener("change",()=>onDevice(get("device").value));get("create").addEventListener("click",onCreate);
     get("codex").addEventListener("click",()=>onCodex(false));get("control").addEventListener("click",()=>onCodex(true));
     return {update(next) {
-        const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify(next.snapshot?.repository||null);
+        const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify([next.snapshot?.repository_id,next.snapshot?.repository]);
         if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
         if(next.progress?.generation)generation=next.progress.generation;
         model=next;

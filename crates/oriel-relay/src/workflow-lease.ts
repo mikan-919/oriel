@@ -357,13 +357,16 @@ export class WorkflowLeases {
               !Number.isSafeInteger(value.completed) || (value.completed as number) < 0 || (value.completed as number) > (value.total as number) ||
               (!attachment.grant.execution || value.target_oid !== attachment.grant.execution.target_oid || value.total !== attachment.grant.execution.verification.length) ||
               value.status === "success" && value.completed !== value.total) throw new Error();
+          const configurationId = await digest(attachment.grant.execution!.verification);
+          const current = this.live(ws);
+          if (!sameBinding(binding, current.binding) || current.grant?.lease_id !== attachment.grant.lease_id) throw new WorkflowLeaseError();
           attachment.verification = { ...value,
             execution_id: attachment.grant.lease_id,
             repository: `${binding.repository.owner}/${binding.repository.name}`,
             device_id: binding.device_id,
             generation: binding.repository_generation,
             commands: attachment.grant.execution!.verification,
-            configuration_id: await digest(attachment.grant.execution!.verification),
+            configuration_id: configurationId,
             issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
         }
         if (attachment.stage === request.stage && request.verification === undefined) {

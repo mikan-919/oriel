@@ -410,6 +410,7 @@ export class WorkflowReader {
   }
 
   protected async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[], ci?: { value?: WorkflowCI }): Promise<Feedback | null> {
+    if (ci) ci.value = {head_oid:pr.head_oid, acquisition:"unavailable", fetched_at:new Date().toISOString(), status:"unknown", checks:[]};
     const currentChecks: Check[] = [];
     for (let page = 1; ; page++) {
       const result = await this.workflowGithub<{ check_runs: Check[] }>(context, `${context.path}/commits/${pr.head_oid}/check-runs?filter=all&per_page=100&page=${page}`);

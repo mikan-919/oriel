@@ -99,7 +99,7 @@
     .check-group+.check-group { border-top:1px solid var(--line); }
     .check-title { display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center; margin-bottom:10px; }
     .check-title h3 { font-size:12px; margin:0; }
-    .check-note { font-size:11px; color:var(--muted); margin:5px 0 0; }
+    .check-note { overflow-wrap:anywhere; font-size:11px; color:var(--muted); margin:5px 0 0; }
     .check-row { display:flex; flex-wrap:wrap; justify-content:space-between; gap:7px; padding:5px 0; font-size:11px; }
     .check-row code { font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
     .passed { color:var(--green); }

@@ -98,7 +98,7 @@ async function watch(worker, owner) {
     assert.equal(frame.poll_after_seconds, 60);
     assert.equal(frame.type, "workflow-progress");
     for (const device of frame.devices) {
-      assert.deepEqual(Object.keys(device).filter(key=>key!=="verification").sort(), ["device_id", "stage", "state", "task", "updated_at"]);
+      assert.deepEqual(Object.keys(device).filter(key=>!["verification","execution_id","generation"].includes(key)).sort(), ["device_id", "stage", "state", "task", "updated_at"]);
       if (device.task) assert.deepEqual(Object.keys(device.task).sort(),
         ["how_identifier", "how_url", "issue_number", "repository", "title", "url"]);
     }
@@ -205,7 +205,7 @@ test("Workflow snapshots reuse control ownership and report provider failures wi
 });
 
 test("Verification reports require live ownership, complete counts and stay scoped to the admitted issue", async () => {
-  const fixture = workflowFixture(); fixture.addHow("Todo");
+  const fixture = workflowFixture(); fixture.verification = [["cargo","test"],["cargo","clippy"]]; fixture.addHow("Todo");
   const {worker,owner} = await setup(fixture);
   try {
     const host = await socket(worker), watcher = await watch(worker,owner);
@@ -215,11 +215,18 @@ test("Verification reports require live ownership, complete counts and stay scop
     const proof = {head_oid:"a".repeat(40),target_oid:fixture.target_oid,status:"success",completed:2,total:2};
     const report = value => host.rpc({type:"progress",stage:"verifying",lease_id:grant.lease_id,verification:value});
     assert.notEqual((await report({...proof,completed:1})).type,"progressed","Incomplete counts cannot report success");
+    assert.notEqual((await report({...proof,target_oid:"f".repeat(40)})).type,"progressed");
+    assert.notEqual((await report({...proof,total:3,completed:3})).type,"progressed");
     assert.equal((await report(proof)).type,"progressed");
     const result = await watcher.snapshot(devices=>!!devices[0]?.verification);
     assert.equal(result.devices[0].verification.issue_number,42);
     assert.equal(result.devices[0].verification.head_oid,proof.head_oid);
     assert.equal(result.devices[0].verification.completed,2);
+    assert.equal(result.devices[0].verification.execution_id,grant.lease_id);
+    assert.equal(result.devices[0].execution_id,grant.lease_id);
+    assert.deepEqual(result.devices[0].verification.commands,initial.snapshot.configuration.verification);
+    assert.match(result.devices[0].verification.configuration_id,/^[a-f0-9]{64}$/);
+    assert.ok(result.devices[0].verification.updated_at);
     assert.notEqual((await host.rpc({type:"progress",stage:"verifying",lease_id:"forged",verification:proof})).type,"progressed");
     await host.rpc({type:"release",lease_id:grant.lease_id});
     await host.rpc(claim(initial.snapshot.workflows[0],"implement"));
