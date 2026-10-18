@@ -32,36 +32,154 @@ test("HTTP discovery renews control ownership and final validation preserves pen
   assert.throws(() => leases.readScope(device, undefined, false));
 });
 
-test("Progress notifications isolate browser failures and still revoke unavailable authority", async () => {
-  const c = vm.createContext({ Date, WebSocket: { OPEN: 1 }, digest: async value => value });
+// Keep attachment storage and authority checks real; inject only socket I/O and
+// account lookups, the boundaries supplied by the Durable Object in production.
+function progressHarness() {
+  const pending = [], controls = [], watchers = [];
+  const devices = new Map(), bindings = new Map(), sessions = new Map();
+  let duringHash = async () => {}, authorityFailure = false;
+  class Socket {
+    readyState = 1;
+    saved = null;
+    sent = [];
+    failure = null;
+    deserializeAttachment() { return structuredClone(this.saved); }
+    serializeAttachment(value) {
+      if (this.failure === "serializeAttachment" && value !== null) throw new Error("Attachment unavailable");
+      this.saved = structuredClone(value);
+    }
+    send(value) {
+      if (this.failure === "send") throw new Error("Browser disconnected");
+      this.sent.push(JSON.parse(value));
+    }
+    close(code) { this.readyState = 3; this.code = code; }
+  }
+  const c = vm.createContext({ Date, TextEncoder, Uint8Array, crypto,
+    WebSocket: { OPEN: 1 },
+    WebSocketPair: class { constructor() { return [new Socket(), new Socket()]; } },
+    Response: class { constructor(body, options) { Object.assign(this, options); } },
+  });
+  const workflow = stripTypeScriptTypes(readFileSync(new URL("../src/workflow.ts", import.meta.url), "utf8"), { mode: "transform" });
+  // Load the production digest too, with a deterministic pause at its async boundary.
+  const digestSource = workflow.slice(workflow.indexOf("export async function digest"), workflow.indexOf("export function validBranch"));
+  vm.runInContext(digestSource.replace(/^export /gm, "") + "\nglobalThis.hashProgress = digest;", c);
+  c.digest = async value => { const hash = await c.hashProgress(value); await duringHash(); return hash; };
   const source = stripTypeScriptTypes(readFileSync(new URL("../src/workflow-lease.ts", import.meta.url), "utf8"), { mode: "transform" });
   vm.runInContext(source.replace(/^import[\s\S]*?;/gm, "").replace(/^export /gm, "") + "\nglobalThis.WorkflowLeases = WorkflowLeases;", c);
-  for (const failure of ["serializeAttachment", "send", "authority"]) {
-    const pending = [];
-    const host = { closed: false, serializeAttachment() {}, close() { this.closed = true; } };
-    const watcher = () => ({
-      readyState: 1, closed: false, sent: [],
-      deserializeAttachment: () => ({ protocol: "oriel/workflow-progress/v1", user_id: "user", session_hash: "session" }),
-      serializeAttachment() {}, send(payload) { this.sent.push(payload); }, close() { this.closed = true; },
+  const leases = new c.WorkflowLeases({
+    getWebSockets: tag => tag === "workflow" ? controls : watchers,
+    getWebSocketAutoResponseTimestamp: () => null,
+    acceptWebSocket: ws => watchers.push(ws),
+    waitUntil: promise => pending.push(promise),
+  }, { workflowBinding: device => ({ ...bindings.get(device.device_id), user_id: device.user_id }) }, id => devices.get(id), userId => {
+    if (authorityFailure) throw new Error("Account ownership could not be established");
+    return [...devices.values()].filter(device => device.user_id === userId);
+  }, (hash, userId) => sessions.get(`${userId}:${hash}`) ?? null, () => {});
+  for (const [index, userId] of ["A", "B"].entries()) {
+    const device = { device_id: `device-${userId}`, user_id: userId, host_hash: `host-${userId}`, repository_generation: "revision" };
+    const binding = { ...device, repository: { owner: userId, name: "repo" }, github_generation: "github", linear_generation: "linear", repository_id: index + 1, team_id: `team-${userId}` };
+    devices.set(device.device_id, device);
+    bindings.set(device.device_id, binding);
+    sessions.set(`${userId}:session`, Date.now() + 60_000);
+    const ws = new Socket();
+    ws.serializeAttachment({ protocol: "oriel/workflow/v2", binding, expires_at: Date.now() + 45_000,
+      grant: { lease_id: `00000000-0000-4000-8000-00000000000${index}`, issue_number: 42 + index,
+        task: { issue_number: 42 + index, title: `Private task ${userId}` } },
+      stage: "implementing", task: null, updated_at: new Date().toISOString() });
+    controls.push(ws);
+  }
+  return { leases, controls, watchers, devices, bindings, sessions,
+    watch(userId) { leases.watch("session", userId); return watchers.at(-1); },
+    async drain() { while (pending.length) await Promise.all(pending.splice(0)); },
+    duringHash(callback) { duringHash = callback; },
+    failAuthority() { authorityFailure = true; },
+  };
+}
+
+for (const failure of ["send", "serializeAttachment"]) {
+  test(`Progress ${failure} failure preserves both accounts' control grants and permits reconnect`, async () => {
+    const h = progressHarness();
+    const broken = h.watch("A"), healthy = h.watch("A"), foreign = h.watch("B");
+    await h.drain();
+    const saved = h.controls.map(ws => ws.deserializeAttachment());
+    for (const ws of [broken, healthy, foreign]) ws.sent.length = 0;
+    for (const ws of h.controls) ws.saved.stage = "reviewing";
+    broken.failure = failure;
+    h.leases.publish();
+    await h.drain();
+    assert.equal(broken.readyState, 3);
+    assert.equal(broken.code, 1008);
+    assert.equal(broken.saved, null);
+    assert.equal(broken.sent.length, 0);
+    for (const [index, ws] of h.controls.entries()) {
+      assert.equal(ws.readyState, 1);
+      assert.deepEqual(ws.saved.binding, saved[index].binding);
+      assert.deepEqual(ws.saved.grant, saved[index].grant);
+      const device = h.devices.get(ws.saved.binding.device_id);
+      assert.equal(h.leases.verify(device, saved[index].grant.lease_id).lease_id, saved[index].grant.lease_id);
+    }
+    for (const [ws, userId] of [[healthy, "A"], [foreign, "B"]]) {
+      assert.equal(ws.readyState, 1);
+      assert.equal(ws.sent.length, 1);
+      assert.equal(ws.sent[0].devices.length, 1);
+      assert.equal(ws.sent[0].devices[0].device_id, `device-${userId}`);
+      assert.equal(ws.sent[0].devices[0].stage, "reviewing");
+      assert.equal(ws.sent[0].devices[0].task.repository, `${userId}/repo`);
+    }
+    const reconnected = h.watch("A");
+    await h.drain();
+    assert.deepEqual(reconnected.sent, healthy.sent);
+    assert.equal(foreign.sent.length, 1, "Unchanged snapshots stay silent");
+  });
+}
+
+for (const timing of ["before publish", "during hashing"]) {
+  for (const change of ["session", "owner", "binding"]) {
+    test(`Progress revalidates ${change} revocation ${timing}`, async () => {
+      const h = progressHarness();
+      const owner = h.watch("A"), foreign = h.watch("B");
+      await h.drain();
+      owner.sent.length = foreign.sent.length = 0;
+      for (const ws of h.controls) ws.saved.stage = "reviewing";
+      const revoke = () => {
+        if (change === "session") h.sessions.set("A:session", Date.now() - 1);
+        else if (change === "owner") h.devices.get("device-A").user_id = "B";
+        else h.bindings.set("device-A", { ...h.bindings.get("device-A"), repository_generation: "revoked" });
+      };
+      if (timing === "before publish") revoke();
+      else h.duringHash(revoke);
+      h.leases.publish();
+      await h.drain();
+      assert.equal(foreign.readyState, 1);
+      assert.equal(h.controls[1].readyState, 1);
+      assert.ok(foreign.sent.length >= 1);
+      assert.ok(foreign.sent.every(payload => payload.devices.every(device =>
+        device.device_id !== "device-A" || device.state === "offline")), "B never receives A's private task");
+      if (change === "session") {
+        assert.equal(owner.readyState, 3);
+        assert.equal(owner.sent.length, 0);
+        assert.equal(h.controls[0].readyState, 1);
+      } else {
+        assert.equal(h.controls[0].readyState, 3);
+        assert.equal(h.controls[0].saved, null);
+        assert.equal(owner.sent.length, 1);
+        assert.ok(owner.sent[0].devices.every(device => device.state === "offline" && device.task === null));
+      }
     });
-    const disconnected = watcher(), healthy = watcher();
-    if (failure !== "authority") disconnected[failure] = () => { throw new Error("Watcher disconnected during notification"); };
-    const leases = Object.create(c.WorkflowLeases.prototype);
-    leases.ctx = {
-      getWebSockets: tag => tag === "workflow" ? [host] : [disconnected, healthy],
-      waitUntil: promise => pending.push(promise),
-    };
-    leases.sessionExpiry = () => Date.now() + 60_000;
-    leases.snapshot = () => {
-      if (failure === "authority") throw new Error("Account ownership could not be established");
-      return '{"type":"workflow-progress","devices":[]}';
-    };
-    leases.publish();
-    await Promise.all(pending);
-    assert.equal(disconnected.closed, true);
-    assert.equal(host.closed, failure === "authority", "Only an authority failure may revoke the host lease");
-    assert.equal(healthy.closed, failure === "authority");
-    assert.equal(healthy.sent.length, failure === "authority" ? 0 : 1);
+  }
+}
+
+test("Progress authority lookup exceptions retain the existing fail-closed stopAll policy", async () => {
+  const h = progressHarness();
+  h.watch("A");
+  h.watch("B");
+  await h.drain();
+  h.failAuthority();
+  h.leases.publish();
+  await h.drain();
+  for (const ws of [...h.controls, ...h.watchers]) {
+    assert.equal(ws.readyState, 3);
+    assert.equal(ws.saved, null);
   }
 });
 
