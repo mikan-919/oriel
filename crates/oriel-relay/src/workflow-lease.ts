@@ -57,6 +57,11 @@ function sameBinding(left: WorkflowBinding, right: WorkflowBinding): boolean {
     left.repository.owner === right.repository.owner && left.repository.name === right.repository.name;
 }
 
+// Fence browser evidence across repository and provider connection replacement.
+function evidenceGeneration(binding: WorkflowBinding): string {
+  return JSON.stringify([binding.repository_generation, binding.github_generation, binding.linear_generation]);
+}
+
 /** Ownership lives only in hibernating WebSocket attachments, never in SQL. */
 export class WorkflowLeases {
   private lastFacts = new Map<string, string>();
@@ -109,7 +114,7 @@ export class WorkflowLeases {
       if (!control || control.binding.user_id !== userId) {
         return { device_id: device.device_id, state: "offline", stage: null, task: null, updated_at: null };
       }
-      return { device_id: device.device_id, execution_id: control.grant?.lease_id, generation: control.binding.repository_generation,
+      return { device_id: device.device_id, execution_id: control.grant?.lease_id, generation: evidenceGeneration(control.binding),
         state: control.stage === "paused" ? "paused" : control.stage === "idle" ? "idle" : "running",
         stage: control.stage, task: control.grant
           ? { repository: `${control.binding.repository.owner}/${control.binding.repository.name}`, ...control.grant.task }
@@ -364,7 +369,7 @@ export class WorkflowLeases {
             execution_id: attachment.grant.lease_id,
             repository: `${binding.repository.owner}/${binding.repository.name}`,
             device_id: binding.device_id,
-            generation: binding.repository_generation,
+            generation: evidenceGeneration(binding),
             commands: attachment.grant.execution!.verification,
             configuration_id: configurationId,
             issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
