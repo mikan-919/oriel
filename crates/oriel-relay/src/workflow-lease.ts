@@ -10,9 +10,11 @@ const EXPIRY_MS = 45_000;
 const STAGES = ["idle", "discovering", "preparing", "planning", "discussing", "implementing", "reviewing", "verifying",
   "integrating", "pushing", "publishing", "reconciling", "paused"] as const;
 type Stage = typeof STAGES[number];
-type Verification = { issue_number: number; head_oid: string; target_oid: string; status: "running" | "success" | "failure"; completed: number; total: number; updated_at: string };
+type Verification = { execution_id: string; repository: string; device_id: string; generation: string; commands: string[][]; configuration_id: string; issue_number: number; head_oid: string; target_oid: string; status: "running" | "success" | "failure"; completed: number; total: number; updated_at: string };
 type ProgressTask = WorkflowTask & { repository: string };
 type ProgressDevice = {
+  execution_id?: string;
+  generation?: string;
   verification?: Verification;
   device_id: string;
   state: "offline" | "idle" | "running" | "paused";
@@ -107,7 +109,7 @@ export class WorkflowLeases {
       if (!control || control.binding.user_id !== userId) {
         return { device_id: device.device_id, state: "offline", stage: null, task: null, updated_at: null };
       }
-      return { device_id: device.device_id,
+      return { device_id: device.device_id, execution_id: control.grant?.lease_id, generation: control.binding.repository_generation,
         state: control.stage === "paused" ? "paused" : control.stage === "idle" ? "idle" : "running",
         stage: control.stage, task: control.grant
           ? { repository: `${control.binding.repository.owner}/${control.binding.repository.name}`, ...control.grant.task }
@@ -353,8 +355,16 @@ export class WorkflowLeases {
               !["running","success","failure"].includes(value.status as string) ||
               !Number.isSafeInteger(value.total) || (value.total as number) < 1 || (value.total as number) > 1024 ||
               !Number.isSafeInteger(value.completed) || (value.completed as number) < 0 || (value.completed as number) > (value.total as number) ||
+              (!attachment.grant.execution || value.target_oid !== attachment.grant.execution.target_oid || value.total !== attachment.grant.execution.verification.length) ||
               value.status === "success" && value.completed !== value.total) throw new Error();
-          attachment.verification = { ...value, issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
+          attachment.verification = { ...value,
+            execution_id: attachment.grant.lease_id,
+            repository: `${binding.repository.owner}/${binding.repository.name}`,
+            device_id: binding.device_id,
+            generation: binding.repository_generation,
+            commands: attachment.grant.execution!.verification,
+            configuration_id: await digest(attachment.grant.execution!.verification),
+            issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
         }
         if (attachment.stage === request.stage && request.verification === undefined) {
           this.send(ws, { type: "progressed", request_id: requestId });

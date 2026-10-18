@@ -429,7 +429,7 @@ export class WorkflowReader {
         ...[...newest.values()].map(check => ({name:check.name,status:check.status === "completed" ? result(check.conclusion) : "pending" as const,url:check.details_url ?? null})),
         ...[...statuses.values()].map(status => ({name:status.context,status:status.state === "pending" ? "pending" as const : result(status.state),url:status.target_url ?? null})),
       ];
-      ci.value = { head_oid: pr.head_oid, checks, status:checks.some(check=>check.status === "failure") ? "failure" :
+      ci.value = { acquisition: "received", fetched_at: new Date().toISOString(), head_oid: pr.head_oid, checks, status:checks.some(check=>check.status === "failure") ? "failure" :
         checks.some(check=>check.status === "pending") ? "pending" :
         checks.length && checks.some(check=>check.status === "success") && checks.every(check=>["success","skipped"].includes(check.status)) ? "success" : "unknown" };
     }

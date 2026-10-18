@@ -14,19 +14,32 @@ export function currentCI(row) {
     if (row.feedback?.kind === "check_failure" && row.pull_request?.head_oid && row.feedback.key?.endsWith(":"+row.pull_request.head_oid)) return {status:"failure",checks:[]};
     return {status:"unknown",checks:[]};
 }
+export function verificationEvidence(row, snapshot, progress, live) {
+    const value=progress?.verification;
+    if (!value) return {value:null, reason:"未受信・過去結果の取得経路なし（再読み込み後を含む）"};
+    if (value.issue_number !== row.issue.number) return {value:null,reason:"別の作業の結果です"};
+    if (!value.execution_id || !value.configuration_id || !Array.isArray(value.commands)) return {value:null,reason:"旧形式の通知には実行・設定の証拠がありません"};
+    if (!["running","success","failure"].includes(value.status) || !Number.isSafeInteger(value.completed) ||
+        !Number.isSafeInteger(value.total) || value.total<1 || value.completed<0 || value.completed>value.total ||
+        value.total!==value.commands.length || value.status==="success" && value.completed!==value.total)
+        return {value:null,reason:"検証報告の証拠が不足しています"};
+    const reasons=[];
+    if(value.target_oid!==snapshot?.target_oid)reasons.push("基準コミットが異なります");
+    if(JSON.stringify(value.commands)!==JSON.stringify(snapshot?.configuration?.verification))reasons.push("現在と検証設定が異なります");
+    if(value.head_oid!==(row.pull_request?.head_oid??row.canonical_oid))reasons.push("現在のPRとは異なるコミット（push前を含む）");
+    if(value.execution_id!==progress?.execution_id)reasons.push("保存した実行の結果");
+    if(!live&&value.status==="running")reasons.push("最後に受信した進捗・現在は未確認");
+    return {value,reason:reasons.join(" · "),current:reasons.length===0};
+}
 export function currentVerification(row, snapshot, progress, live) {
-    const value=progress?.verification, head=row.pull_request?.head_oid ?? row.canonical_oid;
-    return live && value?.issue_number === row.issue.number && value.target_oid === snapshot?.target_oid && value.head_oid === head &&
-        ["running","success","failure"].includes(value.status) && Number.isSafeInteger(value.completed) && Number.isSafeInteger(value.total) && value.total>0 &&
-        value.completed>=0 && value.completed<=value.total && value.total===snapshot?.configuration?.verification?.length &&
-        (value.status !== "success" || value.completed === value.total) ? value : null;
+    return verificationEvidence(row,snapshot,progress,live).value;
 }
 
 export function mountWorkflow({onDevice, onCodex, onCreate}) {
     const get=id=>document.getElementById("workflow-"+id);
     const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;return element;};
     const list=document.getElementById("repository-issues");
-    let model={}, selected=null, filter="all", panel="status", scope="", histories=new Map();
+    let model={}, selected=null, filter="all", panel="status", scope="", generation="", histories=new Map(), evidence=new Map();
     const rows=()=>[...(model.snapshot?.workflows ?? [])].sort((a,b)=>b.issue.number-a.issue.number);
     const state=row=>workflowState(row,model.progress,model.live);
     const selectedRow=()=>rows().find(row=>row.issue.number===selected);
@@ -49,7 +62,10 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
             for(const id of ["number","how-number","title","badge","next-title","next-copy","what-body","how-body","failure-body","local-checks","ci-checks","discussion","links","history","steps"])get(id).replaceChildren();
             get("primary").removeAttribute("href");return;
         }
-        const info=state(row),ci=currentCI(row),verification=currentVerification(row,model.snapshot,model.progress,model.live);
+        const info=state(row),ci=currentCI(row);
+        const received=evidence.get(row.issue.number);
+        const observation=verificationEvidence(row,model.snapshot,{...model.progress,verification:received},model.live);
+        const verification=observation.value;
         get("number").textContent="WHAT #"+row.issue.number;get("how-number").textContent=row.linear?"HOW "+row.linear.identifier:"HOWを未作成";
         get("title").textContent=row.issue.title;badge("badge",info.label,info.tone);
         let action=row.phase==="triage"&&row.linear?link("LinearでHOWを確認 ↗",row.linear.url,"linear.app"):
@@ -59,10 +75,10 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         get("codex").disabled=!!model.busy||!model.device;
         get("control").disabled=!!model.busy||!model.device||!model.live||!model.progress||model.progress.state==="offline";
         const step=["waiting-how","needs-how","triage"].includes(row.phase)?0:["approved","running"].includes(row.phase)?1:row.phase==="review"?3:row.phase==="done"||row.phase==="merged"?4:0;
-        const current=ci.status==="failure"||info.active&&["verifying","integrating","pushing","publishing"].includes(model.progress?.stage)?2:step;
+        const current=row.phase==="running"&&info.active&&["verifying","integrating","pushing","publishing"].includes(model.progress?.stage)?2:step;
         get("steps").replaceChildren(...["計画・承認","実装","検証","レビュー"].map((title,index)=>{
-            const done=index<current&&(index!==2||ci.status==="success"&&verification?.status==="success");
-            return node("li",(done?"✓ ":index===current?"● ":"")+title,"step"+(done?" done":index===current?" current":""));
+            const done=index<current;
+            return node("li",(done?"":index===current?"● ":"")+title,"step"+(done?" done":index===current?" current":""));
         }));
         const next={"waiting-how":["計画の依頼を待っています","GitHub Issueのコメントを /oriel how で始めると、HOWの計画を依頼できます。実装の承認はLinearで行います。"],"needs-how":["HOWの提案を待っています","端末でワークフローを起動すると、目的に沿ったHOWを提案します。"],triage:["あなたのHOW確認を待っています","LinearでHOWを確認し、Todoへ移すと実装を承認します。"],approved:["実装の開始を待っています","承認と実行設定を確認してから、端末で実装を開始します。"],running:["承認されたHOWを実装しています","実行段階を確認し、必要な場合はCodexから一時停止してください。"],review:["PRのレビューをお願いします","GitHubで変更とCIの結果を確認し、レビュー・マージしてください。"],merged:["完了状態への同期を待っています","PRのマージを確認しました。LinearのDoneへの反映を待っています。"],done:["作業は完了しています","PRのマージとLinearのDoneを確認しました。"],closed:["この作業は終了しています","管理対象のPRのマージは未確認です。自動実行は行いません。"],blocked:["作業を進められません",row.blocked_reason||"HOWと実行条件を確認してください。"]}[row.phase]||["現在の状態は未確認です","更新して状態を確認してください。"];
         if(ci.status==="failure") {next[0]=info.active?"CIの失敗に対応しています":"CIの失敗を確認してください";next[1]=info.active?"端末の進行状況と、失敗したCIの結果を確認できます。":"PRで失敗した工程を確認してください。端末が自動修正中かどうかは実行状況から確認できます。";}
@@ -70,18 +86,18 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         if(row.phase==="running"&&!info.active){next[0]=model.live?"この作業の再開を待っています":"実行状況は未確認です";next[1]=model.live?"現在この作業を実行する端末は確認できません。実行端末と進行中の作業を確認してください。":"進捗通知への再接続を待っています。最後に取得した作業の状態を表示しています。";}
         if(row.blocked_reason&&row.phase!=="waiting-how")next[1]=row.blocked_reason;
         get("next").className="next-action"+(info.group==="waiting"?" waiting":"");get("next-title").textContent=next[0];get("next-copy").textContent=next[1];
-        const statuses={success:["✓ 成功","green"],failure:["× 失敗","red"],running:["実行中","green"],pending:["実行待ち・実行中","amber"],unknown:["未取得","neutral"]};
+        const statuses={success:["✓ 成功","green"],failure:["× 失敗","red"],running:["実行中","green"],pending:["実行待ち・実行中","amber"],unknown:["未取得","neutral"],empty:["CI結果なし","neutral"]};
         const verificationPaused=verification?.status==="running"&&model.progress?.state==="paused";
-        badge("local-badge",...(verificationPaused?["一時停止","amber"]:statuses[verification?.status||"unknown"]));
+        badge("local-badge",...(!model.live&&verification?.status==="running"?["進捗未確認","neutral"]:verificationPaused?["一時停止","amber"]:statuses[verification?.status||"unknown"]));
         const local=get("local-checks");local.replaceChildren();
         if(verification) {
             local.append(checkRow("設定した検証コマンド",verification.completed+" / "+verification.total+" 件完了"));
-            for(const [index,argv] of (model.snapshot.configuration?.verification||[]).entries())local.append(checkRow(argv.join(" "),index<verification.completed?"成功":index===verification.completed&&verification.status==="failure"?"失敗":index===verification.completed&&verification.status==="running"?verificationPaused?"一時停止":"実行中":"未実行"));
-        } else local.append(node("p","現在の変更に対する端末の検証結果は未取得です。更新したorieldからの報告を待っています。","check-note"));
-        get("local-note").textContent=verification?"検証したコミット: "+verification.head_oid.slice(0,12)+" · "+new Date(verification.updated_at).toLocaleString("ja-JP"):"端末側の検証とGitHub CIは、確認する工程が異なります。";
-        badge("ci-badge",...statuses[ci.status]);get("ci-checks").replaceChildren();
+            for(const [index,argv] of (verification.commands||[]).entries())local.append(checkRow(argv.join(" "),index<verification.completed?"成功":index===verification.completed&&verification.status==="failure"?"失敗":index===verification.completed&&verification.status==="running"?verificationPaused?"一時停止":"実行中":"未実行"));
+        } else local.append(node("p",observation.reason,"check-note"));
+        get("local-note").textContent=verification?"検証したコミット: "+verification.head_oid.slice(0,12)+" · 作業 #"+verification.issue_number+" · 実行 "+verification.execution_id+" · 設定 "+verification.configuration_id+" · 基準 "+verification.target_oid+" · "+observation.reason+" · "+new Date(verification.updated_at).toLocaleString("ja-JP"):"端末側の検証とGitHub CIは、確認する工程が異なります。";
+        badge("ci-badge",...statuses[ci.acquisition==="received"&&!ci.checks?.length?"empty":ci.status]);get("ci-checks").replaceChildren();
         for(const check of ci.checks||[]) {const item=checkRow(check.name,{success:"成功",failure:"失敗",pending:"実行中",skipped:"省略",unknown:"未取得"}[check.status]||"未取得");if(check.url){const title=link(check.name+" ↗",check.url,"github.com");if(title.hasAttribute("href"))item.firstChild.replaceWith(title);}get("ci-checks").append(item);}
-        if(!ci.checks?.length)get("ci-checks").append(node("p",row.pull_request?"現在のPRコミットに対するCIの情報は未取得です。":"PRがまだないため、CIの結果はありません。","check-note"));
+        if(!ci.checks?.length)get("ci-checks").append(node("p",ci.acquisition==="received"?"CI結果なし（取得成功・検査0件）。起動されなかった理由は不明です。":row.pull_request?"CIを取得できません。取得経路または対象コミットを確認してください。":"PRがまだないため、CIの結果はありません。","check-note"));
         get("failure").hidden=row.feedback?.kind!=="check_failure";get("failure-body").textContent=row.feedback?.body||"";
         get("links").replaceChildren(link("WHATを確認 ↗",row.issue.url,"github.com"),...(row.linear?[link("HOWを確認 ↗",row.linear.url,"linear.app")]:[]),...(row.pull_request?[link("PR #"+row.pull_request.number+"を開く ↗",row.pull_request.url,"github.com")]:[]));
         get("evidence-note").textContent=model.live?"接続状態は進捗通知で確認しています。承認状態はGitHub・Linearの取得結果を表示しています。":"進捗通知は未確認です。最後に取得した作業の情報を表示しています。";
@@ -116,9 +132,17 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
     get("device").addEventListener("change",()=>onDevice(get("device").value));get("create").addEventListener("click",onCreate);
     get("codex").addEventListener("click",()=>onCodex(false));get("control").addEventListener("click",()=>onCodex(true));
     return {update(next) {
-        const nextScope=(next.userId||"")+":"+(next.device?.device_id||"");
-        if(scope!==nextScope){scope=nextScope;selected=null;panel="status";histories.clear();get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
+        const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify(next.snapshot?.repository||null);
+        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
+        if(next.progress?.generation)generation=next.progress.generation;
         model=next;
+        const report=next.live&&next.progress?.verification;
+        const repository=next.snapshot?.repository;
+        if(report?.execution_id && report.device_id===next.device?.device_id &&
+           report.repository===repository?.owner+"/"+repository?.name && report.generation===generation) {
+            evidence.delete(report.issue_number);evidence.set(report.issue_number,report);
+            if(evidence.size>64)evidence.delete(evidence.keys().next().value);
+        }
         const ids=(next.devices||[]).map(device=>device.device_id).join(",");
         if(get("device").dataset.ids!==ids){get("device").replaceChildren(...(next.devices||[]).map(device=>{const option=node("option",device.name);option.value=device.device_id;return option;}));get("device").dataset.ids=ids;}
         get("device").value=next.device?.device_id||"";get("device").disabled=!!next.busy;
