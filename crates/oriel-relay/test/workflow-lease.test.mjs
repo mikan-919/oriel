@@ -217,8 +217,13 @@ test("Verification reports require live ownership, complete counts and stay scop
     assert.notEqual((await report({...proof,completed:1})).type,"progressed","Incomplete counts cannot report success");
     assert.notEqual((await report({...proof,target_oid:"f".repeat(40)})).type,"progressed");
     assert.notEqual((await report({...proof,total:3,completed:3})).type,"progressed");
+    assert.equal((await report({...proof,status:"running",completed:1})).type,"progressed");
+    const running = await watcher.snapshot(devices=>devices[0]?.verification?.status==="running");
+    assert.equal(running.devices[0].verification.completed,1);
+    assert.equal((await report({...proof,status:"failure",completed:1})).type,"progressed");
+    await watcher.snapshot(devices=>devices[0]?.verification?.status==="failure");
     assert.equal((await report(proof)).type,"progressed");
-    const result = await watcher.snapshot(devices=>!!devices[0]?.verification);
+    const result = await watcher.snapshot(devices=>devices[0]?.verification?.status==="success");
     assert.equal(result.devices[0].verification.issue_number,42);
     assert.equal(result.devices[0].verification.head_oid,proof.head_oid);
     assert.equal(result.devices[0].verification.completed,2);

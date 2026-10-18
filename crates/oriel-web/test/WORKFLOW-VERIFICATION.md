@@ -38,3 +38,18 @@ PLAYWRIGHT_BROWSERS_PATH=/tmp/oriel-playwright node crates/oriel-web/test/workfl
 
 ブラウザーの配置先はホスト環境に合わせる。対象基点
 `82101303fadf49aeb5272d55fc8627494f1f8891` は開始時HEADで、現在の履歴に統合済み。
+
+## ホスト検証失敗への修正（2026-10-18）
+
+検証通知処理の非同期ハッシュ後の照合で、未定義の `binding` を参照していたため、
+有効な報告まで拒否されていた。処理開始時の接続情報を取得し、既存の所有者・
+接続世代・実行IDの再照合を維持した。回帰試験では実行中・失敗・成功の通知を
+順に受理することも確認する。
+
+- Webのnpm test、変更したRelayモジュールのesbuildバンドル、
+  `cargo clippy --workspace --all-targets --offline -- -D warnings` は成功。
+- 失敗した `npm --prefix crates/oriel-relay test` を再実行したが、生成済みworker設定がないため
+  統合テストは実行できない。対象テストの単独実行でも同じENOENTを確認した。
+  Relayビルドもworker-buildの書込制限で停止するため、ホストで再検証が必要。
+- `cargo test --workspace --offline` はRelayの2件が成功し、orieldは41件成功・11件失敗。
+  ローカル待受等のsandbox権限制限（Operation not permitted）により完走できなかった。

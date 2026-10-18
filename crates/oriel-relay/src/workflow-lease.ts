@@ -352,6 +352,7 @@ export class WorkflowLeases {
         } else if (!["idle", "discovering", "paused"].includes(request.stage as string) ||
                    request.lease_id !== undefined) throw new WorkflowLeaseError();
         if (request.verification !== undefined) {
+          const binding = attachment.binding;
           const value = request.verification as Record<string, unknown>;
           if (!value || typeof value !== "object" || Array.isArray(value) || !attachment.grant || request.stage !== "verifying" ||
               Object.keys(value).some(key => !["head_oid","target_oid","status","completed","total"].includes(key)) ||
