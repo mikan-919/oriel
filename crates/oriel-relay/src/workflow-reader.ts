@@ -1,7 +1,17 @@
 import { digest, githubIssueLink, OID, parseConfiguration, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
 import type { Auth, IntegrationEnv, WorkflowContext, WorkflowFacts, WorkflowHow, Page, LinkedIssue, GithubPull, GithubComment, LinearComment, SnapshotPreparation } from "./integrations";
 import type { WorkflowCI } from "./workflow";
-type Check = { id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; details_url?: string | null; output: { title: string | null; summary: string | null; text: string | null } };
+type Check = { app?: { id: number } | null; id: number; name: string; head_sha: string; status: string; conclusion: string | null; completed_at: string | null; details_url?: string | null; output: { title: string | null; summary: string | null; text: string | null } };
+// A run ID identifies an attempt; App ID and name identify its stable series.
+const checkSeries = (check: Check): string | null => Number.isSafeInteger(check.app?.id) && check.app!.id > 0
+  ? JSON.stringify(["check-run", check.app!.id, check.name]) : null;
+const latestChecks = (checks: Check[], head: string): Map<string, Check> => {
+  const latest = new Map<string, Check>();
+  for (const check of [...checks].filter(check => check.head_sha === head).sort((a, b) => a.id - b.id)) {
+    latest.set(checkSeries(check) ?? `unknown-app:${check.id}`, check);
+  }
+  return latest;
+};
 const SECRET = /^[a-f0-9]{64}$/;
 const GITHUB_COMMAND = "/oriel";
 // Never forward provider messages or arbitrary extension values to the daemon.
@@ -295,7 +305,7 @@ export class WorkflowReader {
                   const ci: { value?: WorkflowCI } = {};
                   row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted, ci);
                   row.ci = ci.value;
-                  if (exhausted.length) row.blocked_reason = `Check retry limit reached (3 verified attempts): ${exhausted.join(", ")}`;
+                  if (exhausted.length && !row.feedback) row.blocked_reason = exhausted.join(", ");
                 }
               }
             }
@@ -400,8 +410,7 @@ export class WorkflowReader {
     }
     const currentStatuses = await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string; target_url?: string | null }>(context, `${context.path}/commits/${pr.head_oid}/statuses`);
     if (ci) {
-      const newest = new Map<string, Check>();
-      for (const check of [...currentChecks].sort((a,b) => a.id-b.id)) if (check.head_sha === pr.head_oid) newest.set(check.name, check);
+      const newest = latestChecks(currentChecks, pr.head_oid);
       const statuses = new Map<string, typeof currentStatuses[number]>();
       for (const status of [...currentStatuses].sort((a,b) => a.id-b.id)) statuses.set(status.context, status);
       const result = (value: string | null): WorkflowCI["checks"][number]["status"] => value === "success" ? "success" :
@@ -458,19 +467,36 @@ export class WorkflowReader {
       const statuses = head === pr.head_oid ? currentStatuses : await this.workflowList<{ id: number; context: string; state: string; description: string | null; created_at: string }>(context, `${context.path}/commits/${head}/statuses`);
       statusHistory.push(...statuses.map(status => ({ ...status, head })));
     }
-    const byName = new Map<string, Check>();
-    for (const check of checks.sort((a, b) => a.id - b.id)) byName.set(check.name, check);
-    for (const check of byName.values()) {
+    // Resolve even legacy name-only cursors through their signed run ID. Never
+    // silently discard an attempt whose origin can no longer be established.
+    const checkCursors = new Map<string, string>();
+    let unresolved = false;
+    for (const [key, time] of cursors) {
+      const match = /^check:([^:]+):(\d+):([a-f0-9]{40})$/.exec(key);
+      if (!match) continue;
+      const id = Number(match[2]);
+      const run = history.find(run => run.id === id) ?? await this.workflowGithub<Check>(context, `${context.path}/check-runs/${id}`, "GET", undefined, true);
+      const series = run && checkSeries(run);
+      if (!run || run.id !== id || run.head_sha !== match[3] || !series ||
+          ![await digest(series), await digest(run.name)].includes(match[1])) { unresolved = true; continue; }
+      const normalized = `check:${await digest(series)}:${id}:${match[3]}`;
+      if (!checkCursors.has(normalized) || time < checkCursors.get(normalized)!) checkCursors.set(normalized, time);
+    }
+    if (unresolved) exhausted?.push("Check history origin unavailable; manual confirmation required");
+    for (const check of latestChecks(checks, pr.head_oid).values()) {
       if (check.head_sha !== pr.head_oid || check.status !== "completed" || !["failure", "timed_out", "action_required", "cancelled", "startup_failure", "stale"].includes(check.conclusion ?? "")) continue;
-      const name = await digest(check.name);
+      const series = checkSeries(check);
+      if (!series) { exhausted?.push(`${check.name}: App ID unavailable; manual confirmation required`); continue; }
+      if (unresolved) continue;
+      const name = await digest(series);
       const key = `check:${name}:${check.id}:${pr.head_oid}`;
-      if (cursors.has(key)) continue;
+      if (checkCursors.has(key)) continue;
       // Count unique signed response attempts since the latest actual successful run,
       // including prior response heads. No local history or repeated-comment echoes.
-      const successful = history.filter(run => run.name === check.name && ["success", "neutral", "skipped"].includes(run.conclusion ?? "") && run.completed_at)
+      const successful = history.filter(run => checkSeries(run) === series && run.status === "completed" && ["success", "neutral", "skipped"].includes(run.conclusion ?? "") && run.completed_at)
         .map(run => run.completed_at!).sort().at(-1) ?? "";
-      const attempts = [...cursors].filter(([key, time]) => key.startsWith(`check:${name}:`) && time > successful).length;
-      if (attempts >= 3) { exhausted?.push(check.name); continue; }
+      const attempts = [...checkCursors].filter(([key, time]) => key.startsWith(`check:${name}:`) && time > successful).length;
+      if (attempts >= 3) { exhausted?.push(`Check retry limit reached (3 verified attempts): ${check.name}`); continue; }
       if (requestedKey !== undefined && requestedKey !== key) continue;
       return { key, kind: "check_failure", body: `${check.name}: ${check.conclusion}\n${[check.output.title, check.output.summary, check.output.text].filter(Boolean).join("\n").slice(0, 16000)}`, comments: [] };
     }
@@ -482,8 +508,8 @@ export class WorkflowReader {
       if (cursors.has(key)) continue;
       const prefix = `check:${await digest(status.context)}:`;
       const successful = statusHistory.filter(run => run.context === status.context && run.state === "success").map(run => run.created_at).sort().at(-1) ?? "";
-      const attempts = [...cursors].filter(([key, time]) => key.startsWith(prefix) && time > successful).length;
-      if (attempts >= 3) exhausted?.push(status.context);
+      const attempts = [...cursors].filter(([key, time]) => key.startsWith(prefix) && /^status-\d+$/.test(key.split(":")[2]) && time > successful).length;
+      if (attempts >= 3) exhausted?.push(`Check retry limit reached (3 verified attempts): ${status.context}`);
       if (attempts < 3 && (requestedKey === undefined || requestedKey === key)) return { key, kind: "check_failure", body: `${status.context}: ${status.state}\n${status.description ?? ""}`, comments: [] };
     }
     return null;
