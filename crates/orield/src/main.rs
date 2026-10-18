@@ -28,6 +28,7 @@ use url::Url;
 mod codex;
 mod integrations;
 mod repository;
+mod verification_monitor;
 mod workflow;
 mod workflow_git;
 
@@ -571,6 +572,12 @@ async fn main() -> Result<()> {
                 .to_str()
                 .context("invalid Git credential operation")?,
         );
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "__verification-monitor")
+    {
+        return verification_monitor::run(&args[1..]);
     }
     let mode = match args.as_slice() {
         [] => "terminal",

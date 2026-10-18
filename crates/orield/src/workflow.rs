@@ -867,10 +867,27 @@ impl Session {
         self.post("actions", body).await
     }
     async fn run_child(&mut self, command: &mut Command, guard: &Guard) -> Result<Output> {
+        self.run_child_inner(command, guard, None).await
+    }
+    async fn run_child_inner(
+        &mut self,
+        command: &mut Command,
+        guard: &Guard,
+        lock: Option<&fs::File>,
+    ) -> Result<Output> {
         self.guard(guard).await?;
-        let child = command
-            .spawn()
-            .map_err(|_| anyhow!("workflow command could not start"))?;
+        let mut child = if let Some(lock) = lock {
+            crate::verification_monitor::wrap(command, lock).await?
+        } else {
+            command
+                .spawn()
+                .map_err(|_| anyhow!("workflow command could not start"))?
+        };
+        let control = if lock.is_some() {
+            child.stdin.take()
+        } else {
+            None
+        };
         let id = child.id().context("workflow child has no process ID")?;
         let completion = child.wait_with_output();
         tokio::pin!(completion);
@@ -887,7 +904,11 @@ impl Session {
         };
         // Kill descendants even on successful agent exit: none may survive into
         // the subsequent host-only credential transport or publication stages.
-        git::stop_group(id)?;
+        if lock.is_some() {
+            drop(control);
+        } else {
+            git::stop_group(id)?;
+        }
         if !finished {
             let _ = completion.await;
         }
@@ -1650,6 +1671,7 @@ async fn verify(
     path: &Path,
     configuration: &Configuration,
     guard: &Guard,
+    lock: &fs::File,
 ) -> Result<()> {
     checked_configuration(configuration)?;
     session.progress("verifying").await?;
@@ -1678,7 +1700,7 @@ async fn verify(
         let stderr = logs.join("stderr.log");
         git::private_file(&stdout, b"")?;
         git::private_file(&stderr, b"")?;
-        let mut command = Command::new(&argv[0]);
+        let mut command = crate::verification_monitor::command(&argv[0])?;
         command
             .args(&argv[1..])
             .current_dir(path)
@@ -1703,7 +1725,9 @@ async fn verify(
             command.env("RUSTUP_HOME", home);
         }
         command.as_std_mut().process_group(0);
-        let result = session.run_child(&mut command, guard).await?;
+        let result = session
+            .run_child_inner(&mut command, guard, Some(lock))
+            .await?;
         if !result.status.success() {
             session
                 .verification(
@@ -1934,6 +1958,7 @@ async fn implement(
     respond: bool,
 ) -> Result<()> {
     checked_configuration(&snapshot.configuration)?;
+    let verification_lock = crate::verification_monitor::lock(root)?;
     validate_branch(row).await?;
     let mut current = snapshot.clone();
     let mut active = row.clone();
@@ -2076,7 +2101,16 @@ async fn implement(
             &current.target_oid,
         )
         .await?;
-        let failure = match verify(session, root, &path, &current.configuration, &guard).await {
+        let failure = match verify(
+            session,
+            root,
+            &path,
+            &current.configuration,
+            &guard,
+            &verification_lock,
+        )
+        .await
+        {
             Ok(()) => None,
             Err(error) if error.downcast_ref::<VerificationFailure>().is_some() => Some(error),
             Err(error) => return Err(error),

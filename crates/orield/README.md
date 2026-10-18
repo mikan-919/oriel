@@ -61,3 +61,13 @@ Web画面でGitHub・Linearの連携を設定し、対象リポジトリのコ�
 ## 開発・公開
 
 [Orielの開発手順](https://github.com/mikan-919/oriel#開発する)と[crates.ioへの公開手順](https://github.com/mikan-919/oriel/blob/main/docs/orield-release.md)を参照してください。ライセンスは[MIT](https://github.com/mikan-919/oriel/blob/main/crates/orield/LICENSE)です。
+
+Linux x86_64 の workflow 検証は独立した監視プロセスが実行します。
+デーモンの SIGKILL、Ctrl-C、検証の正常終了・失敗時に、専用プロセス群の
+子・孫を SIGKILL で停止し、Linux subreaper で回収します。デーモン切断は
+20ms 間隔で監視し、停止確認まで作業ルートのロックを保持します。
+再起動時にロックが競合した場合は作業を保存して中断するため、旧監視の
+回収完了後に再試行してください。ログと検証の終了コードは保持されます。
+保証対象は同じプロセス群に残る子孫です。setsid/setpgid による離脱、監視
+プロセス自体の同時強制終了、他OSは保証対象外です。停止は非同期であり、
+デーモン終了と同時の停止は保証しません（試験の停止期限は5秒です）。
