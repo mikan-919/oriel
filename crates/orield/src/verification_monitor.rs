@@ -163,6 +163,13 @@ pub fn run(args: &[std::ffi::OsString]) -> Result<()> {
             break;
         }
     }
+    if let Some(signal) = status.signal() {
+        // Preserve signal termination as well as ordinary numeric exit codes.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::kill(libc::getpid(), signal);
+        }
+    }
     std::process::exit(
         status
             .code()
