@@ -81,7 +81,7 @@ test("Discovery overlaps independent reads and bounded HOW and issue batches wit
     };
     const snapshot = await Promise.race([s.snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("Independent discovery reads were serialized")),3000);})]);
     assert.deepEqual(snapshot.workflows.map(row=>row.issue.number), [42,43,44,45,46,47,48,49]);
-    assert.equal(howReads,8); // Four HOWs and their four discussion collections.
+    assert.equal(howReads,4); // HOW metadata is batched; four discussion collections remain.
     assert.equal(commentReads,1,"All eight WHAT discussions fit in one bounded GraphQL batch");
     for(const row of snapshot.workflows.slice(0,4)) assert.equal(row.phase,"approved");
   } finally {
@@ -251,12 +251,10 @@ test("HOW transitions ignore attachment order and PR links but preserve formal I
       const approved = (await s.snapshot()).workflows[0];
       s.fixture.refs.set(approved.branch, s.fixture.target_oid);
       const lease = await s.claim("implement");
-      let lastScan = -1, injected = false;
+      let injected = false;
       s.fixture.holdReads = ({ provider, operation, body }) => {
         if (provider !== "linear" || operation !== "how" || !body.query.includes("attachments(")) return;
-        const scan = s.fixture.calls.filter(call => call.provider === "linear" && call.operation === "hows").length;
-        if (scan !== lastScan) { lastScan = scan; return; }
-        // The direct read before issueUpdate follows the last facts scan.
+        // Collection reads supply the baseline; this direct read precedes issueUpdate.
         if (!injected) { change(how); injected = true; }
       };
       const result = await s.action(lease, "begin");

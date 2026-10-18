@@ -39,7 +39,7 @@ export type Auth = {
   liveSession(session: Session): void;
   changed(): void;
   body(request: Request): Promise<Record<string, unknown>>;
-  fail(status: number, message: string): never;
+  fail(status: number, message: string, retryAfterSeconds?: number): never;
   json(data: unknown, status?: number): Response;
 };
 const SECRET = /^[a-f0-9]{64}$/;

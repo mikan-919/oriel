@@ -325,6 +325,7 @@ export class WorkflowLeases {
           const known = error instanceof Error && "status" in error;
           this.send(ws, { type: "error", request_id: requestId,
             status: known ? error.status : 502,
+            ...(known && "retryAfterSeconds" in error ? { retry_after_seconds: error.retryAfterSeconds } : {}),
             error: known ? error.message : "Workflow provider state could not be confirmed; no approval was inferred" });
         }
         return;
@@ -423,8 +424,14 @@ export class WorkflowLeases {
       attachment.updated_at = new Date().toISOString();
       ws.serializeAttachment(attachment);
       this.send(ws, { type: "granted", request_id: requestId, lease_id: leaseId });
-    } catch {
-      this.send(ws, { type: "rejected", request_id: requestId, error: "Workflow request rejected" });
+    } catch (error) {
+      if (error instanceof Error && "status" in error && typeof error.status === "number" &&
+          (error.status === 429 || error.status >= 500 && error.status <= 599)) {
+        this.send(ws, { type: "error", request_id: requestId, status: error.status, error: error.message,
+          ...("retryAfterSeconds" in error ? { retry_after_seconds: error.retryAfterSeconds } : {}) });
+      } else {
+        this.send(ws, { type: "rejected", request_id: requestId, error: "Workflow request rejected" });
+      }
     } finally {
       this.publish();
     }

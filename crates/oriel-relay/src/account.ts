@@ -56,13 +56,20 @@ const ALGORITHMS = [-7, -257];
 const encoder = new TextEncoder();
 
 class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly retryAfterSeconds?: number) {
     super(message);
   }
 }
 
-function fail(status: number, message: string): never {
-  throw new HttpError(status, message);
+function fail(status: number, message: string, retryAfterSeconds?: number): never {
+  throw new HttpError(status, message, retryAfterSeconds);
+}
+
+function httpErrorResponse(error: HttpError | WorkflowLeaseError): Response {
+  const retry = error instanceof HttpError ? error.retryAfterSeconds : undefined;
+  const response = json({ error: error.message, ...(retry === undefined ? {} : { retry_after_seconds: retry }) }, error.status);
+  if (retry !== undefined) response.headers.set("Retry-After", String(retry));
+  return response;
 }
 
 function now(): number {
@@ -444,7 +451,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
             : this.integrations.handle(request));
         } catch (error) {
           if (!(error instanceof HttpError) && !(error instanceof WorkflowLeaseError)) throw error;
-          response = json({ error: error.message }, error.status);
+          response = httpErrorResponse(error);
         } finally {
           this.workflows.publish();
         }
@@ -539,7 +546,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         return limited;
       }
       if (error instanceof HttpError || error instanceof WorkflowLeaseError) {
-        response = json({ error: error.message }, error.status);
+        response = httpErrorResponse(error);
       } else {
         console.error("AccountRegistry request failed");
         response = json({ error: "Authentication service failed" }, 500);

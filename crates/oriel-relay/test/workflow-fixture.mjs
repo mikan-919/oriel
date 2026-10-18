@@ -161,7 +161,10 @@ export function workflowFixture() {
       }
       if (query.includes("team(id:")) return Response.json({ data: { team: { issues: page(fixture.linears, variables.after, fixture.issuePageSize) } } });
       const candidates = fixture.linears.filter(how => !variables.prefix || how.attachments.some(attachment => attachment.url.toLowerCase().startsWith(variables.prefix.toLowerCase())));
-      return Response.json({ data: { issues: page(candidates, variables.after, fixture.issuePageSize) } });
+      const nodes = query.includes("attachments(") ? candidates.map(how => ({ ...howNode(how),
+        attachments: page(how.attachments, null, Math.min(fixture.attachmentPageSize, Number(query.match(/attachments\(first:(\d+)/)?.[1] ?? 100))),
+      })) : candidates;
+      return Response.json({ data: { issues: page(nodes, variables.after, Math.min(fixture.issuePageSize, Number(query.match(/issues\(first:(\d+)/)?.[1] ?? 100))) } });
     }
     if (url.origin === "https://api.github.com" && url.pathname === "/graphql") {
       assert.equal(request.headers.get("Authorization"), "Bearer limited-installation-token");

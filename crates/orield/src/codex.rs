@@ -1175,6 +1175,7 @@ mod tests {
             for reason in [
                 workflow::Stop::Changed,
                 workflow::Stop::Uncertain,
+                workflow::Stop::RateLimited(120),
                 workflow::Stop::WebPaused,
             ] {
                 let expected = reason.to_string();

@@ -121,7 +121,10 @@ export class WorkflowReader {
       const code = error instanceof Error && "providerCode" in error && typeof error.providerCode === "string" &&
         /^(?:http_[0-9]{3}|graphql_error)(?:\/[A-Z_]{1,40})?$/.test(error.providerCode) ? error.providerCode : "transport_or_response_error";
       const operation = query.match(/\{\s*([A-Za-z][_0-9A-Za-z]*)/)?.[1] ?? "unknown";
-      this.auth.fail(502, `Linear workflow request failed (${code}; ${operation}); provider state could not be confirmed`);
+      const retryAfterSeconds = error instanceof Error && "retryAfterSeconds" in error &&
+        typeof error.retryAfterSeconds === "number" ? error.retryAfterSeconds : undefined;
+      this.auth.fail(retryAfterSeconds === undefined ? 502 : 429,
+        `Linear workflow request failed (${code}; ${operation}); provider state could not be confirmed`, retryAfterSeconds);
     }
   }
 
@@ -175,12 +178,18 @@ export class WorkflowReader {
     const cursors = new Set<string>();
     do {
       // Do not filter the team: a foreign-team formal link must block, not look unlinked.
-      const data: { issues: Page<{ id: string }> } = await this.workflowLinear(context,
-        "query($prefix:String!,$after:String){issues(first:100,after:$after,includeArchived:true,orderBy:createdAt,filter:{attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id} pageInfo{hasNextPage endCursor}}}",
+      // Read HOW metadata in the collection instead of issuing one extra query
+      // per HOW on every live guard. Bound both connections to keep complexity
+      // below Linear's per-query limit, and retain full attachment pagination.
+      const data: { issues: Page<LinearHow & { team: { id: string }; attachments: Page<{ url: string }> }> } = await this.workflowLinear(context,
+        "query($prefix:String!,$after:String){issues(first:20,after:$after,includeArchived:true,orderBy:createdAt,filter:{attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id identifier title description url state{id name type} team{id} attachments(first:20,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}",
         { prefix: `https://github.com/${context.repository.owner}/${context.repository.name}/issues/`, after });
-      const ids = [...new Set(data.issues.nodes.map(candidate => candidate.id))].filter(id => !hows.some(how => how.id === id));
-      for (let offset = 0; offset < ids.length; offset += 4) {
-        const batch = await Promise.all(ids.slice(offset, offset + 4).map(id => this.workflowHow(context, id)));
+      const candidates = [...new Map(data.issues.nodes.map(candidate => [candidate.id, candidate])).values()]
+        .filter(candidate => !hows.some(how => how.id === candidate.id));
+      for (let offset = 0; offset < candidates.length; offset += 4) {
+        const batch = await Promise.all(candidates.slice(offset, offset + 4).map(candidate =>
+          candidate.attachments.pageInfo.hasNextPage ? this.workflowHow(context, candidate.id) :
+            { ...candidate, attachments: candidate.attachments.nodes }));
         context.check();
         for (const how of batch) {
           if (!how) this.auth.fail(502, "Linked HOW is unavailable");
@@ -529,9 +538,27 @@ export class WorkflowReader {
           error !== null && typeof error === "object" && "message" in error && typeof error.message === "string" &&
           /^Entity not found:\s*Issue\b/i.test(error.message) && "extensions" in error &&
           error.extensions !== null && typeof error.extensions === "object" && "code" in error.extensions && error.extensions.code === "INPUT_ERROR");
-      const code = errors.map(error => error?.extensions?.code).find(code => typeof code === "string" && LINEAR_ERROR_CODES.has(code));
+      const codes = errors.map(error => error?.extensions?.code);
+      const limited = response.status === 429 || codes.includes("RATELIMITED");
+      const code = limited ? "RATELIMITED" : codes.find(code => typeof code === "string" && LINEAR_ERROR_CODES.has(code));
       const providerCode = `${response.ok ? "graphql_error" : `http_${response.status}`}${code ? `/${code}` : ""}`;
-      throw Object.assign(new Error("Linear request failed"), { providerCode, missingIssue });
+      // Linear's reset headers are UTC epoch milliseconds. Only an exhausted
+      // bucket may delay retries; other buckets can have unrelated reset times.
+      let retryAfterSeconds: number | undefined;
+      if (limited) {
+        retryAfterSeconds = 60;
+        const retry = response.headers.get("Retry-After");
+        if (retry && /^\d+$/.test(retry)) retryAfterSeconds = Math.max(retryAfterSeconds, Number(retry));
+        for (const bucket of ["Requests", "Complexity", "Endpoint-Requests"]) {
+          const remaining = response.headers.get(`X-RateLimit-${bucket}-Remaining`);
+          const reset = response.headers.get(`X-RateLimit-${bucket}-Reset`);
+          if (remaining !== null && /^0+$/.test(remaining) && reset && /^\d+$/.test(reset)) {
+            retryAfterSeconds = Math.max(retryAfterSeconds, Math.ceil((Number(reset) - Date.now()) / 1000));
+          }
+        }
+        retryAfterSeconds = Math.min(86400, retryAfterSeconds);
+      }
+      throw Object.assign(new Error("Linear request failed"), { providerCode, missingIssue, retryAfterSeconds });
     }
     return result.data;
   }

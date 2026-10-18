@@ -30,11 +30,14 @@ export default {
     const snapshot = /^\/api\/workflows\/[a-f0-9]{32}(\/snapshot)?$/.exec(url.pathname);
     if (snapshot && request.method === (snapshot[1] ? "POST" : "GET")) {
       const account = env.ACCOUNTS.get(env.ACCOUNTS.idFromName("accounts"));
-      const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
+      const json = (value: unknown, status = 200, retry?: number) => Response.json(value, { status,
+        headers: { "Cache-Control": "no-store", ...(retry === undefined ? {} : { "Retry-After": String(retry) }) } });
       try {
         const prepared = await account.prepareSnapshot(request.clone());
         if ("error" in prepared) return json({ error: prepared.error }, prepared.status);
-        const reader = new WorkflowReader(env, { fail: (status, message) => { throw Object.assign(new Error(message), { status }); } });
+        const reader = new WorkflowReader(env, { fail: (status, message, retryAfterSeconds) => {
+          throw Object.assign(new Error(message), { status, retryAfterSeconds });
+        } });
         const value = await reader.read(prepared.value);
         const finished = await account.finishSnapshot(request, prepared.value.fence, value, await digest(value), prepared.value.issue_number);
         if ("error" in finished) return json({ error: finished.error }, finished.status);
@@ -43,7 +46,9 @@ export default {
         const quota = quotaResponse(error);
         if (quota) return quota;
         const known = error instanceof Error && "status" in error && typeof error.status === "number";
-        return json({ error: known ? error.message : "Workflow provider state could not be confirmed; no approval was inferred" }, known ? error.status as number : 502);
+        const retry = known && "retryAfterSeconds" in error && typeof error.retryAfterSeconds === "number" ? error.retryAfterSeconds : undefined;
+        return json({ error: known ? error.message : "Workflow provider state could not be confirmed; no approval was inferred",
+          ...(retry === undefined ? {} : { retry_after_seconds: retry }) }, known ? error.status as number : 502, retry);
       }
     }
     // Preserve the original provider URLs as well as the /api routes.

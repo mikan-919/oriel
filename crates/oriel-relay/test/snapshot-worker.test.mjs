@@ -76,6 +76,35 @@ async function setup() {
   return { ...paired, worker, fixture };
 }
 
+test("HOW collections avoid per-issue reads while preserving paginated link ambiguity", async () => {
+  const s = await setup();
+  try {
+    for (let index = 0; index < 30; index++) {
+      const how = s.fixture.addHow("Todo", 100 + index);
+      how.id = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      how.identifier = `ENG-${100 + index}`;
+    }
+    s.fixture.calls.length = 0;
+    const snapshot = await s.owner.api(`/api/workflows/${device}`);
+    assert.equal(snapshot.status, 200, JSON.stringify(snapshot.data));
+    assert.equal(snapshot.data.workflows[0].phase, "approved");
+    const calls = s.fixture.calls.filter(call => call.provider === "linear");
+    assert.equal(calls.filter(call => call.operation === "hows").length, 2, "31 HOWs need two collection pages");
+    assert.equal(calls.filter(call => call.operation === "how" && call.body.query.includes("attachments(")).length, 0,
+      "HOW details come from the collection, not one query per HOW");
+
+    // The matching link lies beyond the collection's first attachment page.
+    const duplicate = s.fixture.addHow("Todo");
+    duplicate.id = "22222222-2222-4222-8222-222222222222";
+    duplicate.attachments.unshift(...Array.from({ length: 20 }, (_, i) => ({ url: `https://example.com/${i}` })));
+    s.fixture.attachmentPageSize = 2;
+    const ambiguous = await s.owner.api(`/api/workflows/${device}`);
+    assert.equal(ambiguous.status, 200, JSON.stringify(ambiguous.data));
+    assert.equal(ambiguous.data.workflows[0].phase, "blocked");
+    assert.match(ambiguous.data.workflows[0].blocked_reason, /Multiple Linear issues/);
+  } finally { await s.worker.dispose(); }
+});
+
 test("Batched issue comments preserve later-page human requests and reject partial GraphQL data", async () => {
   const s = await setup();
   try {

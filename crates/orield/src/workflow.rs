@@ -256,6 +256,7 @@ pub(super) enum Stop {
     PullClosed,
     TargetChanged,
     ModelCapacity,
+    RateLimited(u64),
     WebPaused,
 }
 impl Stop {
@@ -267,7 +268,15 @@ impl Stop {
                 | Self::Rejected
                 | Self::Uncertain
                 | Self::ModelCapacity
+                | Self::RateLimited(_)
         )
+    }
+
+    fn retry_delay(&self) -> Duration {
+        Duration::from_secs(match self {
+            Self::RateLimited(seconds) => (*seconds).clamp(60, 86400),
+            _ => 15,
+        })
     }
 }
 impl fmt::Display for Stop {
@@ -287,6 +296,7 @@ impl fmt::Display for Stop {
             Self::ModelCapacity => {
                 "selected Codex model is at capacity; approval and local work preserved"
             }
+            Self::RateLimited(_) => "provider rate limit exceeded; local work preserved",
             Self::WebPaused => "paused from Oriel Web; approval and local work preserved",
         })
     }
@@ -518,7 +528,9 @@ impl Session {
                                             .filter(|message| !message.is_empty() && message.len() <= 1024 && !message.chars().any(char::is_control))
                                             .unwrap_or("Relay error details unavailable");
                                         let status = value["status"].as_u64().filter(|status| (400..=599).contains(status));
-                                        let stop = if status == Some(409) && detail == "Workflow lease is unavailable" {
+                                        let stop = if status == Some(429) {
+                                            Stop::RateLimited(value["retry_after_seconds"].as_u64().unwrap_or(60))
+                                        } else if status == Some(409) && detail == "Workflow lease is unavailable" {
                                             Stop::LeaseLost
                                         } else { Stop::Uncertain };
                                         return Err(anyhow!("workflow {operation} status {}: {detail}", status.unwrap_or(502)).context(stop));
@@ -716,6 +728,11 @@ impl Session {
     }
     async fn http_failure(mut response: reqwest::Response, operation: &str) -> anyhow::Error {
         let status = response.status();
+        let retry = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
         // Only Relay's bounded JSON error is diagnostic; never log raw bodies
         // (Cloudflare HTML, provider payloads, or successful credential replies).
         let mut body = Vec::new();
@@ -726,8 +743,9 @@ impl Session {
             }
             body.extend_from_slice(&chunk);
         }
-        let detail = serde_json::from_slice::<Value>(&body)
-            .ok()
+        let value = serde_json::from_slice::<Value>(&body).ok();
+        let detail = value
+            .as_ref()
             .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
             .filter(|message| {
                 !message.is_empty()
@@ -741,7 +759,12 @@ impl Session {
                 .as_deref()
                 .unwrap_or("Relay error details unavailable")
         );
-        if status == reqwest::StatusCode::CONFLICT
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let seconds = retry
+                .or_else(|| value.as_ref()?.get("retry_after_seconds")?.as_u64())
+                .unwrap_or(60);
+            error.context(Stop::RateLimited(seconds))
+        } else if status == reqwest::StatusCode::CONFLICT
             && detail.as_deref() == Some("Workflow lease is unavailable")
         {
             error.context(Stop::LeaseLost)
@@ -2531,6 +2554,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
         "HOW planning is read-only; code requires human Todo approval and target opt-in",
     );
     loop {
+        let mut retry_delay = Duration::from_secs(15);
         let connection = tokio::select! {
             connection = Session::connect(
                 origin,
@@ -2557,22 +2581,27 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
                     Ok(()) => return Ok(()),
                     Err(error) if once => return Err(error),
                     Err(error) => {
+                        retry_delay = error
+                            .downcast_ref::<Stop>()
+                            .map(Stop::retry_delay)
+                            .unwrap_or(Duration::from_secs(15));
+                        let reason = match error.downcast_ref::<Stop>() {
+                            Some(Stop::RateLimited(_)) => "Provider rate limited",
+                            Some(Stop::Rejected) => "Request rejected",
+                            Some(Stop::ModelCapacity) => "Codex unavailable",
+                            Some(Stop::LeaseLost) => "Lease lost",
+                            _ => "Connection interrupted",
+                        };
+                        console.warning(format!(
+                            "{reason}: {error:#}; retrying in {}s. Local work preserved.",
+                            retry_delay.as_secs()
+                        ));
                         if matches!(error.downcast_ref::<Stop>(), Some(Stop::Rejected)) {
-                            console.warning(format!("Request rejected: {error:#}; retrying in 15s. Local work preserved."));
                             let _ = tokio::time::timeout(
                                 Duration::from_secs(5),
                                 session.socket.close(None),
                             )
                             .await;
-                        } else if matches!(error.downcast_ref::<Stop>(), Some(Stop::ModelCapacity))
-                        {
-                            console.warning(format!("Codex unavailable: {error:#}; retrying in 15s. Approval and local work preserved."));
-                        } else if matches!(error.downcast_ref::<Stop>(), Some(Stop::LeaseLost)) {
-                            console.warning(format!(
-                                "Lease lost: {error:#}; retrying in 15s. Local work preserved."
-                            ));
-                        } else {
-                            console.warning(format!("Connection interrupted: {error:#}; retrying in 15s. Local work preserved."));
                         }
                     }
                 }
@@ -2585,7 +2614,7 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
             }
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(15)) => {},
+            _ = tokio::time::sleep(retry_delay) => {},
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
     }
@@ -3724,6 +3753,14 @@ mod tests {
                     }).to_string().into())).await.unwrap();
                     continue;
                 }
+                if request["type"] == "claim" {
+                    socket.send(Message::Text(json!({
+                        "type":"error", "request_id":request["request_id"], "status":429,
+                        "error":"Linear workflow request failed (http_400/RATELIMITED; issue)",
+                        "retry_after_seconds":120
+                    }).to_string().into())).await.unwrap();
+                    continue;
+                }
                 socket.send(Message::Text(json!({
                     "type": if request["type"] == "check" { "checked" } else { "heartbeat" },
                     "request_id": request["request_id"], "lease_id": "lease"
@@ -3732,17 +3769,24 @@ mod tests {
         });
         let provider = tokio::spawn(async move {
             let reason = r#"{"error":"Linear workflow request failed (http_503); provider state could not be confirmed"}"#;
-            for body in [
-                reason.to_owned(),
-                "<html>private-upstream-payload</html>".to_owned(),
-                json!({"error": "private-upstream-payload".repeat(300)}).to_string(),
-                json!({"error": "forged\nlog-line"}).to_string(),
+            for (status, body) in [
+                (502, reason.to_owned()),
+                (502, "<html>private-upstream-payload</html>".to_owned()),
+                (
+                    502,
+                    json!({"error": "private-upstream-payload".repeat(300)}).to_string(),
+                ),
+                (502, json!({"error": "forged\nlog-line"}).to_string()),
+                (
+                    429,
+                    json!({"error": "Linear rate limited", "retry_after_seconds": 180}).to_string(),
+                ),
             ] {
                 let (mut stream, _) = http.accept().await.unwrap();
                 let mut buffer = [0; 4096];
                 assert!(stream.read(&mut buffer).await.unwrap() > 0);
                 stream.write_all(format!(
-                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 ).as_bytes()).await.unwrap();
             }
@@ -3806,6 +3850,26 @@ mod tests {
             assert!(!diagnostic.contains("private-upstream-payload"));
             assert!(!diagnostic.contains("forged"));
         }
+        let limited = session
+            .post("actions", json!({"action":"publish"}))
+            .await
+            .unwrap_err();
+        let stop = limited.downcast_ref::<Stop>().unwrap();
+        assert!(matches!(stop, Stop::RateLimited(180)));
+        assert!(stop.retryable());
+        assert_eq!(stop.retry_delay(), Duration::from_secs(180));
+        let limited = session
+            .exchange(json!({"type":"claim"}), "granted")
+            .await
+            .unwrap_err();
+        let stop = limited.downcast_ref::<Stop>().unwrap();
+        assert!(matches!(stop, Stop::RateLimited(120)));
+        assert_eq!(stop.retry_delay(), Duration::from_secs(120));
+        assert_eq!(Stop::RateLimited(0).retry_delay(), Duration::from_secs(60));
+        assert_eq!(
+            Stop::RateLimited(u64::MAX).retry_delay(),
+            Duration::from_secs(86400)
+        );
         session.socket.close(None).await.unwrap();
         provider.await.unwrap();
         ownership.await.unwrap();

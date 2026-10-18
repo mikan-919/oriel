@@ -481,9 +481,21 @@ test("Workflow routing uses host authority without browser fallback and never ca
     assert.equal((await connection.rpc({ type: "release", lease_id: granted.lease_id })).type, "released");
     fixture.failures.set("repository", 503);
     const failed = await connection.rpc(claim(current));
-    assert.equal(failed.type, "rejected");
-    assert.equal(failed.error, "Workflow request rejected");
+    assert.equal(failed.type, "error");
+    assert.equal(failed.status, 502);
+    assert.match(failed.error, /GitHub workflow GET failed \(HTTP 503\)/);
     fixture.failures.delete("repository");
+    fixture.failures.set("hows", 429);
+    const discovery = await daemon.api(`/api/workflows/${device}`, undefined, hostHeaders);
+    assert.equal(discovery.status, 429);
+    assert.equal(discovery.data.retry_after_seconds, 60);
+    const limited = await connection.rpc(claim(current));
+    assert.equal(limited.type, "error");
+    assert.equal(limited.status, 429);
+    assert.equal(limited.retry_after_seconds, 60);
+    assert.match(limited.error, /RATELIMITED/);
+    assert.doesNotMatch(limited.error, /private-/);
+    fixture.failures.delete("hows");
     assert.equal((await connection.rpc(claim(current))).type, "granted");
   } finally { await worker.dispose(); }
 });
