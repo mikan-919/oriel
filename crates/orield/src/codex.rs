@@ -337,6 +337,7 @@ fn trim_command_output(value: &mut Value) {
 pub(super) struct Engine {
     pub client: Client,
     cancel: watch::Sender<bool>,
+    ended: watch::Receiver<Option<String>>,
     task: Option<JoinHandle<Result<()>>>,
     stop_error: Option<String>,
     hub: Hub,
@@ -440,6 +441,7 @@ impl Engine {
         let (sender, mut input) = mpsc::channel(32);
         let (events, _) = broadcast::channel(256);
         let (cancel, mut cancelled) = watch::channel(false);
+        let (ended_tx, ended) = watch::channel(None);
         let requests = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
         let client = Client {
             sender,
@@ -549,6 +551,10 @@ impl Engine {
                 _ = cancelled.changed() => Ok(()),
                 result = process => result,
             };
+            ended_tx.send_replace(Some(match &process {
+                Ok(()) => "Codex engine stopped".to_owned(),
+                Err(error) => format!("Codex app-server ended: {error:#}"),
+            }));
             let killed = git::stop_group(pid);
             let reaped = child
                 .wait()
@@ -588,6 +594,7 @@ impl Engine {
         let mut engine = Self {
             client,
             cancel,
+            ended,
             task: Some(task),
             stop_error: None,
             hub,
@@ -690,14 +697,24 @@ fn response_for(
     }
 }
 
+// A watch value retains termination even if it happened before Control began waiting.
+async fn wait_engine_end(ended: &mut watch::Receiver<Option<String>>) {
+    if ended.borrow().is_some() {
+        return;
+    }
+    let _ = ended.changed().await;
+}
+
 pub(super) struct Control {
     shutdown: watch::Sender<bool>,
-    pub task: JoinHandle<()>,
+    pub task: JoinHandle<Result<()>>,
 }
 impl Control {
-    pub async fn stop(&mut self) {
+    pub async fn stop(&mut self) -> Result<()> {
         let _ = self.shutdown.send(true);
-        let _ = (&mut self.task).await;
+        (&mut self.task)
+            .await
+            .context("Codex control task failed")?
     }
 }
 impl Drop for Control {
@@ -735,20 +752,14 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
     let cwd = cwd.to_owned();
     let (shutdown, mut stopping) = watch::channel(false);
     let task = tokio::spawn(async move {
-        let home = match git::state_root().and_then(|root| {
+        let home = git::state_root().and_then(|root| {
             let path = root
                 .join("codex")
                 .join(&identity.device_id)
                 .join(random_hex::<8>()?);
             git::private_directory(&path)?;
             Ok(path)
-        }) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!("Codex control unavailable: {error}");
-                return;
-            }
-        };
+        })?;
         // Conversation files use a stable device/project home; credentials are copied only for this process.
         let stable = home.parent().unwrap().join(format!(
             "project-{}",
@@ -769,17 +780,12 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
             workflow::copy_model_auth(&stable.join(".codex"))?;
             Ok(())
         })();
-        if let Err(error) = prepared {
-            tracing::warn!("Codex control unavailable: {error}");
-            return;
-        }
+        prepared?;
         let auth = workflow::ModelAuth(stable.join(".codex/auth.json"));
         let transcript = home.join("transcript.jsonl");
         let stderr = home.join("stderr.log");
-        if git::private_file(&transcript, b"").is_err() || git::private_file(&stderr, b"").is_err()
-        {
-            return;
-        }
+        git::private_file(&transcript, b"")?;
+        git::private_file(&stderr, b"")?;
         let mut command = Command::new("codex");
         command
             .env_clear()
@@ -799,42 +805,49 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                 "approvals_reviewer=\"user\"",
             ])
             .current_dir(&cwd)
-            .stderr(fs::OpenOptions::new().write(true).open(&stderr).unwrap());
+            .stderr(fs::OpenOptions::new().write(true).open(&stderr)?);
         if let Some(key) = std::env::var_os("OPENAI_API_KEY") {
             command.env("OPENAI_API_KEY", key);
         }
         let mut engine =
-            match Engine::spawn(command, &cwd, "相談・レビュー", false, false, &transcript).await
-            {
-                Ok(engine) => engine,
-                Err(error) => {
-                    tracing::warn!("Codex control unavailable: {error}");
-                    return;
-                }
-            };
+            Engine::spawn(command, &cwd, "相談・レビュー", false, false, &transcript).await?;
+        let mut ended = engine.ended.clone();
         let mut events = hub.events.subscribe();
         loop {
             let mut opened = None;
             let mut last_reply = None;
             let connected = async {
                 let mut url = origin.join(&format!("/api/codex/{}/host", identity.device_id))?;
-                url.set_scheme(if origin.scheme() == "https" { "wss" } else { "ws" }).map_err(|_| anyhow!("invalid Relay URL"))?;
+                url.set_scheme(if origin.scheme() == "https" {
+                    "wss"
+                } else {
+                    "ws"
+                })
+                .map_err(|_| anyhow!("invalid Relay URL"))?;
                 let mut request = url.as_str().into_client_request()?;
-                let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", identity.host_token))?;
-                token.set_sensitive(true); request.headers_mut().insert("Authorization", token);
-                let (mut socket, response) = tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
-                let batching = response.headers().get("x-oriel-output-batch").is_some_and(|value| value == "200");
+                let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(
+                    &format!("Bearer {}", identity.host_token),
+                )?;
+                token.set_sensitive(true);
+                request.headers_mut().insert("Authorization", token);
+                let (mut socket, response) =
+                    tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+                let batching = response
+                    .headers()
+                    .get("x-oriel-output-batch")
+                    .is_some_and(|value| value == "200");
                 let mut pending = Vec::<Value>::new();
                 let mut pending_bytes = 0;
                 let mut flush = tokio::time::interval(Duration::from_millis(200));
                 flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 opened = Some(tokio::time::Instant::now());
-                socket.send(Message::Text(hub.state().to_string().into())).await?;
+                socket
+                    .send(Message::Text(hub.state().to_string().into()))
+                    .await?;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
                 let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
                 loop {
                     tokio::select! {
-                        _ = stopping.changed() => return Ok(()),
                         _ = flush.tick(), if !pending.is_empty() => {
                             socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
                             pending_bytes = 0;
@@ -897,10 +910,13 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                     }
                 }
                 Ok::<(), anyhow::Error>(())
-            }.await;
-            if *stopping.borrow() || engine.client.sender.is_closed() {
-                break;
-            }
+            };
+            let connected = tokio::select! {
+                biased;
+                _ = stopping.changed() => break,
+                _ = wait_engine_end(&mut ended) => break,
+                result = connected => result,
+            };
             if let Err(error) = connected {
                 if let Some(opened) = opened {
                     let silence = last_reply.unwrap_or(opened).elapsed().as_secs();
@@ -912,12 +928,16 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
                     tracing::warn!("Codex Web connection unavailable: {error:#}; retrying in 15s");
                 }
             }
-            tokio::select! { _ = tokio::time::sleep(Duration::from_secs(15)) => {}, _ = stopping.changed() => break }
+            tokio::select! { biased; _ = stopping.changed() => break, _ = wait_engine_end(&mut ended) => break, _ = tokio::time::sleep(Duration::from_secs(15)) => {} }
         }
-        if let Err(error) = engine.stop().await {
-            tracing::error!("Codex shutdown failed: {error:#}");
-        }
+        let reason = ended.borrow().clone();
+        let cleanup = engine.stop().await;
         drop(auth);
+        cleanup?;
+        if let Some(reason) = reason {
+            bail!("{reason}; restart `orield codex` to restore the consultation service");
+        }
+        Ok(())
     });
     Ok(Control { shutdown, task })
 }
@@ -925,6 +945,32 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn termination_notification_is_retained_and_interrupts_pending_work() {
+        for already_ended in [false, true] {
+            let (sender, mut ended) = watch::channel(None);
+            if already_ended {
+                sender.send_replace(Some("protocol ended".to_owned()));
+            }
+            let waiting = async {
+                tokio::select! {
+                    _ = wait_engine_end(&mut ended) => {},
+                    _ = std::future::pending::<()>() => unreachable!(),
+                }
+            };
+            let notify = async {
+                tokio::task::yield_now().await;
+                sender.send_replace(Some("protocol ended".to_owned()));
+            };
+            tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::join!(waiting, notify);
+            })
+            .await
+            .unwrap();
+            assert!(ended.borrow().is_some());
+        }
+    }
 
     #[test]
     fn command_output_tails_fit_relay_frames_in_events_and_thread_replies() {
@@ -1303,6 +1349,15 @@ mod tests {
                     while !engine.client.sender.is_closed() {
                         tokio::task::yield_now().await;
                     }
+                    wait_engine_end(&mut engine.ended).await;
+                    assert!(
+                        engine
+                            .ended
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .contains("app-server ended")
+                    );
                     engine.stop().await.unwrap();
                 })
                 .await
