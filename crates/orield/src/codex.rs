@@ -1028,7 +1028,9 @@ mod tests {
                             switch(process.argv[1]){
                                 case 'zero':process.exit(0);break;
                                 case 'nonzero':process.exit(7);break;
-                                case 'eof':process.stdout.end();break;
+                                // stdout.end() leaves Node's stdout descriptor open.
+                                // Close only stdout, keeping the process alive to test EOF.
+                                case 'eof':require('node:fs').closeSync(1);break;
                                 case 'protocol':process.stdout.write('invalid json\n');break;
                             }
                         }
@@ -1109,7 +1111,9 @@ mod tests {
                     tokio::spawn(async move { client.request("end", json!({})).await });
                 let error = tokio::time::timeout(Duration::from_secs(5), control)
                     .await
-                    .unwrap()
+                    .unwrap_or_else(|_| {
+                        panic!("Control did not stop: phase={phase}, ending={ending}")
+                    })
                     .unwrap()
                     .unwrap_err();
                 assert!(format!("{error:#}").contains("restart `orield codex`"));
