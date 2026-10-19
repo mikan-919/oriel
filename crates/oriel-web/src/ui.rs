@@ -58,6 +58,7 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
             </head>
 
             <body>
+                <a class="skip-link" href="#page-title">"本文へスキップ"</a>
                 <main id="dashboard" class="shell">
                     <nav class="sidebar" aria-label="メインナビゲーション">
                         <strong class="brand"><span class="brand-mark" aria-hidden="true">"o"</span>"Oriel"</strong>
@@ -146,7 +147,7 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                         <button id="codex-connect" type="button">"接続"</button>
                         <p id="codex-status" role="status" aria-live="polite">"ログインするとCodexを操作できます。"</p>
                         <label for="codex-engine">"操作するCodex"</label>
-                        <select id="codex-engine"></select>
+                        <select id="codex-engine"><option value="" disabled="">"接続すると選択できます"</option></select>
                         <div class="codex-controls">
                             <button id="codex-pause" type="button">"自動ワークフローを一時停止"</button>
                             <button id="codex-resume" type="button">"自動ワークフローを再開"</button>
@@ -176,7 +177,7 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                                 <button id="codex-fork" type="button">"この会話から分岐"</button>
                                 <button id="codex-archive" type="button">"保管・復元"</button>
                                 <div id="codex-output" role="log" aria-label="Codexの回答と実行結果"></div>
-                                <details><summary>"変更差分"</summary><pre id="codex-diff"></pre></details>
+                                <details hidden=""><summary>"変更差分"</summary><pre id="codex-diff"></pre></details>
                                 <form id="codex-form">
                                     <label for="codex-input">"Codexへの指示"</label>
                                     <textarea id="codex-input" rows="4" required="" maxlength="32000"></textarea>

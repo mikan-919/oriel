@@ -40,7 +40,8 @@ export function mountCodex() {
         engines = []; engineId = ""; threadId = ""; turnId = ""; active = false;
         requests.clear(); answered.clear(); ui.requests.replaceChildren();
         ui.engine.replaceChildren(); ui.threads.replaceChildren();
-        if (clear) { items.clear(); ui.output.replaceChildren(); ui.diff.textContent = ""; ui.input.value = ""; ui.name.value = ""; }
+        const placeholder = node("option", "接続すると選択できます"); placeholder.value = ""; placeholder.disabled = true; ui.engine.append(placeholder);
+        if (clear) { items.clear(); ui.output.replaceChildren(); ui.diff.textContent = ""; ui.diff.parentElement.hidden = true; ui.input.value = ""; ui.name.value = ""; }
         controls();
     }
     function rpc(method, params = {}, engine = engineId) {
@@ -152,7 +153,7 @@ export function mountCodex() {
             if (!items.has(key)) outputItem({id, type: "agentMessage", text: ""});
             const element = items.get(key); element.textContent = (element.textContent + (params.delta || "")).slice(-100000);
         }
-        if (event.method === "turn/diff/updated") ui.diff.textContent = params.diff || "";
+        if (event.method === "turn/diff/updated") { ui.diff.textContent = params.diff || ""; ui.diff.parentElement.hidden = !params.diff; }
         if (event.method === "error") status(params.error?.message || "Codexでエラーが発生しました。");
         if (event.method === "oriel/engineEnded") { active = false; status("Codexの実行が終了しました。保存済みの作業は残っています。"); }
         controls();
@@ -173,7 +174,7 @@ export function mountCodex() {
     }
     function showThread(thread) {
         threadId = thread.id; ui.name.value = thread.name || ""; turnId = ""; active = false;
-        items.clear(); ui.output.replaceChildren(); ui.diff.textContent = "";
+        items.clear(); ui.output.replaceChildren(); ui.diff.textContent = ""; ui.diff.parentElement.hidden = true;
         for (const turn of thread.turns ?? []) { for (const item of turn.items ?? []) outputItem(item); if (turn.status === "inProgress") { active = true; turnId = turn.id; } }
         status("会話を開きました。"); controls();
     }

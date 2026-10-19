@@ -6,7 +6,7 @@ import vm from "node:vm";
 test("consultation host offline replaces preparation with startup guidance", async () => {
   const nodes = new Map();
   const element = () => ({
-    value: "", textContent: "", disabled: false, listeners: {},
+    value: "", textContent: "", disabled: false, listeners: {}, parentElement: {hidden: false},
     addEventListener(name, callback) { this.listeners[name] = callback; },
     replaceChildren() {}, append() {}, querySelector() { return element(); }
   });
