@@ -3,6 +3,7 @@ import {mountWorkflow} from "./workflow.js";
 const codexPanel = mountCodex();
 const workflowPanel = mountWorkflow({
     onDevice: id => perform(async () => {
+        if (pendingWhat) throw new Error("結果不明のWHATを元の対象・IDで再確認してください。");
         repositoryRequest++; repositoryDeviceId = id; workflowSnapshot = null; render();
         await refreshWorkflow();
     }),
@@ -12,11 +13,11 @@ const workflowPanel = mountWorkflow({
         document.getElementById("codex-connect").click();
         status.textContent = control ? "端末に接続後、Codexの一時停止・再開で実行を操作してください。" : "この端末のCodexに接続します。実装の会話は操作するCodexから選択してください。";
     },
-    onCreate: () => { document.getElementById("what-status").textContent = ""; document.getElementById("workflow-create-dialog").showModal(); },
+    onCreate: () => { document.getElementById("what-status").textContent = pendingWhat ? "元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。" : ""; document.getElementById("workflow-create-dialog").showModal(); },
 });
 function renderWorkflowPanel() {
     const device = devices.find(item => item.device_id === repositoryDeviceId);
-    workflowPanel.update({snapshot: workflowSnapshot, device, devices, progress: device && progressSnapshot.get(device.device_id), live:progressStream === "live", userId:user?.id, busy});
+    workflowPanel.update({snapshot: workflowSnapshot, device, devices, progress: device && progressSnapshot.get(device.device_id), live:progressStream === "live", userId:user?.id, busy, pendingWhat:!!pendingWhat});
 }
 
 const pairing = window.orielPairing;
@@ -176,7 +177,8 @@ function render() {
     refreshIssuesButton.disabled = busy || !user || (!integrations?.github && !integrations?.linear);
     repositoryWork.hidden = !user || !devices.length;
     refreshRepositoryButton.disabled = busy || !user || !repositoryDeviceId;
-    whatFields.disabled = busy || !user || !repositoryDeviceId || !workflowSnapshot;
+    whatFields.disabled = busy || !user || (!pendingWhat && (!repositoryDeviceId || !workflowSnapshot));
+    whatForm.querySelector('button[type="submit"]').textContent = pendingWhat ? "元の内容・IDで再確認" : "GitHub Issueを作成";
     codexPanel.setContext(user, devices);
 }
 
@@ -199,6 +201,10 @@ function setUser(next) {
     if (user?.id !== next?.id) {
         disconnect();
         accountEpoch++;
+        perform.operation = null;
+        busy = false;
+        sessionLoading = false;
+        workflowRefreshing = false;
         stopProgress();
         progressSnapshot.clear();
         deviceRows.clear();
@@ -208,6 +214,8 @@ function setUser(next) {
         repositoryDeviceId = null;
         workflowSnapshot = null;
         pendingWhat = null;
+        whatTitle.disabled = false;
+        whatBody.disabled = false;
         whatTitle.value = "";
         whatBody.value = "";
         integrations = null;
@@ -233,23 +241,49 @@ function setUser(next) {
 
 async function api(path, body) {
     const requestEpoch = accountEpoch;
-    const response = await fetch(path, {
-        method: body === undefined ? "GET" : "POST",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: body === undefined ? {} : {"Content-Type": "application/json"},
-        body: body === undefined ? undefined : JSON.stringify(body),
+    const HTTP_TIMEOUT_MS = 30000;
+    const controller = new AbortController();
+    let timer;
+    const stale = () => Object.assign(new Error("以前のアカウントの要求です。"), {staleAccount: true});
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            reject(Object.assign(new Error(body === undefined
+                ? "HTTP要求が30秒で期限切れになりました。再度確認してください。"
+                : "HTTP要求が30秒で期限切れになりました。変更結果は不明です。自動再送は行いません。"),
+            {name: "HttpTimeoutError"}));
+            controller.abort();
+        }, HTTP_TIMEOUT_MS);
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-        if (response.status === 401) {
-            const sessionExpired = accountEpoch === requestEpoch;
-            if (sessionExpired) setUser(null);
-            throw Object.assign(new Error("セッションが失効したか、未ログインです。再度ログインしてください。"), {sessionExpired});
+    const request = async () => {
+        const response = await fetch(path, {
+            method: body === undefined ? "GET" : "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: body === undefined ? {} : {"Content-Type": "application/json"},
+            body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        const data = await response.json().catch(() => ({}));
+        // Only the winning request may update authentication or return data.
+        return {response, data};
+    };
+    try {
+        const {response, data} = await Promise.race([request(), deadline]);
+        if (accountEpoch !== requestEpoch) throw stale();
+        if (!response.ok) {
+            if (response.status === 401) {
+                setUser(null);
+                throw Object.assign(new Error("セッションが失効したか、未ログインです。再度ログインしてください。"), {sessionExpired: true, expiredEpoch: accountEpoch});
+            }
+            throw new Error(data.error || data.message || `リクエストが拒否されました（${response.status}）。`);
         }
-        throw new Error(data.error || data.message || `リクエストが拒否されました（${response.status}）。`);
+        return data;
+    } catch (error) {
+        if (accountEpoch !== requestEpoch && !error.sessionExpired) throw stale();
+        throw error;
+    } finally {
+        clearTimeout(timer);
     }
-    return data;
 }
 
 function errorText(error) {
@@ -264,14 +298,20 @@ function errorText(error) {
 
 async function perform(action) {
     if (busy) return;
+    const operation = {};
+    perform.operation = operation;
+    const epoch = accountEpoch;
     busy = true;
     status.textContent = "処理中…";
     render();
     try {
         await action();
     } catch (error) {
-        status.textContent = errorText(error);
+        const active = perform.operation === operation;
+        const expired = error.sessionExpired && perform.operation === null && error.expiredEpoch === accountEpoch;
+        if (!error.staleAccount && ((active && epoch === accountEpoch) || expired)) status.textContent = errorText(error);
     } finally {
+        if (perform.operation !== operation) return;
         busy = false;
         if (status.textContent === "処理中…") status.textContent = "";
         render();
@@ -313,6 +353,7 @@ function credentialJSON(credential) {
 }
 
 async function authenticate(kind) {
+    const epoch = accountEpoch;
     if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials) {
         throw new Error("Passkeyには対応ブラウザーとHTTPS（またはループバックHTTP）が必要です。");
     }
@@ -332,6 +373,7 @@ async function authenticate(kind) {
     const credential = kind === "register"
         ? await navigator.credentials.create({publicKey})
         : await navigator.credentials.get({publicKey});
+    if (epoch !== accountEpoch) return;
     if (!credential) throw new Error("Passkeyが選択されませんでした。操作は完了していません。");
     const result = await api(`/api/auth/${kind}/verify`, {credential: credentialJSON(credential)});
     setUser(result.user);
@@ -587,6 +629,7 @@ function createDeviceRow(device) {
     const row = {device, item, label, repository, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
     open.addEventListener("click", () => perform(() => openTerminal(row.device)));
     work.addEventListener("click", () => perform(async () => {
+        if (pendingWhat && pendingWhat.deviceId !== row.device.device_id) throw new Error("結果不明のWHATを元の対象・IDで再確認してください。");
         repositoryDeviceId = row.device.device_id;
         showPage("workflow");
         await refreshWorkflow();
@@ -629,7 +672,7 @@ async function updateDevices() {
         repositoryRequest++;
         repositoryIssues.replaceChildren();
         workflowSnapshot = null;
-        repositoryDeviceId = devices.length === 1 ? devices[0].device_id : null;
+        repositoryDeviceId = pendingWhat ? pendingWhat.deviceId : devices.length === 1 ? devices[0].device_id : null;
     }
     const selected = devices.find((device) => device.device_id === repositoryDeviceId);
     repositoryDetails.textContent = selected ? `${selected.name} (${selected.device_id})` : "";
@@ -722,6 +765,7 @@ async function integrationApi(path, body) {
 }
 
 async function refreshAccountData() {
+    const epoch = accountEpoch;
     const results = await Promise.allSettled([
         refreshIntegrations(),
         (async () => {
@@ -729,6 +773,7 @@ async function refreshAccountData() {
             await inspectPair();
         })(),
     ]);
+    if (!currentAccount(epoch)) return;
     const failure = results.find((result) => result.status === "rejected");
     await refreshWorkflow();
     if (failure) throw failure.reason;
@@ -936,20 +981,26 @@ async function refreshWorkflow(pushed) {
 }
 
 async function createWhat() {
-    if (!user || !repositoryDeviceId || !workflowSnapshot) return;
+    if (!user || (!pendingWhat && (!repositoryDeviceId || !workflowSnapshot))) return;
     const epoch = accountEpoch;
-    const deviceId = repositoryDeviceId;
-    const title = whatTitle.value.trim();
-    const body = whatBody.value;
-    if (!title) throw new Error("WHATのタイトルを入力してください。");
-    if (!pendingWhat || pendingWhat.deviceId !== deviceId || pendingWhat.title !== title || pendingWhat.body !== body) {
-        pendingWhat = {deviceId, title, body, requestId: crypto.randomUUID()};
+    if (!pendingWhat) {
+        const title = whatTitle.value.trim();
+        if (!title) throw new Error("WHATのタイトルを入力してください。");
+        pendingWhat = {deviceId: repositoryDeviceId, title, body: whatBody.value, requestId: crypto.randomUUID()};
     }
-    const result = await integrationApi(`/api/workflows/${deviceId}/issues`, {
-        title, body, request_id: pendingWhat.requestId,
+    const pending = pendingWhat;
+    whatTitle.value = pending.title;
+    whatBody.value = pending.body;
+    whatTitle.disabled = true;
+    whatBody.disabled = true;
+    document.getElementById("what-status").textContent = "結果不明の場合は元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。";
+    const result = await integrationApi(`/api/workflows/${pending.deviceId}/issues`, {
+        title: pending.title, body: pending.body, request_id: pending.requestId,
     });
-    if (!currentAccount(epoch) || repositoryDeviceId !== deviceId) return;
+    if (!currentAccount(epoch)) return;
     pendingWhat = null;
+    whatTitle.disabled = false;
+    whatBody.disabled = false;
     whatTitle.value = "";
     whatBody.value = "";
     document.getElementById("workflow-create-dialog").close();
@@ -1088,7 +1139,11 @@ refreshIssuesButton.addEventListener("click", () => perform(refreshIssues));
 refreshRepositoryButton.addEventListener("click", () => perform(refreshWorkflow));
 whatForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    perform(async () => { try { await createWhat(); } catch (error) { document.getElementById("what-status").textContent = errorText(error); throw error; } });
+    const epoch = accountEpoch;
+    perform(async () => { try { await createWhat(); } catch (error) {
+        if (epoch === accountEpoch) document.getElementById("what-status").textContent = `${errorText(error)} 元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。`;
+        throw error;
+    } });
 });
 document.getElementById("close-terminal").addEventListener("click", () => {
     disconnect();
@@ -1124,6 +1179,7 @@ async function pollWorkflow(changed = false) {
     } catch (error) {
         if (currentAccount(epoch)) status.textContent = errorText(error);
     } finally {
+        if (epoch !== accountEpoch) return;
         workflowRefreshing = false;
         if (workflowDirty) scheduleWorkflowRefresh();
     }
@@ -1143,11 +1199,14 @@ function scheduleDevices() {
 }
 render();
 perform(async () => {
+    const epoch = accountEpoch;
     try {
         setUser((await api("/api/session")).user);
     } finally {
-        sessionLoading = false;
-        render();
+        if (epoch === accountEpoch) {
+            sessionLoading = false;
+            render();
+        }
     }
     await refreshAccountData();
 });

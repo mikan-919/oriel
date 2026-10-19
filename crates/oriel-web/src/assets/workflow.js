@@ -150,7 +150,8 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         get("device").value=next.device?.device_id||"";get("device").disabled=!!next.busy;
         const terminal={online:"使用可能",grace:"再接続中",offline:"使用不可",unknown:"未確認"}[next.device?.terminal_status]||"未確認";
         get("connection").textContent="端末中継: "+terminal+" · ワークフロー: "+(next.live?stageLabels[next.progress?.stage]||"未接続":"未確認");
-        get("create").disabled=!!next.busy||!next.snapshot;
+        get("create").disabled=!!next.busy||(!next.pendingWhat&&!next.snapshot);
+        if(next.pendingWhat)get("device").disabled=true;
         for(const button of document.querySelectorAll("[data-work-filter],[data-work-panel]"))button.disabled=!!next.busy||!next.snapshot;
         const progress=next.progress;
         if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const key=JSON.stringify([progress.updated_at,title,progress.verification]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
