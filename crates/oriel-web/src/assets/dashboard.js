@@ -168,7 +168,7 @@ function render() {
             : integrations ? "連携先は未設定です。" : busy ? "連携状態を読み込み中…" : "連携状態を取得できません。アカウントを更新してください。";
         controls.connect.textContent = target ? `${providerNames[provider]}を再連携` : `${providerNames[provider]}と連携`;
         controls.connect.disabled = busy || !user;
-        controls.disconnect.disabled = busy || !user || !integrations;
+        controls.disconnect.disabled = busy || !user || (!target && !attempt);
         controls.selection.hidden = !choices.length;
         controls.select.disabled = busy || !user;
         controls.save.disabled = busy || !user || controls.select.value === "";
@@ -1054,18 +1054,21 @@ async function openTerminal(device) {
 document.getElementById("register").addEventListener("click", () => perform(() => authenticate("register")));
 document.getElementById("login").addEventListener("click", () => perform(() => authenticate("login")));
 document.getElementById("backup").addEventListener("click", () => perform(() => authenticate("register")));
-document.getElementById("logout").addEventListener("click", () => perform(async () => {
-    stopProgress();
-    progressStatus.textContent = "ログアウト中…";
-    try {
-        await api("/api/auth/logout", {});
-        setUser(null);
-        status.textContent = "ログアウトしました。";
-    } catch (error) {
-        connectProgress();
-        throw error;
-    }
-}));
+document.getElementById("logout").addEventListener("click", () => {
+    if (!confirm("ログアウトします。この端末のペアリングは維持されます。よろしいですか？")) return;
+    perform(async () => {
+        stopProgress();
+        progressStatus.textContent = "ログアウト中…";
+        try {
+            await api("/api/auth/logout", {});
+            setUser(null);
+            status.textContent = "ログアウトしました。";
+        } catch (error) {
+            connectProgress();
+            throw error;
+        }
+    });
+});
 document.getElementById("refresh").addEventListener("click", () => perform(async () => {
     setUser((await api("/api/session")).user);
     await refreshAccountData();
@@ -1075,7 +1078,10 @@ for (const provider of providers) {
     const controls = providerControls[provider];
     controls.connect.addEventListener("click", () => perform(() => startConnection(provider)));
     controls.save.addEventListener("click", () => perform(() => saveTarget(provider)));
-    controls.disconnect.addEventListener("click", () => perform(() => disconnectProvider(provider)));
+    controls.disconnect.addEventListener("click", () => {
+        if (!confirm(`${providerNames[provider]}連携を解除します。新しいアクセスは停止されます。よろしいですか？`)) return;
+        perform(() => disconnectProvider(provider));
+    });
     controls.select.addEventListener("change", render);
 }
 refreshIssuesButton.addEventListener("click", () => perform(refreshIssues));
