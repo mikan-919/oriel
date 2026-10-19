@@ -777,6 +777,7 @@ async fn handle_relay<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     let (mut sender, mut receiver) = socket.split();
 
     let mut output = terminal.output.subscribe();
@@ -787,6 +788,7 @@ where
 
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => bail!("relay keepalive response timed out"),
             _ = keepalive.tick() => sender.send(Message::Text("oriel:ping".into())).await?,
             _ = flush.tick(), if !pending.is_empty() => {
                 sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
@@ -813,6 +815,10 @@ where
                     }
 
                     Some(Ok(Message::Text(text))) => {
+                        if text == "oriel:pong" {
+                            deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+                            continue;
+                        }
                         if text.starts_with("oriel-heartbeat:") {
                             sender.send(Message::Text(text)).await?;
                             continue;
@@ -902,6 +908,119 @@ fn parse_resize(message: &str) -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    type TestSocket = tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>;
+
+    fn test_terminal() -> (TerminalHandle, RecordingWriter) {
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let writer = RecordingWriter::default();
+        let (output, _) = broadcast::channel(16);
+        let terminal = Arc::new(Terminal {
+            master: Mutex::new(pair.master),
+            writer: Mutex::new(Box::new(writer.clone())),
+            output,
+        });
+        (terminal, writer)
+    }
+
+    async fn relay_connection(
+        terminal: TerminalHandle,
+    ) -> (TestSocket, tokio::task::JoinHandle<Result<()>>) {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (host, peer) = tokio::io::duplex(65536);
+        let host = TestSocket::from_raw_socket(host, Role::Client, None).await;
+        let peer = TestSocket::from_raw_socket(peer, Role::Server, None).await;
+        let task = tokio::spawn(handle_relay(host, terminal));
+        (peer, task)
+    }
+
+    // The echo confirms that all preceding frames have been processed, without
+    // refreshing the pong deadline. Drain outgoing traffic to keep sends writable.
+    async fn relay_barrier(peer: &mut TestSocket) {
+        peer.send(Message::Text("oriel-heartbeat:test".into()))
+            .await
+            .unwrap();
+        loop {
+            if peer.next().await.unwrap().unwrap() == Message::Text("oriel-heartbeat:test".into()) {
+                break;
+            }
+        }
+    }
+
+    async fn assert_relay_timeout(task: tokio::task::JoinHandle<Result<()>>) {
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("keepalive response timed out"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_times_out_without_pong_and_reuses_terminal_without_replay() {
+        let (terminal, writer) = test_terminal();
+        let (mut peer, task) = relay_connection(terminal.clone()).await;
+        relay_barrier(&mut peer).await;
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            peer.send(Message::Binary(b"input".to_vec().into()))
+                .await
+                .unwrap();
+            for text in ["resize:80:24", "oriel:pong-extra", "other"] {
+                peer.send(Message::Text(text.into())).await.unwrap();
+            }
+            peer.send(Message::Ping(vec![1].into())).await.unwrap();
+            peer.send(Message::Pong(vec![2].into())).await.unwrap();
+            terminal.output.send(b"output".to_vec()).unwrap();
+            relay_barrier(&mut peer).await;
+            assert!(!task.is_finished());
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        relay_barrier(&mut peer).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_relay_timeout(task).await;
+        assert_eq!(*writer.0.lock().unwrap(), b"inputinputinputinput");
+
+        // The production caller waits one second, then passes the same handle.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (mut peer, task) = relay_connection(terminal).await;
+        relay_barrier(&mut peer).await;
+        tokio::time::advance(Duration::from_secs(44)).await;
+        relay_barrier(&mut peer).await;
+        assert!(!task.is_finished());
+        assert_eq!(*writer.0.lock().unwrap(), b"inputinputinputinput");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_relay_timeout(task).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_pong_refreshes_deadline_from_receive_time_without_output() {
+        let (terminal, _) = test_terminal();
+        let (mut peer, task) = relay_connection(terminal).await;
+        relay_barrier(&mut peer).await;
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(30)).await;
+            peer.send(Message::Text("oriel:pong".into())).await.unwrap();
+            relay_barrier(&mut peer).await;
+            assert!(!task.is_finished());
+        }
+        tokio::time::advance(Duration::from_secs(44)).await;
+        relay_barrier(&mut peer).await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_relay_timeout(task).await;
+    }
 
     #[test]
     fn relay_close_diagnostics_keep_codes_and_known_reasons_without_peer_content() {
