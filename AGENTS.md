@@ -1,3 +1,3 @@
-use git, no jj.
+use git.
 use clippy.
 commit frequently.
