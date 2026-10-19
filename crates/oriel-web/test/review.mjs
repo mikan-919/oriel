@@ -18,6 +18,10 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
   const NativeURL = window.URL;
   window.URL = class extends NativeURL {constructor(input, base) {super(input, base === "null" ? "https://fixture.invalid" : base);}};
   const fixtureState = ${JSON.stringify(state)};
+  if(fixtureState==='loading'){
+    const nativeTimeout=window.setTimeout.bind(window);
+    window.setTimeout=(callback,delay,...args)=>nativeTimeout(callback,delay===30000?1000:delay,...args);
+  }
   window.orielPairing = {token: fixtureState==='pairing' ? 'a'.repeat(64) : null, invalid:false};
   window.orielConnection = {};
   const long='responsive-verification-'.repeat(12);
@@ -30,7 +34,9 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
     window.fixtureRequests.push({path,method:options.method||'GET'});
     if(path.endsWith('/issues')&&options.method==='POST'){const body=JSON.parse(options.body);const row=sampleRow(99,body.title,'waiting-how');row.issue.body=body.body;row.linear=null;fixtureRows.push(row);return {ok:true,json:async()=>({issue:row.issue})};}
 
-    if(fixtureState==='loading')return new Promise(()=>{});
+    if(fixtureState==='loading'){
+      if(!window.fixtureLoadingRecovered){window.fixtureLoadingRecovered=true;return new Promise(()=>{});}
+    }
     if(fixtureState==='failed' && path!=='/api/session')throw Error('fixture: 状態を取得できません');
     const data=path==='/api/session' ? {user:fixtureState==='signed-out'?null:{id:'fixture-user',display_name:'レビュー用アカウント'}}
       : path==='/api/devices' ? {devices:fixtureState==='empty'||fixtureState==='pairing'?[]:[fixtureDevice]}

@@ -83,3 +83,20 @@ test("shared refresh expires pending pairing", async () => {
   assert.equal(c.pairing.token, null);
   assert.match(c.pairStatus.textContent, /期限/);
 });
+
+test("HTTP timeout releases shared device refresh and permits explicit retry", async () => {
+  let expire, calls = 0;
+  const c = screen(() => {
+    calls++;
+    if (calls === 1) return new Promise((_, reject) => {expire = () => reject(Object.assign(Error("timeout"), {name:"HttpTimeoutError"}));});
+    return Promise.resolve({devices:[registration("online")]});
+  });
+  const first = c.refreshDevices();
+  const shared = c.refreshDevices();
+  expire();
+  await Promise.all([assert.rejects(first), assert.rejects(shared)]);
+  assert.equal(c.deviceRefresh, null);
+  await c.refreshDevices();
+  assert.equal(calls, 2);
+  assert.equal(c.deviceRows.get("a").open.disabled, false);
+});

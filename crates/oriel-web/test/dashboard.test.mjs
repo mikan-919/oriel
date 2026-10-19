@@ -270,3 +270,78 @@ test('initial session loading does not claim the user is signed out',()=>{
   c.renderOverview();
   assert.equal(elements.get('overview-action').disabled,true);
 });
+
+function httpScreen(fetch) {
+  const timers = new Map();
+  let serial = 0;
+  const c = vm.createContext({fetch, AbortController, accountEpoch:0, busy:false,
+    status:{textContent:''}, render() {}, setUser() {c.accountEpoch++;},
+    setTimeout(callback, delay) {assert.equal(delay,30000); timers.set(++serial,callback); return serial;},
+    clearTimeout(id) {timers.delete(id);}});
+  vm.runInContext(source.slice(source.indexOf('async function api('), source.indexOf('function decodeBase64url(')), c);
+  return {c, timers, expire() {for (const callback of [...timers.values()]) callback();}};
+}
+
+test('HTTP deadline includes body, ignores late results and releases perform', async () => {
+  for (const body of [false,true]) {
+    for (const fail of [false,true]) {
+      let resolve, reject, signal;
+      const stalled = new Promise((a,b)=>{resolve=a;reject=b;});
+      const h = httpScreen((_path,options)=>{
+        signal=options.signal;
+        return body ? Promise.resolve({ok:true,json:()=>stalled}) : stalled;
+      });
+      const task = h.c.perform(()=>h.c.api('/api/test',{}));
+      await Promise.resolve();
+      h.expire();
+      await task;
+      assert.equal(h.c.busy,false);
+      assert.match(h.c.status.textContent,/変更結果は不明/);
+      assert.equal(signal.aborted,true);
+      assert.equal(h.timers.size,0);
+      if (fail) reject(Error('late')); else resolve(body ? {} : {ok:true,json:async()=>({})});
+      await new Promise(done=>setImmediate(done));
+      assert.match(h.c.status.textContent,/変更結果は不明/);
+    }
+  }
+});
+
+test('HTTP success and parse failures clear timers; old account success, 401 and timeout are isolated', async () => {
+  for (const ok of [true,false]) {
+    const h=httpScreen(async()=>({ok:true,json:async()=>{if (!ok) throw Error('json'); return {ok};}}));
+    await h.c.api('/api/test');
+    assert.equal(h.timers.size,0);
+  }
+  for (const outcome of ['success','401','timeout']) {
+    let resolve;
+    const h=httpScreen(()=>new Promise(done=>resolve=done));
+    const task=h.c.perform(()=>h.c.api('/api/test'));
+    h.c.accountEpoch++;
+    h.c.status.textContent='new account';
+    if(outcome==='timeout') h.expire();
+    else resolve({ok:outcome==='success',status:401,json:async()=>({})});
+    await task;
+    assert.equal(h.c.status.textContent,'new account');
+    assert.equal(h.c.accountEpoch,1);
+  }
+});
+
+test('WHAT retry preserves original request and contents until confirmed', async () => {
+  let fail=true; const calls=[];
+  const c=vm.createContext({user:{id:'owner'},accountEpoch:1,repositoryDeviceId:'a',workflowSnapshot:{},
+    pendingWhat:null,whatTitle:{value:'original'},whatBody:{value:'body'},crypto:{randomUUID:()=> 'same-id'},
+    currentAccount:epoch=>epoch===c.accountEpoch, status:{}, refreshWorkflow:async()=>{},
+    document:{getElementById:()=>({close(){}})},
+    integrationApi:async(path,body)=>{calls.push({path,...body}); if(fail) throw Error('timeout'); return {issue:{number:1}};}});
+  vm.runInContext(source.slice(source.indexOf('async function createWhat()'),source.indexOf('function sendResize()')),c);
+  await assert.rejects(c.createWhat());
+  c.repositoryDeviceId='b'; c.whatTitle.value='changed'; c.whatBody.value='changed';
+  await assert.rejects(c.createWhat());
+  assert.deepEqual(calls[0],calls[1]);
+  assert.equal(c.whatTitle.disabled,true);
+  fail=false; await c.createWhat();
+  assert.deepEqual(calls[0],calls[2]);
+  assert.equal(c.pendingWhat,null);
+  assert.equal(c.whatTitle.value,'');
+  assert.equal(c.whatTitle.disabled,false);
+});
