@@ -345,3 +345,52 @@ test('WHAT retry preserves original request and contents until confirmed', async
   assert.equal(c.whatTitle.value,'');
   assert.equal(c.whatTitle.disabled,false);
 });
+
+test('a superseded operation cannot replace the current notification or release its busy state', async () => {
+  const h = httpScreen(async () => ({}));
+  let rejectOld, finishNew;
+  const oldTask = h.c.perform(() => new Promise((_, reject) => { rejectOld = reject; }));
+  // Account changes invalidate the active operation and allow a new one.
+  h.c.accountEpoch++;
+  h.c.perform.operation = null;
+  h.c.busy = false;
+  const newTask = h.c.perform(() => new Promise(resolve => { finishNew = resolve; }));
+  h.c.status.textContent = 'current operation';
+  rejectOld(Object.assign(Error('expired old session'), {sessionExpired:true}));
+  await oldTask;
+  assert.equal(h.c.status.textContent, 'current operation');
+  assert.equal(h.c.busy, true);
+  finishNew();
+  await newTask;
+  assert.equal(h.c.busy, false);
+});
+
+test('old account reconciliation cannot start workflow reads for the new account', async () => {
+  let finishDevices;
+  let workflows = 0;
+  const c = vm.createContext({accountEpoch:1,
+    currentAccount:epoch => epoch === c.accountEpoch,
+    refreshIntegrations:async () => {},
+    refreshDevices:() => new Promise(resolve => { finishDevices = resolve; }),
+    inspectPair:async () => {}, refreshWorkflow:async () => { workflows++; }});
+  vm.runInContext(source.slice(source.indexOf('async function refreshAccountData()'),
+    source.indexOf('async function refreshIntegrations()')), c);
+  const task = c.refreshAccountData();
+  c.accountEpoch++;
+  finishDevices();
+  await task;
+  assert.equal(workflows, 0);
+});
+
+test('current session expiration keeps the login guidance after account reset', async () => {
+  const h = httpScreen(async () => ({ok:false,status:401,json:async()=>({})}));
+  h.c.setUser = () => {
+    h.c.accountEpoch++;
+    h.c.perform.operation = null;
+    h.c.busy = false;
+  };
+  await h.c.perform(() => h.c.api('/api/test'));
+  assert.match(h.c.status.textContent, /再度ログイン/);
+  assert.equal(h.c.busy, false);
+  assert.equal(h.timers.size, 0);
+});

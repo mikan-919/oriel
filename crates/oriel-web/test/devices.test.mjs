@@ -7,7 +7,7 @@ const source = readFileSync(new URL("../src/assets/dashboard.js", import.meta.ur
 const refresh = source.slice(source.indexOf("async function refreshDevices()"), source.indexOf("async function inspectPair()"));
 function screen(api) {
   const context = vm.createContext({ api, clearTimeout, user: { id: "owner" }, accountEpoch: 1,
-    deviceRefresh: null, deviceListFailed: false, devices: [], deviceRows: new Map(),
+    deviceRefresh: null, pendingWhat: null, deviceListFailed: false, devices: [], deviceRows: new Map(),
     progressSnapshot: new Map(), repositoryDeviceId: "a", repositoryRequest: 0,
     workflowSnapshot: { task: "retained" }, repositoryIssues: { replaceChildren() {} },
     repositoryDetails: {}, repositoryStatus: {}, deviceSummary: {}, deviceList: { append() {} },
@@ -99,4 +99,12 @@ test("HTTP timeout releases shared device refresh and permits explicit retry", a
   await c.refreshDevices();
   assert.equal(calls, 2);
   assert.equal(c.deviceRows.get("a").open.disabled, false);
+});
+
+ test("uncertain WHAT retains its target when the device disappears", async () => {
+  const c = screen(async () => ({devices:[{...registration("online"),device_id:"b"}]}));
+  c.pendingWhat = {deviceId:"a",requestId:"original"};
+  await c.refreshDevices();
+  assert.equal(c.repositoryDeviceId,"a");
+  assert.equal(c.pendingWhat.requestId,"original");
 });

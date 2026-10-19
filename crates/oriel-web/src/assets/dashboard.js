@@ -273,7 +273,7 @@ async function api(path, body) {
         if (!response.ok) {
             if (response.status === 401) {
                 setUser(null);
-                throw Object.assign(new Error("セッションが失効したか、未ログインです。再度ログインしてください。"), {sessionExpired: true});
+                throw Object.assign(new Error("セッションが失効したか、未ログインです。再度ログインしてください。"), {sessionExpired: true, expiredEpoch: accountEpoch});
             }
             throw new Error(data.error || data.message || `リクエストが拒否されました（${response.status}）。`);
         }
@@ -307,7 +307,9 @@ async function perform(action) {
     try {
         await action();
     } catch (error) {
-        if (!error.staleAccount && (epoch === accountEpoch || error.sessionExpired)) status.textContent = errorText(error);
+        const active = perform.operation === operation;
+        const expired = error.sessionExpired && perform.operation === null && error.expiredEpoch === accountEpoch;
+        if (!error.staleAccount && ((active && epoch === accountEpoch) || expired)) status.textContent = errorText(error);
     } finally {
         if (perform.operation !== operation) return;
         busy = false;
@@ -627,6 +629,7 @@ function createDeviceRow(device) {
     const row = {device, item, label, repository, open, work, card, state, whatLink, whatEmpty, howLink, howEmpty, progressRepository, updated};
     open.addEventListener("click", () => perform(() => openTerminal(row.device)));
     work.addEventListener("click", () => perform(async () => {
+        if (pendingWhat && pendingWhat.deviceId !== row.device.device_id) throw new Error("結果不明のWHATを元の対象・IDで再確認してください。");
         repositoryDeviceId = row.device.device_id;
         showPage("workflow");
         await refreshWorkflow();
@@ -669,7 +672,7 @@ async function updateDevices() {
         repositoryRequest++;
         repositoryIssues.replaceChildren();
         workflowSnapshot = null;
-        repositoryDeviceId = devices.length === 1 ? devices[0].device_id : null;
+        repositoryDeviceId = pendingWhat ? pendingWhat.deviceId : devices.length === 1 ? devices[0].device_id : null;
     }
     const selected = devices.find((device) => device.device_id === repositoryDeviceId);
     repositoryDetails.textContent = selected ? `${selected.name} (${selected.device_id})` : "";
@@ -762,6 +765,7 @@ async function integrationApi(path, body) {
 }
 
 async function refreshAccountData() {
+    const epoch = accountEpoch;
     const results = await Promise.allSettled([
         refreshIntegrations(),
         (async () => {
@@ -769,6 +773,7 @@ async function refreshAccountData() {
             await inspectPair();
         })(),
     ]);
+    if (!currentAccount(epoch)) return;
     const failure = results.find((result) => result.status === "rejected");
     await refreshWorkflow();
     if (failure) throw failure.reason;
