@@ -663,12 +663,28 @@ async fn main() -> Result<()> {
         let mut codex_control = codex::start(&relay_url, &identity, &project).await?;
         if mode == "codex" {
             println!("Codex is available from the Codex page in Oriel Web. Ctrl-C to stop.");
-            tokio::select! { _ = &mut codex_control.task => return Ok(()), _ = tokio::signal::ctrl_c() => {} }
-            codex_control.stop().await;
+            tokio::select! { result = &mut codex_control.task => return result.context("Codex control task failed")?, _ = tokio::signal::ctrl_c() => {} }
+            codex_control.stop().await?;
             return Ok(());
         }
-        let result = workflow::run(&relay_url, &identity, mode == "once").await;
-        codex_control.stop().await;
+        let workflow = workflow::run(&relay_url, &identity, mode == "once");
+        tokio::pin!(workflow);
+        let result = tokio::select! {
+            result = &mut workflow => {
+                if let Err(error) = codex_control.stop().await {
+                    tracing::warn!("Codex consultation shutdown failed: {error:#}");
+                }
+                result
+            }
+            control = &mut codex_control.task => {
+                match control {
+                    Ok(Ok(())) => tracing::warn!("Codex consultation stopped; workflow continues without Web control"),
+                    Ok(Err(error)) => tracing::warn!("Codex consultation unavailable; workflow continues without Web control: {error:#}"),
+                    Err(error) => tracing::warn!("Codex control task failed; workflow continues without Web control: {error}"),
+                }
+                workflow.await
+            }
+        };
         return result;
     }
 
