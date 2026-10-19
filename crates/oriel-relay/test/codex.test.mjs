@@ -180,3 +180,18 @@ test("Codex host replacement and repository changes invalidate the previous cont
     replacement.ws.close();
   } finally { await worker.dispose(); }
 });
+
+test("consultation host disconnect tells connected browsers it is offline", async () => {
+  const worker = await runtime();
+  try {
+    const {owner} = await pair(worker);
+    const host = await socket(worker, "host", hostHeaders);
+    const browser = await socket(worker, "browser", {Cookie: cookies(owner), Origin: origin});
+    await browser.read(message => message.type === "state");
+    host.ws.send(JSON.stringify({type: "state", engines: []}));
+    await browser.read(message => message.type === "state");
+    host.ws.close();
+    assert.equal((await browser.read(message => message.type === "offline")).type, "offline");
+    browser.ws.close();
+  } finally { await worker.dispose(); }
+});

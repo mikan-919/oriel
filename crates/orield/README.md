@@ -39,6 +39,10 @@ orield --help
 
 同じ端末の`orield codex`と`orield workflow`は同時に起動できません。
 
+相談用のapp-serverが終了するとRelay接続と再接続を停止し、Webには端末での起動案内が表示されます。`orield codex`は再起動を案内するエラーで終了します。終了コード0やstdoutの切断も相談サービスの終了として扱い、自動再起動はしません。Ctrl-Cによる停止は、子プロセスの回収に成功すれば正常終了します。
+
+`workflow`／`workflow --once`では相談用app-serverが終了しても作業を継続します。その間は実行中のworkflowを含めWebからの操作ができません。Web操作を復旧する場合はworkflowをCtrl-Cで停止してから再起動してください。Relayだけの切断ではapp-serverを維持して再接続します。
+
 ## 自動実装の条件
 
 Web画面でGitHub・Linearの連携を設定し、対象リポジトリのコミットに`.oriel.yaml`を含めてください。設定形式は[Orielリポジトリの例](https://github.com/mikan-919/oriel/blob/main/.oriel.yaml)を参照できます。検証コマンドは対象プロジェクトに合わせて指定します。

@@ -334,10 +334,27 @@ fn trim_command_output(value: &mut Value) {
     }
 }
 
+#[derive(Clone, Debug)]
+enum EngineEnd {
+    Stopped,
+    Eof,
+    Failed(String),
+}
+
+impl std::fmt::Display for EngineEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped => f.write_str("Codex engine explicitly stopped"),
+            Self::Eof => f.write_str("Codex app-server closed stdout"),
+            Self::Failed(error) => write!(f, "Codex app-server protocol failed: {error}"),
+        }
+    }
+}
+
 pub(super) struct Engine {
     pub client: Client,
     cancel: watch::Sender<bool>,
-    ended: watch::Receiver<Option<String>>,
+    ended: watch::Receiver<Option<EngineEnd>>,
     task: Option<JoinHandle<Result<()>>>,
     stop_error: Option<String>,
     hub: Hub,
@@ -414,14 +431,34 @@ impl Engine {
         }
     }
     pub async fn spawn(
-        mut command: Command,
+        command: Command,
         cwd: &Path,
         title: &str,
         automatic: bool,
         allow_edits: bool,
         transcript: &Path,
     ) -> Result<Self> {
-        let hub = HUB.get().cloned().unwrap_or_else(Hub::new);
+        Self::spawn_with_hub(
+            command,
+            cwd,
+            title,
+            automatic,
+            allow_edits,
+            transcript,
+            HUB.get().cloned().unwrap_or_else(Hub::new),
+        )
+        .await
+    }
+
+    async fn spawn_with_hub(
+        mut command: Command,
+        cwd: &Path,
+        title: &str,
+        automatic: bool,
+        allow_edits: bool,
+        transcript: &Path,
+        hub: Hub,
+    ) -> Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -468,7 +505,7 @@ impl Engine {
                 loop {
                     tokio::select! {
                         next = lines.next_line() => {
-                            let line = next?.context("Codex process ended")?;
+                            let Some(line) = next? else { return Ok::<(), anyhow::Error>(()); };
                             ensure!(line.len() <= MAX_APP_SERVER_MESSAGE, "Codex output exceeds local size limit");
                             writeln!(log, "{line}")?;
                             let mut message: Value = serde_json::from_str(&line)?;
@@ -546,15 +583,18 @@ impl Engine {
             };
             // Dropping the complete protocol future interrupts every stdin write.
             // A partially written connection is never reused.
-            let process: Result<()> = tokio::select! {
+            let (reason, process) = tokio::select! {
                 biased;
-                _ = cancelled.changed() => Ok(()),
-                result = process => result,
+                _ = cancelled.changed() => (EngineEnd::Stopped, Ok(())),
+                result = process => {
+                    let reason = match &result {
+                        Ok(()) => EngineEnd::Eof,
+                        Err(error) => EngineEnd::Failed(format!("{error:#}")),
+                    };
+                    (reason, result)
+                },
             };
-            ended_tx.send_replace(Some(match &process {
-                Ok(()) => "Codex engine stopped".to_owned(),
-                Err(error) => format!("Codex app-server ended: {error:#}"),
-            }));
+            ended_tx.send_replace(Some(reason));
             let killed = git::stop_group(pid);
             let reaped = child
                 .wait()
@@ -562,7 +602,10 @@ impl Engine {
                 .context("Codex child could not be reaped");
             input.close();
             requests.lock().unwrap().clear();
-            if let Err(error) = process {
+            if !matches!(*ended_tx.borrow(), Some(EngineEnd::Stopped)) {
+                let error = process
+                    .err()
+                    .unwrap_or_else(|| anyhow!("Codex process ended"));
                 let _ = writeln!(
                     log,
                     "{}",
@@ -698,7 +741,7 @@ fn response_for(
 }
 
 // A watch value retains termination even if it happened before Control began waiting.
-async fn wait_engine_end(ended: &mut watch::Receiver<Option<String>>) {
+async fn wait_engine_end(ended: &mut watch::Receiver<Option<EngineEnd>>) {
     if ended.borrow().is_some() {
         return;
     }
@@ -750,7 +793,7 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
         host_token: identity.host_token.clone(),
     };
     let cwd = cwd.to_owned();
-    let (shutdown, mut stopping) = watch::channel(false);
+    let (shutdown, stopping) = watch::channel(false);
     let task = tokio::spawn(async move {
         let home = git::state_root().and_then(|root| {
             let path = root
@@ -809,149 +852,284 @@ pub(super) async fn start(origin: &Url, identity: &DeviceIdentity, cwd: &Path) -
         if let Some(key) = std::env::var_os("OPENAI_API_KEY") {
             command.env("OPENAI_API_KEY", key);
         }
-        let mut engine =
+        let engine =
             Engine::spawn(command, &cwd, "相談・レビュー", false, false, &transcript).await?;
-        let mut ended = engine.ended.clone();
-        let mut events = hub.events.subscribe();
-        loop {
-            let mut opened = None;
-            let mut last_reply = None;
-            let connected = async {
-                let mut url = origin.join(&format!("/api/codex/{}/host", identity.device_id))?;
-                url.set_scheme(if origin.scheme() == "https" {
-                    "wss"
-                } else {
-                    "ws"
-                })
-                .map_err(|_| anyhow!("invalid Relay URL"))?;
-                let mut request = url.as_str().into_client_request()?;
-                let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(
-                    &format!("Bearer {}", identity.host_token),
-                )?;
-                token.set_sensitive(true);
-                request.headers_mut().insert("Authorization", token);
-                let (mut socket, response) =
-                    tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
-                let batching = response
-                    .headers()
-                    .get("x-oriel-output-batch")
-                    .is_some_and(|value| value == "200");
-                let mut pending = Vec::<Value>::new();
-                let mut pending_bytes = 0;
-                let mut flush = tokio::time::interval(Duration::from_millis(200));
-                flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                opened = Some(tokio::time::Instant::now());
-                socket
-                    .send(Message::Text(hub.state().to_string().into()))
-                    .await?;
-                let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
-                let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-                loop {
-                    tokio::select! {
-                        _ = flush.tick(), if !pending.is_empty() => {
-                            socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
-                            pending_bytes = 0;
-                        },
-                        _ = heartbeat.tick() => { socket.send(Message::Text(KEEPALIVE_PING.into())).await?; },
-                        _ = tokio::time::sleep_until(deadline) => bail!("Codex Relay keepalive timed out"),
-                        event = events.recv() => { match event {
-                            Ok(event) => {
-                                let output = batching && batchable_output(&event);
-                                let size = event.to_string().len();
-                                if !pending.is_empty() && (!output || pending.len() >= 128 || pending_bytes + size > 256 * 1024) {
-                                    socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
-                                    pending_bytes = 0;
-                                }
-                                if output && size <= 256 * 1024 {
-                                    pending_bytes += size;
-                                    pending.push(event);
-                                } else { socket.send(Message::Text(event.to_string().into())).await?; }
-                            },
-                            Err(broadcast::error::RecvError::Lagged(_)) => {
-                                if !pending.is_empty() {
-                                    socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
-                                    pending_bytes = 0;
-                                }
-                                socket.send(Message::Text(hub.state().to_string().into())).await?;
-                            },
-                            Err(_) => break,
-                        } },
-                        frame = socket.next() => {
-                            match frame.context("Codex Relay ended")?? {
-                                Message::Text(text) => {
-                                    last_reply = Some(tokio::time::Instant::now());
-                                    deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-                                    if text.as_str() == KEEPALIVE_PONG { continue; }
-                                    ensure!(text.len() <= MAX_MESSAGE, "Relay message too large");
-                                    let message: Value = serde_json::from_str(&text)?;
-                                    if message["type"] == "snapshot" {
-                                        socket.send(Message::Text(hub.state().to_string().into())).await?;
-                                    }
-                                    if message["type"] == "request" {
-                                        let hub = hub.clone();
-                                        tokio::spawn(async move {
-                                            let result = hub.dispatch(&message).await;
-                                            let response = match result { Ok(value) => json!({"result":value}), Err(error) => json!({"error":format!("{error:#}")}) };
-                                            let mut response = response;
-                                            response["type"] = json!("response"); response["client"] = message["client"].clone(); response["request_id"] = message["request_id"].clone();
-                                            let _ = hub.events.send(response);
-                                        });
-                                    }
-                                },
-                                Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                                Message::Close(frame) => {
-                                    // Receiving Close queues its reply; send it before dropping TCP.
-                                    let _ = socket.flush().await;
-                                    return Err(crate::relay_closed(frame));
-                                },
-                                _ => {},
+        let endpoint = origin.join(&format!("/api/codex/{}/host", identity.device_id))?;
+        let result = control_engine(engine, hub, endpoint, identity.host_token, stopping).await;
+        drop(auth);
+        result
+    });
+    Ok(Control { shutdown, task })
+}
+
+async fn control_engine(
+    mut engine: Engine,
+    hub: Hub,
+    endpoint: Url,
+    host_token: String,
+    mut stopping: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut ended = engine.ended.clone();
+    let mut events = hub.events.subscribe();
+    loop {
+        if *stopping.borrow() {
+            break;
+        }
+        let mut opened = None;
+        let mut last_reply = None;
+        let connected = async {
+            let mut url = endpoint.clone();
+            url.set_scheme(if endpoint.scheme() == "https" {
+                "wss"
+            } else {
+                "ws"
+            })
+            .map_err(|_| anyhow!("invalid Relay URL"))?;
+            let mut request = url.as_str().into_client_request()?;
+            let mut token = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
+                "Bearer {}",
+                host_token
+            ))?;
+            token.set_sensitive(true);
+            request.headers_mut().insert("Authorization", token);
+            let (mut socket, response) =
+                tokio::time::timeout(Duration::from_secs(12), connect_async(request)).await??;
+            let batching = response
+                .headers()
+                .get("x-oriel-output-batch")
+                .is_some_and(|value| value == "200");
+            let mut pending = Vec::<Value>::new();
+            let mut pending_bytes = 0;
+            let mut flush = tokio::time::interval(Duration::from_millis(200));
+            flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            opened = Some(tokio::time::Instant::now());
+            socket
+                .send(Message::Text(hub.state().to_string().into()))
+                .await?;
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+            let mut deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+            loop {
+                tokio::select! {
+                    _ = flush.tick(), if !pending.is_empty() => {
+                        socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                        pending_bytes = 0;
+                    },
+                    _ = heartbeat.tick() => { socket.send(Message::Text(KEEPALIVE_PING.into())).await?; },
+                    _ = tokio::time::sleep_until(deadline) => bail!("Codex Relay keepalive timed out"),
+                    event = events.recv() => { match event {
+                        Ok(event) => {
+                            let output = batching && batchable_output(&event);
+                            let size = event.to_string().len();
+                            if !pending.is_empty() && (!output || pending.len() >= 128 || pending_bytes + size > 256 * 1024) {
+                                socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                                pending_bytes = 0;
                             }
+                            if output && size <= 256 * 1024 {
+                                pending_bytes += size;
+                                pending.push(event);
+                            } else { socket.send(Message::Text(event.to_string().into())).await?; }
+                        },
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if !pending.is_empty() {
+                                socket.send(Message::Text(json!({"type":"events", "events":std::mem::take(&mut pending)}).to_string().into())).await?;
+                                pending_bytes = 0;
+                            }
+                            socket.send(Message::Text(hub.state().to_string().into())).await?;
+                        },
+                        Err(_) => break,
+                    } },
+                    frame = socket.next() => {
+                        match frame.context("Codex Relay ended")?? {
+                            Message::Text(text) => {
+                                last_reply = Some(tokio::time::Instant::now());
+                                deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+                                if text.as_str() == KEEPALIVE_PONG { continue; }
+                                ensure!(text.len() <= MAX_MESSAGE, "Relay message too large");
+                                let message: Value = serde_json::from_str(&text)?;
+                                if message["type"] == "snapshot" {
+                                    socket.send(Message::Text(hub.state().to_string().into())).await?;
+                                }
+                                if message["type"] == "request" {
+                                    let hub = hub.clone();
+                                    tokio::spawn(async move {
+                                        let result = hub.dispatch(&message).await;
+                                        let response = match result { Ok(value) => json!({"result":value}), Err(error) => json!({"error":format!("{error:#}")}) };
+                                        let mut response = response;
+                                        response["type"] = json!("response"); response["client"] = message["client"].clone(); response["request_id"] = message["request_id"].clone();
+                                        let _ = hub.events.send(response);
+                                    });
+                                }
+                            },
+                            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
+                            Message::Close(frame) => {
+                                // Receiving Close queues its reply; send it before dropping TCP.
+                                let _ = socket.flush().await;
+                                return Err(crate::relay_closed(frame));
+                            },
+                            _ => {},
                         }
                     }
                 }
-                Ok::<(), anyhow::Error>(())
-            };
-            let connected = tokio::select! {
-                biased;
-                _ = stopping.changed() => break,
-                _ = wait_engine_end(&mut ended) => break,
-                result = connected => result,
-            };
-            if let Err(error) = connected {
-                if let Some(opened) = opened {
-                    let silence = last_reply.unwrap_or(opened).elapsed().as_secs();
-                    tracing::warn!(
-                        "Codex Web connection interrupted: {error:#}; connected for {}s, no Relay reply for {silence}s; retrying in 15s",
-                        opened.elapsed().as_secs()
-                    );
-                } else {
-                    tracing::warn!("Codex Web connection unavailable: {error:#}; retrying in 15s");
-                }
             }
-            tokio::select! { biased; _ = stopping.changed() => break, _ = wait_engine_end(&mut ended) => break, _ = tokio::time::sleep(Duration::from_secs(15)) => {} }
+            Ok::<(), anyhow::Error>(())
+        };
+        let connected = tokio::select! {
+            biased;
+            _ = stopping.changed() => break,
+            _ = wait_engine_end(&mut ended) => break,
+            result = connected => result,
+        };
+        if let Err(error) = connected {
+            if let Some(opened) = opened {
+                let silence = last_reply.unwrap_or(opened).elapsed().as_secs();
+                tracing::warn!(
+                    "Codex Web connection interrupted: {error:#}; connected for {}s, no Relay reply for {silence}s; retrying in 15s",
+                    opened.elapsed().as_secs()
+                );
+            } else {
+                tracing::warn!("Codex Web connection unavailable: {error:#}; retrying in 15s");
+            }
         }
-        let reason = ended.borrow().clone();
-        let cleanup = engine.stop().await;
-        drop(auth);
-        cleanup?;
-        if let Some(reason) = reason {
-            bail!("{reason}; restart `orield codex` to restore the consultation service");
-        }
-        Ok(())
-    });
-    Ok(Control { shutdown, task })
+        tokio::select! { biased; _ = stopping.changed() => break, _ = wait_engine_end(&mut ended) => break, _ = tokio::time::sleep(Duration::from_secs(15)) => {} }
+    }
+    let reason = ended.borrow().clone();
+    let cleanup = engine.stop().await;
+    if let Some(reason) = reason {
+        let error = anyhow!("{reason}; restart `orield codex` to restore the consultation service");
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(error.context(format!("Codex cleanup failed: {cleanup:#}"))),
+        };
+    }
+    cleanup
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Exercise the production connection future, including a stalled handshake.
+    // Each engine owns an isolated Hub; no identity or provider files are needed.
+    #[tokio::test]
+    async fn consultation_exit_cancels_every_relay_phase() {
+        for phase in ["handshake", "connected", "retry"] {
+            for ending in ["zero", "nonzero", "eof", "protocol", "shutdown"] {
+                let path = std::env::temp_dir()
+                    .join(format!("oriel-control-{}", random_hex::<8>().unwrap()));
+                git::private_directory(&path).unwrap();
+                let transcript = path.join("transcript");
+                git::private_file(&transcript, b"").unwrap();
+                let mut command = Command::new("node");
+                command.args(["-e", r#"
+                    require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+                        const m=JSON.parse(line);
+                        if(m.method==='initialize')process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\n');
+                        if(m.method==='end'){
+                            switch(process.argv[1]){
+                                case 'zero':process.exit(0);break;
+                                case 'nonzero':process.exit(7);break;
+                                case 'eof':process.stdout.end();break;
+                                case 'protocol':process.stdout.write('invalid json\n');break;
+                            }
+                        }
+                    });
+                "#, ending]);
+                let engine = Engine::spawn_with_hub(
+                    command,
+                    &path,
+                    "consultation",
+                    false,
+                    true,
+                    &transcript,
+                    Hub::new(),
+                )
+                .await
+                .unwrap();
+                let client = engine.client.clone();
+                let ended = engine.ended.clone();
+                let hub = engine.hub.clone();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint =
+                    Url::parse(&format!("http://{}/host", listener.local_addr().unwrap())).unwrap();
+                let (ready, waiting) = oneshot::channel();
+                let relay = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    if phase == "handshake" {
+                        ready.send(()).unwrap();
+                        let mut stream = stream;
+                        let mut bytes = [0; 1024];
+                        use tokio::io::AsyncReadExt;
+                        while stream.read(&mut bytes).await.unwrap() != 0 {}
+                    } else {
+                        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                        socket.next().await.unwrap().unwrap(); // initial state
+                        if phase == "retry" {
+                            socket.close(None).await.unwrap();
+                        }
+                        ready.send(()).unwrap();
+                        while let Some(Ok(_)) = socket.next().await {}
+                    }
+                });
+                let (shutdown, stopping) = watch::channel(false);
+                let control = tokio::spawn(control_engine(
+                    engine,
+                    hub.clone(),
+                    endpoint,
+                    "fixture".into(),
+                    stopping,
+                ));
+                tokio::time::timeout(Duration::from_secs(5), waiting)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if phase == "retry" {
+                    // Allow the close frame to move Control into its 15 second delay.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert!(
+                    ended.borrow().is_none(),
+                    "Relay disconnection must preserve the engine"
+                );
+                if ending == "shutdown" {
+                    shutdown.send(true).unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), control)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), relay)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(hub.engines.lock().unwrap().is_empty());
+                    fs::remove_dir_all(path).unwrap();
+                    continue;
+                }
+                let ending_request =
+                    tokio::spawn(async move { client.request("end", json!({})).await });
+                let error = tokio::time::timeout(Duration::from_secs(5), control)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("restart `orield codex`"));
+                assert!(hub.engines.lock().unwrap().is_empty());
+                assert!(ending_request.await.unwrap().is_err());
+                tokio::time::timeout(Duration::from_secs(5), relay)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                fs::remove_dir_all(path).unwrap();
+            }
+        }
+    }
+
     #[tokio::test]
     async fn termination_notification_is_retained_and_interrupts_pending_work() {
         for already_ended in [false, true] {
             let (sender, mut ended) = watch::channel(None);
             if already_ended {
-                sender.send_replace(Some("protocol ended".to_owned()));
+                sender.send_replace(Some(EngineEnd::Failed("protocol ended".to_owned())));
             }
             let waiting = async {
                 tokio::select! {
@@ -961,7 +1139,7 @@ mod tests {
             };
             let notify = async {
                 tokio::task::yield_now().await;
-                sender.send_replace(Some("protocol ended".to_owned()));
+                sender.send_replace(Some(EngineEnd::Failed("protocol ended".to_owned())));
             };
             tokio::time::timeout(Duration::from_secs(1), async {
                 tokio::join!(waiting, notify);
@@ -1295,6 +1473,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopping_workflow_engine_does_not_notify_consultation() {
+        for unexpected in [false, true] {
+            let (mut consultation, path, pid, descendant) = blocked_engine(false).await;
+            let (mut workflow, work_path, work_pid, work_descendant) = blocked_engine(false).await;
+            if unexpected {
+                git::stop_group(work_pid).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), wait_engine_end(&mut workflow.ended))
+                    .await
+                    .unwrap();
+                assert!(matches!(*workflow.ended.borrow(), Some(EngineEnd::Eof)));
+            }
+            workflow.stop().await.unwrap();
+            assert!(consultation.ended.borrow().is_none());
+            assert!(!consultation.client.sender.is_closed());
+            consultation.stop().await.unwrap();
+            assert!(matches!(
+                *consultation.ended.borrow(),
+                Some(EngineEnd::Stopped)
+            ));
+            assert_stopped(pid, descendant).await;
+            assert_stopped(work_pid, work_descendant).await;
+            fs::remove_dir_all(path).unwrap();
+            fs::remove_dir_all(work_path).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn dropping_blocked_engine_reaps_the_owned_group() {
         let (engine, path, pid, descendant) = blocked_engine(false).await;
         let client = engine.client.clone();
@@ -1356,7 +1561,8 @@ mod tests {
                             .borrow()
                             .as_ref()
                             .unwrap()
-                            .contains("app-server ended")
+                            .to_string()
+                            .contains("app-server closed stdout")
                     );
                     engine.stop().await.unwrap();
                 })
