@@ -22,3 +22,11 @@
 - `cargo fmt --all -- --check`: 成功。
 - `cargo clippy -p orield --all-targets --locked -- -D warnings`: 成功。
 - `cargo test -p orield --locked`: 単体試験47件成功、14件失敗。失敗した試験はローカルソケット作成時の `Operation not permitted`、またはその子プロセス失敗によるもの。単体試験の失敗により後続の統合試験には到達していない。ホストで全試験を再実行する必要がある。
+
+## npm キャッシュの検証修復
+
+ホスト検証の npm キャッシュは共有 `_cacache` へのリンクを使用せず、検証用 HOME 内の実ディレクトリを使用するよう修正した。既存のリンクはリンクだけを解除し、共有データと既存のローカルキャッシュ内容は保持する。リンク先が存在する場合・消失した場合・共有元の指定がない場合を回帰試験で確認した。エージェントのオフラインキャッシュ再利用と検証・承認ポリシーは維持している。この修復をホストへ反映するには、修正後の orield で検証を実行する必要がある。
+
+- `cargo fmt --all -- --check`、`cargo clippy -p orield --all-targets --locked -- -D warnings`: 成功。
+- `cargo test -p orield --locked`: 48件成功、14件失敗。追加したキャッシュ回復試験は成功。失敗は従来同様、サンドボックスのローカルソケット作成制限と関連する子プロセス試験による。
+- `npm_config_cache=/tmp/oriel-npm-cache npm_config_offline=true npm --prefix crates/oriel-relay ci`: 再実行したが `zod-4.4.3.tgz` の `ENOTCACHED` で停止。ホストで依存取得と全設定済み検証を再実行する。

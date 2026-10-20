@@ -1521,18 +1521,31 @@ fn dependency_cache_environment_from(
             }
         }
     }
-    if let Some(source) = npm_source {
-        let npm_cache = home.join(".npm");
-        git::private_directory(&npm_cache)?;
-        if link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))? {
-            environment.push((
-                "npm_config_cache".to_owned(),
-                npm_cache.to_string_lossy().into_owned(),
-            ));
-            if offline {
-                environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
-            }
+    let npm_cache = home.join(".npm");
+    git::private_directory(&npm_cache)?;
+    if !offline {
+        // Online verification owns its cache. A shared cache can disappear after
+        // setup, leaving npm unable to mkdir through a dangling _cacache link.
+        let contents = npm_cache.join("_cacache");
+        match fs::symlink_metadata(&contents) {
+            Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(&contents)?,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
+        fs::create_dir_all(&contents)?;
+        environment.push((
+            "npm_config_cache".to_owned(),
+            npm_cache.to_string_lossy().into_owned(),
+        ));
+    } else if let Some(source) = npm_source
+        && link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))?
+    {
+        environment.push((
+            "npm_config_cache".to_owned(),
+            npm_cache.to_string_lossy().into_owned(),
+        ));
+        environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
     }
     Ok(environment)
 }
@@ -3905,6 +3918,44 @@ mod tests {
                 .any(|(key, _)| matches!(key.as_str(), "CARGO_NET_OFFLINE" | "npm_config_offline"))
         );
         assert!(!verification.join(".cargo/credentials.toml").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_links_and_preserves_local_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "oriel-online-cache-{}",
+            random_hex::<12>().unwrap()
+        ));
+        let home = root.join("home");
+        let source = root.join("shared/_cacache");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("shared-entry"), "shared").unwrap();
+        fs::create_dir_all(home.join(".npm")).unwrap();
+        let target = home.join(".npm/_cacache");
+        std::os::unix::fs::symlink(&source, &target).unwrap();
+        for missing_source in [false, true] {
+            if missing_source {
+                fs::remove_dir_all(&source).unwrap();
+                fs::remove_dir_all(&target).unwrap();
+                std::os::unix::fs::symlink(&source, &target).unwrap();
+            }
+            let environment = dependency_cache_environment_from(&home, None, None, false).unwrap();
+            assert!(environment.iter().any(|(key, _)| key == "npm_config_cache"));
+            assert!(fs::symlink_metadata(&target).unwrap().is_dir());
+            fs::write(target.join("local-entry"), "local").unwrap();
+            dependency_cache_environment_from(&home, None, None, false).unwrap();
+            assert_eq!(
+                fs::read_to_string(target.join("local-entry")).unwrap(),
+                "local"
+            );
+            if !missing_source {
+                assert_eq!(
+                    fs::read_to_string(source.join("shared-entry")).unwrap(),
+                    "shared"
+                );
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
