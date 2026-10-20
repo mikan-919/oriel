@@ -417,6 +417,7 @@ export class Integrations extends WorkflowReader {
           !current.row.fingerprint || !current.facts.states.some(candidate => candidate.id === state.id && candidate.name === state.name && candidate.type === state.type)) this.auth.fail(409, "Native HOW transition identity changed");
         if (matches(current.row.linear!)) return current.row.linear!;
         if (state.type === "completed" || state.type === "canceled") this.auth.fail(409, "Completed or canceled HOW is not overwritten");
+        if (target.name === "In Progress" && !(state.name === "Todo" && state.type === "unstarted")) this.auth.fail(409, "Native HOW state cannot be safely moved to In Progress");
         if (target.name === "Triage" && !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || review.length === 1 && state.id === review[0].id)) this.auth.fail(409, "Native HOW state cannot be safely returned to Triage");
       } else if (matches(current.row.linear!)) return current.row.linear!;
       if (expectedHead && (current.row.canonical_oid !== expectedHead || current.row.pull_request?.head_oid !== expectedHead)) this.auth.fail(409, "Verified PR head changed before progress reflection");
@@ -670,7 +671,8 @@ export class Integrations extends WorkflowReader {
         facts = after.facts; row = after.row;
       }
       // Existing same-fingerprint refs are adopted without reset.
-      if (row.linear!.state.name === "Todo") await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(facts.states, "In Progress", "started").id }, ["approved"]);
+      // Another actor may have completed this same transition after our read.
+      if (row.linear!.state.name === "Todo") await this.workflowUpdateHow(context, grant, { stateId: this.workflowState(facts.states, "In Progress", "started").id }, ["approved", "running"]);
       const current = await this.workflowCurrent(context, grant, ["running"]);
       return { branch: current.row.branch, canonical_oid: current.row.canonical_oid, target_oid: current.facts.snapshot.target_oid,
         base_branch: current.facts.snapshot.base_branch, verification: current.facts.snapshot.configuration.verification };
