@@ -1521,7 +1521,24 @@ fn dependency_cache_environment_from(
             }
         }
     }
-    let npm_cache = home.join(".npm");
+    let mut npm_cache = home.join(".npm");
+    if !offline {
+        // Preserve obstructing files (and parent links) while giving online
+        // verification a fresh, private cache that npm can actually populate.
+        let obstructed = match fs::symlink_metadata(&npm_cache) {
+            Ok(metadata) if !metadata.is_dir() => true,
+            Ok(_) => match fs::symlink_metadata(npm_cache.join("_cacache")) {
+                Ok(metadata) => !metadata.is_dir() && !metadata.file_type().is_symlink(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if obstructed {
+            npm_cache = home.join(format!("npm-cache-{}", random_hex::<12>()?));
+        }
+    }
     git::private_directory(&npm_cache)
         .with_context(|| format!("prepare private npm cache {}", npm_cache.display()))?;
     if !offline {
@@ -3968,16 +3985,28 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn assert_recovered_npm_cache(home: &Path) {
+        let environment = dependency_cache_environment_from(home, None, None, false).unwrap();
+        let cache = environment
+            .iter()
+            .find(|(key, _)| key == "npm_config_cache")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap();
+        assert_ne!(cache, home.join(".npm"));
+        assert!(cache.starts_with(home));
+        assert!(fs::symlink_metadata(&cache).unwrap().is_dir());
+        fs::create_dir_all(cache.join("_cacache/content-v2/sha512")).unwrap();
+        fs::write(cache.join("_cacache/content-v2/sha512/entry"), "cached").unwrap();
+    }
+
     #[test]
-    fn online_npm_cache_reports_obstructed_parent_without_deleting_it() {
+    fn online_npm_cache_recovers_obstructed_parent_without_deleting_it() {
         let root =
             std::env::temp_dir().join(format!("oriel-npm-parent-{}", random_hex::<12>().unwrap()));
         fs::create_dir_all(&root).unwrap();
         let target = root.join(".npm");
         fs::write(&target, "preserve parent obstruction").unwrap();
-        let error = dependency_cache_environment_from(&root, None, None, false).unwrap_err();
-        assert!(error.to_string().contains(&target.display().to_string()));
-        assert!(error.to_string().contains("prepare private npm cache"));
+        assert_recovered_npm_cache(&root);
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             "preserve parent obstruction"
@@ -3986,16 +4015,33 @@ mod tests {
     }
 
     #[test]
-    fn online_npm_cache_reports_obstructing_file_without_deleting_it() {
+    fn online_npm_cache_preserves_parent_link_and_its_destination() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-link-{}", random_hex::<12>().unwrap()));
+        let home = root.join("home");
+        let shared = root.join("shared");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("entry"), "preserved").unwrap();
+        std::os::unix::fs::symlink(&shared, home.join(".npm")).unwrap();
+        assert_recovered_npm_cache(&home);
+        assert_eq!(fs::read_link(home.join(".npm")).unwrap(), shared);
+        assert_eq!(
+            fs::read_to_string(shared.join("entry")).unwrap(),
+            "preserved"
+        );
+        assert!(!shared.join("_cacache").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_obstructing_file_without_deleting_it() {
         let root =
             std::env::temp_dir().join(format!("oriel-npm-file-{}", random_hex::<12>().unwrap()));
         fs::create_dir_all(root.join(".npm")).unwrap();
         let target = root.join(".npm/_cacache");
         fs::write(&target, "preserve cache obstruction").unwrap();
-        let error = dependency_cache_environment_from(&root, None, None, false).unwrap_err();
-        let reason = error.to_string();
-        assert!(reason.contains(&target.display().to_string()));
-        assert!(reason.contains("is not a directory"));
+        assert_recovered_npm_cache(&root);
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             "preserve cache obstruction"
