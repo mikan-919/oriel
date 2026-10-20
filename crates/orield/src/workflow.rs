@@ -1057,6 +1057,76 @@ async fn repository_root(root: &Path, id: u64) -> Result<PathBuf> {
     Ok(path)
 }
 
+async fn cleanup_merged_worktree(root: &Path, snapshot: &Snapshot, row: &Row) -> Result<bool> {
+    let Some(pull) = row.pull_request.as_ref().filter(|pull| {
+        pull.merged && pull.state == "closed" && matches!(row.phase.as_str(), "merged" | "done")
+    }) else {
+        return Ok(false);
+    };
+    let branch = validate_branch(row).await?;
+    ensure!(
+        pull.branch == branch
+            && pull.base_branch == snapshot.base_branch
+            && git::oid(&pull.head_oid),
+        "merged PR does not match the canonical worktree"
+    );
+    let path = root.join("worktrees").join(format!(
+        "{}-{}",
+        snapshot.repository_id,
+        row.fingerprint.as_deref().context("missing approval")?
+    ));
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    // Share the implementation lock: a previous verification monitor may still
+    // own descendants after a daemon restart. Never remove their working tree.
+    let _lock = crate::verification_monitor::lock(root)?;
+    ensure!(metadata.is_dir(), "workflow path is not a directory");
+    let repository = root.join(format!("repository-{}.git", snapshot.repository_id));
+    let common = git::text(
+        &path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await?;
+    let top = git::text(&path, &["rev-parse", "--show-toplevel"]).await?;
+    ensure!(
+        fs::canonicalize(common)? == fs::canonicalize(&repository)?
+            && fs::canonicalize(top)? == fs::canonicalize(&path)?
+            && git::text(&path, &["symbolic-ref", "--short", "HEAD"]).await? == branch,
+        "worktree identity differs; preserved"
+    );
+    ensure!(
+        git::text(&path, &["rev-parse", "HEAD"]).await? == pull.head_oid,
+        "local HEAD differs from merged PR; work preserved"
+    );
+    ensure!(
+        git::text(&path, &["status", "--porcelain", "--untracked-files=all"])
+            .await?
+            .is_empty(),
+        "worktree has uncommitted or untracked changes; work preserved"
+    );
+    // No fetch is needed: GitHub may already have deleted the merged branch.
+    // Keep the branch/ref and execution logs; remove only this checkout.
+    ensure!(
+        git::local(
+            &repository,
+            &[
+                "worktree",
+                "remove",
+                path.to_str().context("non-UTF8 worktree path")?,
+            ],
+        )
+        .await?
+        .status
+        .success(),
+        "Git refused worktree removal; work preserved at {}",
+        path.display()
+    );
+    Ok(true)
+}
+
 async fn open_worktree(
     session: &mut Session,
     root: &Path,
@@ -2431,6 +2501,19 @@ async fn scan_inner(
     let snapshot = session.snapshot().await?;
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
+        // Also visit Done rows after restart or another device's reconciliation.
+        // Local cleanup must not depend on successfully updating Linear.
+        match cleanup_merged_worktree(root, &snapshot, row).await {
+            Ok(true) => event(
+                "Cleanup",
+                format!("#{} · merged worktree removed", row.issue.number),
+            ),
+            Ok(false) => {}
+            Err(error) => event(
+                "Cleanup",
+                format!("#{} · {error:#}; worktree retained", row.issue.number),
+            ),
+        }
         if row.phase == "triage" && row.how_feedback.is_none() && row.issue_feedback.is_none() {
             suppressed.retain(|(number, _, _), _| *number != row.issue.number);
         }
@@ -2623,6 +2706,230 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn merged_worktree_fixture() -> (PathBuf, Value, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("oriel-merged-{}", random_hex::<12>().unwrap()));
+        git::private_directory(&root).unwrap();
+        let repository = repository_root(&root, 1).await.unwrap();
+        let fingerprint = "a".repeat(64);
+        let branch = format!("oriel/ENG-1-gh-42-{fingerprint}");
+        let path = root.join("worktrees").join(format!("1-{fingerprint}"));
+        let tree = git::text(&repository, &["mktree"]).await.unwrap();
+        let initial = git::text(&repository, &["commit-tree", &tree, "-m", "initial"])
+            .await
+            .unwrap();
+        git::text(
+            &repository,
+            &["update-ref", &format!("refs/heads/{branch}"), &initial],
+        )
+        .await
+        .unwrap();
+        git::text(
+            &repository,
+            &["worktree", "add", path.to_str().unwrap(), &branch],
+        )
+        .await
+        .unwrap();
+        fs::write(path.join("source.rs"), "merged source\n").unwrap();
+        fs::write(path.join(".gitignore"), "build/\n").unwrap();
+        git::text(&path, &["add", "."]).await.unwrap();
+        git::text(&path, &["commit", "-m", "merged implementation"])
+            .await
+            .unwrap();
+        let head = git::text(&path, &["rev-parse", "HEAD"]).await.unwrap();
+        let snapshot = json!({
+            "repository":{"owner":"octocat","name":"connected"},
+            "repository_id":1,"repository_node_id":"repo","base_branch":"main",
+            "target_oid":"1111111111111111111111111111111111111111",
+            "configuration":{"autonomous":false,"verification":[],"error":null},
+            "workflows":[{
+                "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
+                "linear":{"identifier":"ENG-1","title":"HOW","description":null,"url":"https://linear.app/issue/ENG-1"},
+                "what_comments":[],"how_comments":[],"version":fingerprint,"fingerprint":fingerprint,"branch":branch,
+                "canonical_oid":null,
+                "pull_request":{"number":7,"url":"https://github.com/octocat/connected/pull/7","branch":branch,
+                    "head_oid":head,"base_branch":"main","state":"closed","merged":true,"draft":false},
+                "phase":"merged"
+            }]
+        });
+        (root, snapshot, repository, path)
+    }
+
+    #[tokio::test]
+    async fn merged_worktree_cleanup_preserves_wip_and_retries_after_done() {
+        let (root, mut value, repository, path) = merged_worktree_fixture().await;
+        let mut snapshot: Snapshot = serde_json::from_value(value.clone()).unwrap();
+        for phase in ["review", "closed", "blocked"] {
+            snapshot.workflows[0].phase = phase.into();
+            assert!(
+                !cleanup_merged_worktree(&root, &snapshot, &snapshot.workflows[0])
+                    .await
+                    .unwrap()
+            );
+        }
+        snapshot.workflows[0].phase = "merged".into();
+        snapshot.workflows[0].pull_request.as_mut().unwrap().merged = false;
+        assert!(
+            !cleanup_merged_worktree(&root, &snapshot, &snapshot.workflows[0])
+                .await
+                .unwrap()
+        );
+        snapshot.workflows[0].pull_request.as_mut().unwrap().merged = true;
+        let row = &snapshot.workflows[0];
+
+        fs::write(path.join("source.rs"), "unfinished source\n").unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("source.rs")).unwrap(),
+            "unfinished source\n"
+        );
+        git::text(&path, &["checkout", "--", "source.rs"])
+            .await
+            .unwrap();
+        fs::write(path.join("unfinished"), "keep me").unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        git::text(&path, &["add", "unfinished"]).await.unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        git::text(&path, &["commit", "-m", "local unpublished work"])
+            .await
+            .unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("unfinished")).unwrap(),
+            "keep me"
+        );
+        // Restore the published head only in this disposable test repository.
+        git::text(
+            &path,
+            &[
+                "reset",
+                "--hard",
+                &row.pull_request.as_ref().unwrap().head_oid,
+            ],
+        )
+        .await
+        .unwrap();
+        git::text(&path, &["checkout", "-b", "unrelated"])
+            .await
+            .unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        git::text(&path, &["checkout", row.branch.as_deref().unwrap()])
+            .await
+            .unwrap();
+        let lock = crate::verification_monitor::lock(&root).unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        drop(lock);
+        git::text(&repository, &["worktree", "lock", path.to_str().unwrap()])
+            .await
+            .unwrap();
+        assert!(
+            cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .is_err()
+        );
+        assert!(path.exists());
+        git::text(&repository, &["worktree", "unlock", path.to_str().unwrap()])
+            .await
+            .unwrap();
+
+        // A later scan must still clean up after Linear was moved to Done,
+        // even when the canonical remote branch has already been deleted.
+        snapshot.workflows[0].phase = "done".into();
+        let row = &snapshot.workflows[0];
+        fs::create_dir(path.join("build")).unwrap();
+        fs::write(path.join("build/artifact"), "ignored output").unwrap();
+        value["workflows"][0]["phase"] = json!("done");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let mut reply = json!({"request_id":request["request_id"]});
+                reply["type"] = json!(match request["type"].as_str().unwrap() {
+                    "snapshot" => {
+                        reply["snapshot"] = value.clone();
+                        "snapshot"
+                    }
+                    "progress" => "progressed",
+                    _ => panic!("cleanup must not claim work or mutate providers: {request}"),
+                });
+                socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let (socket, _) = connect_async(url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://localhost/").unwrap(),
+            socket,
+            repository: snapshot.repository.clone(),
+            lease: None,
+            changed: false,
+            exchange_pending: false,
+            scan_interval: SCAN_INTERVAL,
+            snapshot_http: false,
+            verification_metadata: false,
+        };
+        scan(
+            &mut session,
+            &root,
+            &mut HashMap::new(),
+            &mut Console::default(),
+            execute_work,
+        )
+        .await
+        .unwrap();
+        drop(session);
+        server.await.unwrap();
+        assert!(!path.exists());
+        assert!(
+            !git::text(&repository, &["worktree", "list", "--porcelain"])
+                .await
+                .unwrap()
+                .contains(path.to_str().unwrap())
+        );
+        assert_eq!(
+            git::text(&repository, &["rev-parse", row.branch.as_deref().unwrap()])
+                .await
+                .unwrap(),
+            row.pull_request.as_ref().unwrap().head_oid
+        );
+        assert!(
+            !cleanup_merged_worktree(&root, &snapshot, row)
+                .await
+                .unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn signal_child_work<'a>(
         session: &'a mut Session,
