@@ -20,8 +20,25 @@ Webは制御フレームを端末出力へ流さず、開いている端末と�
 - daemonの終了状態保持、購読前終了通知、送信停滞の個別テスト: 通過。
 - Relay Rust unit tests: 3件通過。
 - `node --test crates/oriel-web/test/dashboard.test.mjs`: 通過。
-- Rust対象全体: 47件通過、13件失敗。12件はsandboxのOperation not permitted、
+- Rust対象全体（`cargo test -p orield --bin orield`）: 48件通過、13件失敗。12件はsandboxのOperation not permitted、
   1件はsignal fixtureの起動失敗。ホスト環境で再実行が必要。
 - Relay/Webで `npm ci --offline --prefix <directory>` を試行したが、zod等の
   オフラインキャッシュ不足で失敗。Relay統合テストはws未導入で起動不能。
   ホスト環境で依存導入・Relayビルド後、terminal-presence.test.mjsを実行する。
+
+## ホスト検証の依存導入失敗
+
+2026-10-20のホスト検証は `npm --prefix crates/oriel-relay ci` で停止した。
+`verification-home/.npm/_cacache` は `/home/nixos/.npm/_cacache` へのリンクで、
+提示されたログの主エラーはこのパスに対する `ENOTDIR`。
+`node_modules` 削除時の `ENOTEMPTY` はcleanup警告であり、PTY終了処理の失敗ではない。
+
+独立した既存キャッシュで、同じコマンドを
+`npm_config_offline=true npm_config_cache=/tmp/oriel-npm-cache` を付けて再実行した。
+`ENOTDIR` は発生しないが、`zod-4.4.3.tgz` の `ENOTCACHED` で停止する。
+Webの依存導入も同じ理由で失敗し、Relay統合テストは `ws` 不足で起動できない。
+再検証ではclippy、Relay Rust単体テスト3件、Web dashboardテストが通過した。
+
+ホスト管理者は検証用npmキャッシュのリンク先と親ディレクトリを修復し、
+lockfileに必要な依存をキャッシュに用意してから、依存導入と全設定済み検証を再実行する。
+この作業ツリーではホストのキャッシュ、検証設定、テスト条件は変更していない。
