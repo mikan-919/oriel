@@ -39,6 +39,14 @@ Webは制御フレームを端末出力へ流さず、開いている端末と�
 Webの依存導入も同じ理由で失敗し、Relay統合テストは `ws` 不足で起動できない。
 再検証ではclippy、Relay Rust単体テスト3件、Web dashboardテストが通過した。
 
-ホスト管理者は検証用npmキャッシュのリンク先と親ディレクトリを修復し、
-lockfileに必要な依存をキャッシュに用意してから、依存導入と全設定済み検証を再実行する。
-この作業ツリーではホストのキャッシュ、検証設定、テスト条件は変更していない。
+Relay/Webの `.npmrc` に `cache=.npm-cache` を追加し、通常の `npm --prefix <directory> ci`
+でも作業ディレクトリ内のキャッシュを使用するよう修正した。生成キャッシュはGit対象外とする。
+ホストのキャッシュ、検証設定、テスト条件は変更していない。
+オフライン再試行では `ENOTDIR` は解消し、未キャッシュの `zod-4.4.3.tgz` に対する
+`ENOTCACHED` を確認した。ネットワークを利用できるホストで依存導入と全検証を再実行する。
+
+修正後の通常導入も再実行した（待機を制限するためfetch retries=0、timeout=10000）。
+`npm --prefix crates/oriel-relay ci` は `ENOTDIR` ではなく、registry.npmjs.org の
+名前解決制限 `EAI_AGAIN` で停止した。clippy、Relay Rust単体3件、Web dashboardは再度通過。
+daemon全体は再度48件通過・13件失敗（sandboxの権限制限とsignal fixture起動失敗）。
+Relay統合テストは依存未導入のためwsの解決に失敗した。
