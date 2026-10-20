@@ -1532,7 +1532,11 @@ fn dependency_cache_environment_from(
                 fs::remove_file(&contents)
                     .with_context(|| format!("unlink npm cache {}", contents.display()))?;
             }
-            Ok(_) => {}
+            Ok(metadata) => ensure!(
+                metadata.is_dir(),
+                "npm cache {} is not a directory; preserve the file and move it aside before retrying verification",
+                contents.display()
+            ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -3960,6 +3964,24 @@ mod tests {
                 );
             }
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_reports_obstructing_file_without_deleting_it() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-file-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(root.join(".npm")).unwrap();
+        let target = root.join(".npm/_cacache");
+        fs::write(&target, "preserve cache obstruction").unwrap();
+        let error = dependency_cache_environment_from(&root, None, None, false).unwrap_err();
+        let reason = error.to_string();
+        assert!(reason.contains(&target.display().to_string()));
+        assert!(reason.contains("is not a directory"));
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "preserve cache obstruction"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

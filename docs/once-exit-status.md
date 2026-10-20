@@ -40,3 +40,13 @@
 `npm_config_cache=/tmp/oriel-npm-cache npm_config_offline=true npm --prefix crates/oriel-relay ci` を再実行した。今回も `zod-4.4.3.tgz` の `ENOTCACHED` で停止したため、依存インストールの成功は未確認。
 
 追加修復後の `cargo fmt --all -- --check` と `cargo clippy -p orield --all-targets --locked -- -D warnings` は成功。`cargo test -p orield --locked` は49件成功、14件失敗。新規回帰試験は成功し、失敗はサンドボックスのソケット作成制限と関連する子プロセス試験による。ホストで全設定済み検証を再実行する。
+
+## キャッシュを塞ぐ通常ファイルの診断
+
+検証用 `_cacache` が通常ファイルだった場合は、npm を起動する前に対象パスと対処方法を報告するよう補強した。ファイルを自動削除しないことを回帰試験で確認した。共有リンクに対する既存の回復処理は維持する。
+
+- `cargo fmt --all -- --check`、`cargo clippy -p orield --all-targets --locked -- -D warnings`: 成功。
+- `cargo test -p orield --locked`: 50件成功、14件失敗。追加試験は成功。失敗はローカルソケット作成の `Operation not permitted` と関連する子プロセス試験による。
+- `npm_config_cache=/tmp/oriel-npm-cache npm_config_offline=true npm --prefix crates/oriel-relay ci`: `zod-4.4.3.tgz` の `ENOTCACHED` で停止。
+
+指定ベースは統合済み。ホストでは修正後の orield を使用し、依存取得と全設定済み検証を再実行する必要がある。
