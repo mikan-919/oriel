@@ -1,3 +1,4 @@
+import { capacityError, WorkflowCapacityError } from "./workflow-capacity";
 import type { Device, Integrations } from "./integrations";
 import { digest } from "./workflow";
 import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask, WorkflowSnapshot } from "./workflow";
@@ -435,6 +436,8 @@ export class WorkflowLeases {
             (other.grant.issue_number === admitted.issue_number ||
              admitted.branch !== null && other.grant.branch === admitted.branch)) throw new WorkflowLeaseError();
       }
+      const capacity = capacityError(binding, admitted);
+      if (capacity) throw new WorkflowCapacityError(capacity);
       const leaseId = crypto.randomUUID();
       attachment.grant = { ...admitted, lease_id: leaseId };
       attachment.verification = undefined;
@@ -449,7 +452,7 @@ export class WorkflowLeases {
         this.send(ws, { type: "error", request_id: requestId, status: error.status, error: error.message,
           ...("retryAfterSeconds" in error ? { retry_after_seconds: error.retryAfterSeconds } : {}) });
       } else {
-        this.send(ws, { type: "rejected", request_id: requestId, error: "Workflow request rejected" });
+        this.send(ws, { type: "rejected", request_id: requestId, error: error instanceof WorkflowCapacityError || error instanceof Error && error.message.startsWith("execution.verification capacity exceeded") ? error.message : "Workflow request rejected" });
       }
     } finally {
       this.publish();

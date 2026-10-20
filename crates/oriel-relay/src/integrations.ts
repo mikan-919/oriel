@@ -1,3 +1,4 @@
+import { executionAdmission } from "./workflow-capacity";
 import { WorkflowReader } from "./workflow-reader";
 import type { WorkflowLeases } from "./workflow-lease";
 import { digest, githubIssueLink, OID, parseConfiguration, UUID, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowAdmission, type WorkflowAuthority, type WorkflowBinding, type WorkflowClaim, type WorkflowGrant, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
@@ -285,6 +286,7 @@ export class Integrations extends WorkflowReader {
       row.phase === "merged" || row.phase === "done" || row.phase === "blocked" && row.recovery === "invalidate";
     if (!allowed) this.auth.fail(409, row.blocked_reason ?? "Workflow phase does not admit this operation");
     context.check();
+    if (["implement", "respond"].includes(claim.kind)) return executionAdmission(snapshot, row, claim);
     return { ...claim, linear_id: row.linear?.id ?? null,
       ...(claim.kind === "plan" ? { initial_what_version: await digest(["oriel/what-version/v1", snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) } : {}),
       ...(["plan", "discuss"].includes(claim.kind) && row.issue_feedback ? { issue_feedback: { key: row.issue_feedback.key } } : {}),
