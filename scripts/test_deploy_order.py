@@ -18,10 +18,8 @@ class DeploymentOrder(unittest.TestCase):
         self.git('init', 'checkout')
         self.checkout = self.repo / 'checkout'
         self.git('-C', str(self.checkout), 'remote', 'add', 'origin', str(self.repo / 'origin.git'))
-        self.a = 'a' * 40
-        self.b = 'b' * 40
         # Real commit objects and refs, without user identity or hooks.
-        tree = self.git('-C', str(self.checkout), 'mktree', input='').strip()
+        tree = self.git('--git-dir', str(self.repo / 'origin.git'), 'mktree', input='').strip()
         self.a = self.commit(tree, 'A')
         self.b = self.commit(tree, 'B', self.a)
         self.publish(self.a)
@@ -37,10 +35,10 @@ class DeploymentOrder(unittest.TestCase):
         args = ['git', '-c', 'core.hooksPath=/dev/null', 'commit-tree', tree]
         if parent:
             args += ['-p', parent]
-        return subprocess.check_output(args, cwd=self.checkout, env=env, input=message, text=True).strip()
+        return subprocess.check_output(args, cwd=self.repo / 'origin.git', env=env, input=message, text=True).strip()
 
     def publish(self, sha):
-        self.git('-C', str(self.checkout), 'push', 'origin', f'{sha}:refs/heads/main')
+        self.git('--git-dir', str(self.repo / 'origin.git'), 'update-ref', 'refs/heads/main', sha)
 
     def check(self, sha, **extra):
         output = self.repo / 'output'
@@ -86,6 +84,26 @@ class DeploymentOrder(unittest.TestCase):
         result, allowed = self.check(self.a)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(allowed)
+
+    def test_invalid_deployment_sha_blocks(self):
+        for sha in ['', 'invalid', self.a + '\n', 'a' * 39]:
+            with self.subTest(sha=sha):
+                result, allowed = self.check(sha)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(allowed)
+                self.assertIn('Invalid deployment SHA', result.stderr)
+
+    def test_transport_diagnostics_are_not_logged(self):
+        stub = self.repo / 'bin'
+        stub.mkdir()
+        git = stub / 'git'
+        git.write_text('#!/bin/sh\necho sensitive-transport-diagnostic >&2\nexit 1\n')
+        git.chmod(0o755)
+        result, allowed = self.check(self.a, PATH=str(stub) + ':' + os.environ['PATH'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(allowed)
+        self.assertIn('Failed to retrieve main head', result.stderr)
+        self.assertNotIn('sensitive-transport-diagnostic', result.stdout + result.stderr)
 
     def test_empty_malformed_and_multiple_responses_block(self):
         stub = self.repo / 'bin'

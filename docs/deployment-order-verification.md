@@ -2,14 +2,17 @@
 
 ローカルでは `python3 -m unittest discover -s scripts -p test_deploy_order.py`
 を実行する。一時Gitリポジトリをoriginとして実際の先端確認スクリプトを実行し、
-配備はSHAとRelay/Webを記録するスタブに置き換える。テストは待機順のFIFOを仮定しない。
+配備はSHAとRelay/Webを記録するスタブに置き換える。一時origin内でコミットと参照を作成し、pushは実行しない。テストは待機順のFIFOを仮定しない。
 ワークフローのジョブロック、配備条件、既定の成功条件と失敗時停止も検査する。
+9件のテストには不正な配備SHAの拒否と、取得失敗時にtransportの診断情報をログへ出さない検証も含む。
 
 ## ホストでの検証
 
 `actionlint .github/workflows/ci.yml` でYAMLとGitHub Actionsの条件式を検査する。
 エージェント環境にはactionlintがなく、npmのオフラインキャッシュも不足していたため、
 この構文検証と既存のnpmビルド・テストはホストで実施する。
+指定基点 `740716fe0ac931e85349ec9ceae5cd1a9b22a618` の統合後も再検証済み。
+両パッケージへの `npm ci --offline` は隔離キャッシュで試行したが、zodのキャッシュ不足で失敗した。
 `bash -n scripts/check-deploy-head.sh`、ローカル順序テスト、
 `cargo clippy --offline --workspace --all-targets` はエージェント環境で通過した。
 
