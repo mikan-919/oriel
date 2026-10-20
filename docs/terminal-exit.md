@@ -50,3 +50,15 @@ Relay/Webの `.npmrc` に `cache=.npm-cache` を追加し、通常の `npm --pre
 名前解決制限 `EAI_AGAIN` で停止した。clippy、Relay Rust単体3件、Web dashboardは再度通過。
 daemon全体は再度48件通過・13件失敗（sandboxの権限制限とsignal fixture起動失敗）。
 Relay統合テストは依存未導入のためwsの解決に失敗した。
+
+## 一覧応答の検証修正
+
+ホスト検証で判明した `relay.test.mjs` の一覧応答の期待値2か所を更新した。
+新規登録と旧devicesスキーマからの移行の双方で、終了前は `terminal_exit: null`
+となることを厳密比較する。既存の所有権・repository検証は維持した。
+
+修正後、`npm --prefix crates/oriel-relay test` を再実行したが、sandboxでは
+ローカルサーバー起動が `listen EPERM 127.0.0.1` となる。
+対象テストをisolationなしで実行してこの原因を確認した。ホストで全件再検証が必要。
+Webのnpmテストは4件すべて通過、workspace全対象のclippyも通過。
+daemon全体は48件通過・13件失敗で、sandboxの権限制限とsignal fixture起動失敗が残る。
