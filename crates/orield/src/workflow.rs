@@ -4000,6 +4000,41 @@ mod tests {
     }
 
     #[test]
+    fn recovered_cache_is_usable_by_npm_offline() {
+        // npm is optional for Rust-only installations. When present, exercise
+        // its real cache layout rather than just writing our own test entry.
+        match std::process::Command::new("npm").arg("--version").output() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            result => assert!(result.unwrap().status.success()),
+        }
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-process-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(root.join(".npm")).unwrap();
+        let obstruction = root.join(".npm/_cacache");
+        fs::write(&obstruction, "preserve cache obstruction").unwrap();
+        let environment = dependency_cache_environment_from(&root, None, None, false).unwrap();
+        let output = std::process::Command::new("npm")
+            .args(["--offline", "cache", "verify"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &root)
+            .envs(environment)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "npm cache verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&obstruction).unwrap(),
+            "preserve cache obstruction"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn online_npm_cache_recovers_obstructed_parent_without_deleting_it() {
         let root =
             std::env::temp_dir().join(format!("oriel-npm-parent-{}", random_hex::<12>().unwrap()));
