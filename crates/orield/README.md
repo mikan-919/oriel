@@ -62,6 +62,8 @@ Web画面でGitHub・Linearの連携を設定し、対象リポジトリのコ�
 
 認証ファイルには端末の秘密情報が含まれます。共有や公開をしないでください。中断時の作業は保存先に残ります。
 
+`orield workflow`は、PRのマージを検知すると、対応する実装用の作業ツリー（Gitの分離された作業ディレクトリ）を自動で削除します。変更・未追跡ファイルがなく、現在のコミットがマージ済みPRの最終コミットと一致する場合に削除します。無視対象の生成物も作業ツリーとともに削除されます。ローカルのブランチと実行記録は残ります。削除できない場合は理由を表示して作業を保持し、次回の監視時に再試行します。Linearが既にDoneの作業も対象で、再起動後や`workflow --once`でも処理します。
+
 ## 開発・公開
 
 [Orielの開発手順](https://github.com/mikan-919/oriel#開発する)と[crates.ioへの公開手順](https://github.com/mikan-919/oriel/blob/main/docs/orield-release.md)を参照してください。ライセンスは[MIT](https://github.com/mikan-919/oriel/blob/main/crates/orield/LICENSE)です。
