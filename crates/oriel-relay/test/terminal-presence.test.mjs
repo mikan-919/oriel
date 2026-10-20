@@ -433,3 +433,34 @@ test("every terminal frame consults account SQL without adding presence storage 
     console.log("Terminal account authorization SQL:", JSON.stringify({before, after}));
   } finally { await worker.dispose(); }
 });
+
+test("child exit is host-only, persists offline and clears on a new host", { timeout: 20000 }, async () => {
+  const worker = await runtime();
+  try {
+    const { owner, daemon } = await pair(worker);
+    const terminal = await host(daemon);
+    await until(owner, "online");
+    const browser = await owner.upgrade("client");
+    browser.webSocket.accept();
+    const exit = {state:"exited",code:7,signal:"TERM"};
+    const notice = `oriel-terminal-exit:${JSON.stringify(exit)}`;
+    browser.webSocket.send(notice);
+    await wait(50);
+    assert.equal(await state(owner), "online", "Client cannot forge an exit");
+    const received = new Promise(resolve => browser.webSocket.addEventListener("message", event => resolve(event.data), {once:true}));
+    terminal.send(notice);
+    assert.equal(await received, notice);
+    await until(owner, "offline");
+    assert.equal((await owner.upgrade("client")).status,409);
+    const row = async () => (await owner.api("/api/devices")).data.devices.find(row => row.device_id === device);
+    assert.deepEqual((await row()).terminal_exit,exit);
+    await worker.unsafeEvictDurableObject("oriel-relay", "RelayDevice", {name:device});
+    assert.deepEqual((await row()).terminal_exit,exit);
+    const replacement = await host(daemon);
+    await until(owner,"online");
+    assert.equal((await row()).terminal_exit,null);
+    replacement.send('oriel-terminal-exit:{"state":"wait_failed"}');
+    await until(owner,"offline");
+    assert.deepEqual((await row()).terminal_exit,{state:"wait_failed"});
+  } finally { await worker.dispose(); }
+});

@@ -644,6 +644,32 @@ mod tests {
         assert_eq!(p.status(46_000), "offline");
     }
 
+    #[test]
+    fn exit_presence_survives_storage_and_stays_offline() {
+        for exit in [
+            TerminalExit::Exited {
+                code: 0,
+                signal: None,
+            },
+            TerminalExit::Exited {
+                code: 7,
+                signal: Some("TERM".into()),
+            },
+            TerminalExit::WaitFailed,
+        ] {
+            let p = Presence {
+                terminal_exit: Some(exit),
+                offline: true,
+                last_reply: Some(100),
+                ..Presence::default()
+            };
+            let saved = serde_json::to_string(&p).unwrap();
+            let restored: Presence = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.status(101), "offline");
+            assert_eq!(serde_json::to_string(&restored).unwrap(), saved);
+        }
+    }
+
     const DEVICE: &str = "0123456789abcdef0123456789abcdef";
 
     #[test]

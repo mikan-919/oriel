@@ -1088,6 +1088,11 @@ async function openTerminal(device) {
                 exitReason = terminalExitReason(exit);
                 device.terminal_exit = exit;
                 device.terminal_status = "offline";
+                const currentDevice = devices.find(row => row.device_id === device.device_id);
+                if (currentDevice) { currentDevice.terminal_exit = exit; currentDevice.terminal_status = "offline"; }
+                const row = deviceRows.get(device.device_id);
+                if (row) { row.open.disabled = true; row.label.textContent = `${device.name} (${device.device_id}) — ${exitReason}`; }
+                terminalTitle.textContent = `${device.name} (${device.device_id}) — ${exitReason}`;
                 terminal.options.disableStdin = true;
                 status.textContent = exitReason;
                 connection.close();

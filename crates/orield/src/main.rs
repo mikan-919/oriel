@@ -577,6 +577,7 @@ struct Terminal {
     writer: Mutex<Box<dyn Write + Send>>,
     output: broadcast::Sender<Vec<u8>>,
     state: watch::Receiver<TerminalState>,
+    output_done: watch::Receiver<bool>,
 }
 
 type TerminalHandle = Arc<Terminal>;
@@ -781,11 +782,13 @@ fn spawn_terminal(command: &str) -> Result<TerminalHandle> {
     let (output_tx, _) = broadcast::channel::<Vec<u8>>(256);
 
     let (state_tx, state) = watch::channel(TerminalState::Running);
+    let (output_done_tx, output_done) = watch::channel(false);
     let terminal = Arc::new(Terminal {
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         output: output_tx.clone(),
         state,
+        output_done,
     });
 
     thread::spawn(move || {
@@ -805,6 +808,7 @@ fn spawn_terminal(command: &str) -> Result<TerminalHandle> {
                 }
             }
         }
+        output_done_tx.send_replace(true);
     });
 
     thread::spawn(move || match child.wait() {
@@ -856,6 +860,7 @@ where
                             Some(Ok(Message::Binary(data))) => {
                                 let terminal = terminal.clone();
                                 let result = tokio::task::spawn_blocking(move || {
+                                    if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
                                     let mut writer = terminal
                                         .writer
                                         .lock()
@@ -887,6 +892,7 @@ where
                                 {
                                     let terminal = terminal.clone();
                                     let result = tokio::task::spawn_blocking(move || {
+                                        if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
                                         let master = terminal
                                             .master
                                             .lock()
@@ -971,8 +977,20 @@ where
                     .send(Message::Binary(std::mem::take(&mut pending).into()))
                     .await?;
             }
-            while let Ok(data) = output.try_recv() {
-                sender.send(Message::Binary(data.into())).await?;
+            let mut done = terminal.output_done.clone();
+            loop {
+                while let Ok(data) = output.try_recv() {
+                    sender.send(Message::Binary(data.into())).await?;
+                }
+                if *done.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = done.changed() => {},
+                    data = output.recv() => {
+                        if let Ok(data) = data { sender.send(Message::Binary(data.into())).await?; }
+                    }
+                }
             }
             Ok::<(), anyhow::Error>(())
         })
@@ -1048,6 +1066,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_reports_even_an_exit_before_subscription() {
+        for exit in [
+            TerminalState::Exited {
+                code: 0,
+                signal: None,
+            },
+            TerminalState::Exited {
+                code: 3,
+                signal: None,
+            },
+            TerminalState::WaitFailed,
+        ] {
+            let (mut terminal, _) = test_terminal();
+            let (_tx, state) = watch::channel(exit.clone());
+            Arc::get_mut(&mut terminal).unwrap().state = state;
+            let (mut peer, task) = relay_connection(terminal).await;
+            let frame = peer.next().await.unwrap().unwrap();
+            assert_eq!(
+                frame,
+                Message::Text(
+                    format!(
+                        "oriel-terminal-exit:{}",
+                        serde_json::to_string(&exit).unwrap()
+                    )
+                    .into()
+                )
+            );
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn exit_interrupts_a_stalled_socket() {
         let (mut terminal, _) = test_terminal();
         let (tx, state) = watch::channel(TerminalState::Running);
@@ -1057,7 +1111,8 @@ mod tests {
         for _ in 0..64 {
             let _ = terminal.output.send(vec![0; 8192]);
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished());
         tx.send_replace(TerminalState::Exited {
             code: 0,
             signal: None,
@@ -1082,6 +1137,7 @@ mod tests {
             writer: Mutex::new(Box::new(writer.clone())),
             output,
             state,
+            output_done: watch::channel(true).1,
         });
         (terminal, writer)
     }
