@@ -2405,7 +2405,27 @@ async fn read_only(
     Ok(())
 }
 
-fn interrupted(result: &Result<()>) -> bool {
+#[derive(Debug, Default)]
+struct ScanOutcome {
+    failures: Vec<(u64, anyhow::Error)>,
+}
+
+impl ScanOutcome {
+    fn into_result(self) -> Result<()> {
+        ensure!(
+            self.failures.is_empty(),
+            "workflow failures: {}",
+            self.failures
+                .iter()
+                .map(|(issue, error)| format!("#{issue}: {error:#}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        Ok(())
+    }
+}
+
+fn interrupted<T>(result: &Result<T>) -> bool {
     result
         .as_ref()
         .is_err_and(|error| matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)))
@@ -2431,7 +2451,10 @@ async fn drive_session(
     loop {
         let mut result = scan(session, root, suppressed, console, execute).await;
         if result.is_ok() && !once {
-            result = session.wait(session.scan_interval).await;
+            result = session
+                .wait(session.scan_interval)
+                .await
+                .map(|()| ScanOutcome::default());
             if interrupted(&result) {
                 session.shutdown().await;
             }
@@ -2441,7 +2464,7 @@ async fn drive_session(
         }
         if once {
             session.shutdown().await;
-            return result;
+            return result.and_then(ScanOutcome::into_result);
         }
         result?;
     }
@@ -2485,7 +2508,7 @@ async fn scan(
     suppressed: &mut HashMap<(u64, String, String), String>,
     console: &mut Console,
     execute: Work,
-) -> Result<()> {
+) -> Result<ScanOutcome> {
     let result = scan_inner(session, root, suppressed, console, execute).await;
     if interrupted(&result) {
         session.shutdown().await;
@@ -2499,12 +2522,13 @@ async fn scan_inner(
     suppressed: &mut HashMap<(u64, String, String), String>,
     console: &mut Console,
     execute: Work,
-) -> Result<()> {
+) -> Result<ScanOutcome> {
     if crate::codex::paused() {
         session.progress("paused").await?;
-        return Ok(());
+        return Ok(ScanOutcome::default());
     }
     let snapshot = session.snapshot().await?;
+    let mut outcome = ScanOutcome::default();
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
         // Also visit Done rows after restart or another device's reconciliation.
@@ -2606,6 +2630,7 @@ async fn scan_inner(
                     if !matches!(kind, "implement" | "respond") {
                         suppressed.insert(identity, format!("{error:#}"));
                     }
+                    outcome.failures.push((row.issue.number, error));
                 }
             }
             session.progress("paused").await?;
@@ -2617,7 +2642,7 @@ async fn scan_inner(
     }
     session.progress(resting_stage).await?;
     console.connected();
-    Ok(())
+    Ok(outcome)
 }
 
 pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> Result<()> {
