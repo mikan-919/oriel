@@ -11,9 +11,14 @@ on:
       - "Cargo.lock"
       - ".github/workflows/ci.yml"
       - "scripts/deploy-worker.mjs"
+      - "scripts/check-deploy-head.sh"
+      - "scripts/test_deploy_order.py"
 
 jobs:
   deploy:
+    concurrency:
+      group: production-cloudflare-apps
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -46,21 +51,36 @@ jobs:
       - name: Verify authentication boundaries
         run: npm test
 
+      - name: Verify deployment ordering
+        working-directory: .
+        run: python3 -m unittest discover -s scripts -p test_deploy_order.py
+
+      - name: Check main head before deployment
+        id: deploy-head
+        working-directory: .
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: bash scripts/check-deploy-head.sh
+
       - name: Deploy Relay before its Browser client
+        if: steps.deploy-head.outputs.deploy == 'true'
         run: npm run deploy:prebuilt
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Install Browser dependencies
+        if: steps.deploy-head.outputs.deploy == 'true'
         working-directory: crates/oriel-web
         run: npm ci
 
       - name: Build Browser
+        if: steps.deploy-head.outputs.deploy == 'true'
         working-directory: crates/oriel-web
         run: npm run build
 
       - name: Deploy Browser
+        if: steps.deploy-head.outputs.deploy == 'true'
         working-directory: crates/oriel-web
         run: npm run deploy:prebuilt
         env:
