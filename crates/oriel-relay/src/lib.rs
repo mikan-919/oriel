@@ -47,10 +47,19 @@ struct TerminalSession {
     revoked: bool,
 }
 
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum TerminalExit {
+    Exited { code: u32, signal: Option<String> },
+    WaitFailed,
+}
+const EXIT: &str = "oriel-terminal-exit:";
 const CONTROL: &str = "oriel-heartbeat:";
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Presence {
     generation: u64,
+    #[serde(default)]
+    terminal_exit: Option<TerminalExit>,
     #[serde(default)]
     next_heartbeat: Option<u64>,
     last_reply: Option<u64>,
@@ -395,7 +404,10 @@ impl DurableObject for RelayDevice {
         }
         if req.path() == "/internal/terminal-status" {
             let p = self.evaluate().await?;
-            return Response::ok(p.status(Date::now().as_millis()));
+            return Response::from_json(&serde_json::json!({
+                "terminal_status": p.status(Date::now().as_millis()),
+                "terminal_exit": p.terminal_exit,
+            }));
         }
         let path = req.path();
         let Some((_, role)) = parse_route(&path) else {
@@ -457,6 +469,7 @@ impl DurableObject for RelayDevice {
         }
         if role == HOST_TAG {
             p.generation += 1;
+            p.terminal_exit = None;
             p.next_heartbeat = Some(Date::now().as_millis() + 10_000);
             p.last_reply = None;
             if p.offline {
@@ -480,6 +493,27 @@ impl DurableObject for RelayDevice {
     ) -> Result<()> {
         let mut p = self.presence()?;
         let host = self.current(&socket, &p);
+        if let WebSocketIncomingMessage::String(text) = &message
+            && let Some(payload) = text.strip_prefix(EXIT)
+        {
+            if host
+                && !p.offline
+                && let Ok(exit) = serde_json::from_str::<TerminalExit>(payload)
+            {
+                p.terminal_exit = Some(exit);
+                p.offline = true;
+                p.challenge.clear();
+                p.deadline = None;
+                self.remember(&p)?;
+                for client in self.state.get_websockets_with_tag(CLIENT_TAG) {
+                    let _ = client.send_with_str(text);
+                    self.close_client(&client);
+                }
+                self.save(&p).await?;
+                let _ = socket.close(Some(1000), Some("Terminal exited"));
+            }
+            return Ok(());
+        }
         if let WebSocketIncomingMessage::String(text) = &message
             && let Some(reply) = text.strip_prefix(CONTROL)
         {
