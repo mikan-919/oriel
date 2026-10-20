@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+#[path = "../src/executable.rs"]
+mod executable;
 #[path = "../src/verification_monitor.rs"]
 #[allow(dead_code)]
 mod verification_monitor;
@@ -62,6 +64,95 @@ fn wait_for(mut predicate: impl FnMut() -> bool) {
     while !predicate() {
         assert!(Instant::now() < deadline, "timed out");
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn reexec_after_executable_replacement() {
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let root = std::env::temp_dir().join(format!("oriel-reexec-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let installed = root.join("orield");
+    std::fs::copy(std::env::current_exe().unwrap(), &installed).unwrap();
+    let daemon = Command::new(&installed)
+        .args(["--exact", "reexec_helper", "--nocapture"])
+        .env("ORIEL_REEXEC_TEST_ROOT", &root)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut cleanup = Cleanup {
+        daemon,
+        root: root.clone(),
+    };
+    wait_for(|| root.join("ready").exists() || cleanup.daemon.try_wait().unwrap().is_some());
+    assert!(
+        root.join("ready").exists(),
+        "subprocess exited before replacement"
+    );
+    let replacement = root.join("replacement");
+    std::fs::write(&replacement, "#!/bin/sh\nexit 99\n").unwrap();
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::rename(replacement, &installed).unwrap();
+    cleanup
+        .daemon
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"S")
+        .unwrap();
+    wait_for(|| cleanup.daemon.try_wait().unwrap().is_some());
+    assert!(cleanup.daemon.wait().unwrap().success());
+    for mode in ["direct", "shell"] {
+        assert_eq!(
+            std::fs::read_to_string(root.join(mode)).unwrap(),
+            "original executable"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reexec_helper() {
+    use std::io::Read;
+    let Ok(root) = std::env::var("ORIEL_REEXEC_TEST_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    if let Ok(mode) = std::env::var("ORIEL_REEXEC_TEST_MODE") {
+        std::fs::write(root.join(mode), "original executable").unwrap();
+        return;
+    }
+    std::fs::write(root.join("ready"), "").unwrap();
+    let mut start = [0];
+    std::io::stdin().read_exact(&mut start).unwrap();
+    // Rebuilding/reinstalling unlinks the original image while it still runs.
+    assert!(!std::env::current_exe().unwrap().exists());
+    let executable = executable::current().unwrap();
+    for mode in ["direct", "shell"] {
+        let mut command = if mode == "direct" {
+            let mut command = Command::new(&executable);
+            command.args(["--exact", "reexec_helper", "--nocapture"]);
+            command
+        } else {
+            let mut command = Command::new("/bin/sh");
+            command.args([
+                "-c",
+                &format!(
+                    "'{}' --exact reexec_helper --nocapture",
+                    executable.display()
+                ),
+            ]);
+            command
+        };
+        let output = command
+            .env("ORIEL_REEXEC_TEST_MODE", mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
