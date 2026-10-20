@@ -696,3 +696,37 @@ test("Heartbeat keeps a connection alive while a silent owner expires and alarm 
     assert.equal((await gitToken(daemon, next.lease_id, secondDevice, secondHeaders)).status, 200);
   } finally { clearInterval(heartbeat); await worker.dispose(); }
 });
+
+test("near-capacity execution persists progress, paused task and ownership across hibernation", { timeout: 120000 }, async () => {
+  const fixture = workflowFixture();
+  fixture.addHow("Todo");
+  const { worker, daemon } = await setup(fixture);
+  try {
+    const host = await socket(worker);
+    let low = 1, high = 10000;
+    while (low + 1 < high) {
+      const n = Math.floor((low + high) / 2);
+      fixture.verification = [["printf", "文\"\n".repeat(n)]];
+      const snapshot = await host.rpc({ type: "snapshot" });
+      if (snapshot.snapshot.workflows[0].phase === "approved") low = n; else high = n;
+    }
+    fixture.verification = [["printf", "文\"\n".repeat(low)]];
+    const granted = await host.rpc(claim(await row(daemon), "implement"));
+    assert.equal(granted.type, "granted", JSON.stringify(granted));
+    const lease_id = granted.lease_id;
+    assert.equal((await host.rpc({ type: "progress", stage: "verifying", lease_id, verification: {
+      head_oid: "a".repeat(40), target_oid: fixture.target_oid, status: "success", completed: 1, total: 1,
+    } })).type, "progressed");
+    await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.equal((await host.rpc({ type: "check", lease_id })).type, "checked");
+    assert.equal((await host.rpc({ type: "heartbeat" })).type, "heartbeat");
+    assert.equal((await host.rpc({ type: "progress", stage: "paused", lease_id })).type, "progressed");
+    assert.equal((await host.rpc({ type: "release", lease_id })).type, "released");
+    await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.equal((await host.rpc({ type: "heartbeat" })).type, "heartbeat");
+    fixture.verification = [["true"]];
+    const next = await host.rpc(claim(await row(daemon), "implement"));
+    assert.equal(next.type, "granted");
+    assert.equal((await host.rpc({ type: "release", lease_id: next.lease_id })).type, "released");
+  } finally { await worker.dispose(); }
+});

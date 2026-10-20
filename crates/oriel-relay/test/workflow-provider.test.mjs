@@ -1104,3 +1104,37 @@ test("JSON limits protect authenticated creation while preserving Japanese field
     }
   } finally { await s.close(); }
 });
+
+test("attachment capacity blocks execution before start and recovers without changing approval", { timeout: 120000 }, async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow("Todo");
+    const before = (await s.snapshot()).workflows[0];
+    s.fixture.verification = [["printf", "x".repeat(20000)]];
+    const stale = await s.message({ type: "claim", kind: "implement", issue_number: before.issue.number, version: before.version, branch: before.branch });
+    assert.equal(stale.type, "rejected");
+    for (const commands of [ [["printf", "x".repeat(20000)]], [["文😀".repeat(4000)]], [["\"\n".repeat(6000)]], Array.from({ length: 1024 }, () => ["x"]) ]) {
+      s.fixture.verification = commands;
+      const snapshot = await s.snapshot();
+      assert.equal(snapshot.configuration.autonomous, true);
+      assert.deepEqual(snapshot.configuration.verification, commands);
+      const row = snapshot.workflows[0];
+      assert.equal(row.phase, "blocked");
+      assert.equal(row.linear.state.name, "Todo");
+      assert.match(row.blocked_reason, /execution.verification.*available .*used .*16384/);
+      const denied = await s.message({ type: "claim", kind: "implement", issue_number: row.issue.number, version: row.version, branch: row.branch });
+      assert.equal(denied.type, "rejected");
+      assert.match(denied.error, /execution.verification capacity exceeded/);
+    }
+    s.fixture.verification = [["true"]];
+    assert.equal((await s.snapshot()).workflows[0].phase, "approved");
+    const title = s.fixture.issues[0].title;
+    s.fixture.issues[0].title = "文".repeat(20000);
+    const oversizedTask = (await s.snapshot()).workflows[0];
+    assert.equal(oversizedTask.phase, "blocked");
+    assert.match(oversizedTask.blocked_reason, /task\/binding metadata/);
+    s.fixture.issues[0].title = title;
+    const lease_id = await s.claim("implement");
+    assert.equal((await s.message({ type: "release", lease_id })).type, "released");
+  } finally { await s.close(); }
+});

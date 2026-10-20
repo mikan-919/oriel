@@ -30,7 +30,7 @@ export function capacityError(binding: WorkflowBinding, admission: WorkflowAdmis
   const reserved = (commands: string[][]) => ({
     protocol: "oriel/workflow/v2", binding, expires_at: Number.MAX_SAFE_INTEGER,
     grant: { ...admission, execution: admission.execution ? { ...admission.execution, verification: commands } : undefined, lease_id },
-    stage: "reconciling", task: { ...admission.task, repository }, updated_at: timestamp, changes: true, dirty: true,
+    stage: "implementing", task: { ...admission.task, repository }, updated_at: timestamp, changes: true, dirty: true,
     verification: admission.execution ? {
       execution_id: lease_id, repository, device_id: binding.device_id,
       generation: JSON.stringify([binding.repository_generation, binding.github_generation, binding.linear_generation]),
@@ -42,6 +42,6 @@ export function capacityError(binding: WorkflowBinding, admission: WorkflowAdmis
   const overhead = attachmentBytes(reserved([]));
   const used = attachmentBytes(reserved(admission.execution?.verification ?? [])) - overhead;
   if (overhead + used <= ATTACHMENT_LIMIT) return null;
-  const cause = overhead > ATTACHMENT_LIMIT ? "task/binding metadata" : "verification configuration with task/binding metadata";
+  const cause = overhead > ATTACHMENT_LIMIT ? "task/binding metadata" : used > ATTACHMENT_LIMIT ? "verification configuration alone" : "task/binding metadata reduces verification capacity";
   return `execution.verification capacity exceeded (${cause}): available ${Math.max(0, ATTACHMENT_LIMIT - overhead)} bytes, used ${used} bytes including progress copy; WebSocket attachment limit ${ATTACHMENT_LIMIT} bytes`;
 }
