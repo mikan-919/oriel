@@ -1448,24 +1448,37 @@ fn private_home_path_with_cargo_bin(
 }
 
 fn link_cache(source: &Path, target: &Path) -> Result<bool> {
-    let Ok(metadata) = fs::symlink_metadata(source) else {
-        return Ok(false);
+    let available = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
     };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Ok(false);
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if available && fs::read_link(target)? == source {
+                return Ok(true);
+            }
+            // Only unlink our cache pointer. Never remove the old shared cache.
+            fs::remove_file(target)?;
+        }
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_dir(),
+                "private dependency cache path is not a directory"
+            );
+            // Keep a cache created locally while a shared source was absent.
+            return Ok(false);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    if let Ok(metadata) = fs::symlink_metadata(target) {
-        ensure!(
-            metadata.file_type().is_symlink() && fs::read_link(target)? == source,
-            "private dependency cache path is not the expected link"
-        );
-    } else {
+    if available {
         std::os::unix::fs::symlink(source, target)?;
     }
-    Ok(true)
+    Ok(available)
 }
 
-fn dependency_cache_environment(home: &Path) -> Result<Vec<(String, String)>> {
+fn dependency_cache_environment(home: &Path, offline: bool) -> Result<Vec<(String, String)>> {
     let cargo_source = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
@@ -1473,13 +1486,19 @@ fn dependency_cache_environment(home: &Path) -> Result<Vec<(String, String)>> {
         .or_else(|| std::env::var_os("NPM_CONFIG_CACHE"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".npm")));
-    dependency_cache_environment_from(home, cargo_source.as_deref(), npm_source.as_deref())
+    dependency_cache_environment_from(
+        home,
+        cargo_source.as_deref(),
+        npm_source.as_deref(),
+        offline,
+    )
 }
 
 fn dependency_cache_environment_from(
     home: &Path,
     cargo_source: Option<&Path>,
     npm_source: Option<&Path>,
+    offline: bool,
 ) -> Result<Vec<(String, String)>> {
     let mut environment = Vec::new();
     if let Some(source) = cargo_source {
@@ -1493,26 +1512,26 @@ fn dependency_cache_environment_from(
                 )
             })?;
         if linked {
-            environment.extend([
-                (
-                    "CARGO_HOME".to_owned(),
-                    cargo_home.to_string_lossy().into_owned(),
-                ),
-                ("CARGO_NET_OFFLINE".to_owned(), "true".to_owned()),
-            ]);
+            environment.push((
+                "CARGO_HOME".to_owned(),
+                cargo_home.to_string_lossy().into_owned(),
+            ));
+            if offline {
+                environment.push(("CARGO_NET_OFFLINE".to_owned(), "true".to_owned()));
+            }
         }
     }
     if let Some(source) = npm_source {
         let npm_cache = home.join(".npm");
         git::private_directory(&npm_cache)?;
         if link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))? {
-            environment.extend([
-                (
-                    "npm_config_cache".to_owned(),
-                    npm_cache.to_string_lossy().into_owned(),
-                ),
-                ("npm_config_offline".to_owned(), "true".to_owned()),
-            ]);
+            environment.push((
+                "npm_config_cache".to_owned(),
+                npm_cache.to_string_lossy().into_owned(),
+            ));
+            if offline {
+                environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
+            }
         }
     }
     Ok(environment)
@@ -1552,7 +1571,7 @@ async fn agent(
     git::private_directory(&run)?;
     let home = run.join("home");
     git::private_directory(&home)?;
-    let package_environment = dependency_cache_environment(&home)?;
+    let package_environment = dependency_cache_environment(&home, true)?;
     let package_policy = package_environment
         .iter()
         .map(|(name, value)| format!(",{name}={}", json!(value)))
@@ -1786,7 +1805,9 @@ async fn verify(
         .await?;
     let home = root.join("verification-home");
     git::private_directory(&home)?;
-    let package_environment = dependency_cache_environment(&home)?;
+    // Host verification may download missing dependencies; the coding agent
+    // still receives only offline caches and no package-manager credentials.
+    let package_environment = dependency_cache_environment(&home, false)?;
     let tool_path = private_home_path(
         &std::env::var_os("PATH").unwrap_or_default(),
         &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
@@ -3838,7 +3859,7 @@ mod tests {
         git::private_directory(&home).unwrap();
 
         let environment =
-            dependency_cache_environment_from(&home, Some(&cargo), Some(&npm)).unwrap();
+            dependency_cache_environment_from(&home, Some(&cargo), Some(&npm), true).unwrap();
         let value = |name: &str| {
             environment
                 .iter()
@@ -3861,6 +3882,69 @@ mod tests {
             fs::read_link(private_npm.join("_cacache")).unwrap(),
             npm.join("_cacache")
         );
+
+        let verification = root.join("verification/home");
+        git::private_directory(&verification).unwrap();
+        let environment =
+            dependency_cache_environment_from(&verification, Some(&cargo), Some(&npm), false)
+                .unwrap();
+        assert!(environment.iter().any(|(key, _)| key == "CARGO_HOME"));
+        assert!(environment.iter().any(|(key, _)| key == "npm_config_cache"));
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, _)| matches!(key.as_str(), "CARGO_NET_OFFLINE" | "npm_config_offline"))
+        );
+        assert!(!verification.join(".cargo/credentials.toml").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_cache_links_recover_missing_sources_without_removing_cache_data() {
+        let root = std::env::temp_dir().join(format!(
+            "oriel-cache-recovery-{}",
+            random_hex::<12>().unwrap()
+        ));
+        let source = root.join("user/_cacache");
+        let target = root.join("private/_cacache");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        assert!(link_cache(&source, &target).unwrap());
+        fs::remove_dir(&source).unwrap();
+
+        // npm's mkdir fails with ENOTDIR while this dangling link remains.
+        assert!(fs::create_dir_all(&target).is_err());
+        assert!(!link_cache(&source, &target).unwrap());
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("local-entry"), "preserved local cache").unwrap();
+        fs::create_dir(&source).unwrap();
+        assert!(!link_cache(&source, &target).unwrap());
+        assert_eq!(
+            fs::read_to_string(target.join("local-entry")).unwrap(),
+            "preserved local cache"
+        );
+
+        // A changed cache location replaces only the link, never its contents.
+        let relocated = root.join("relocated/_cacache");
+        let other_target = root.join("private/other");
+        fs::create_dir_all(&relocated).unwrap();
+        fs::write(source.join("shared-entry"), "preserved shared cache").unwrap();
+        assert!(link_cache(&source, &other_target).unwrap());
+        assert!(link_cache(&relocated, &other_target).unwrap());
+        assert_eq!(fs::read_link(&other_target).unwrap(), relocated);
+        assert_eq!(
+            fs::read_to_string(source.join("shared-entry")).unwrap(),
+            "preserved shared cache"
+        );
+
+        let symlink_source = root.join("symlink-source");
+        std::os::unix::fs::symlink(&source, &symlink_source).unwrap();
+        assert!(!link_cache(&symlink_source, &other_target).unwrap());
+        assert!(fs::symlink_metadata(&other_target).is_err());
+        let file = root.join("private/file");
+        fs::write(&file, "preserved file").unwrap();
+        assert!(link_cache(&source, &file).is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "preserved file");
         fs::remove_dir_all(root).unwrap();
     }
 
