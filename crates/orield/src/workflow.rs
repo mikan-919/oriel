@@ -3256,6 +3256,14 @@ mod tests {
                         releases += 1;
                         "released"
                     }
+                    // Provider actions can send ownership heartbeats while the
+                    // HTTP response is in flight, even for these local fixtures.
+                    "heartbeat" => "heartbeat",
+                    "check" => {
+                        assert_eq!(request["lease_id"], "lease");
+                        reply["lease_id"] = json!("lease");
+                        "checked"
+                    }
                     _ => panic!("unexpected request {request}"),
                 });
                 socket
