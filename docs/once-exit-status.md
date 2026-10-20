@@ -50,3 +50,13 @@
 - `npm_config_cache=/tmp/oriel-npm-cache npm_config_offline=true npm --prefix crates/oriel-relay ci`: `zod-4.4.3.tgz` の `ENOTCACHED` で停止。
 
 指定ベースは統合済み。ホストでは修正後の orield を使用し、依存取得と全設定済み検証を再実行する必要がある。
+
+## キャッシュ親パスの追加診断と再検証
+
+`.npm` 自体が通常ファイルの場合も、失敗理由に検証用キャッシュの絶対パスを付加する。既存ファイルを保持する回帰試験を追加した。今回提供された npm の出力だけでは、稼働中ホストが既存のキャッシュ修復を含む実行ファイルを使用しているか判断できない。ホスト所有者は修正後の orield を使用して全設定済み検証を再実行する必要がある。
+
+- fmt、clippy、差分の空白チェック: 成功。
+- `cargo test -p orield --locked`: 51件成功、14件失敗。追加した親パスの回帰試験は成功。失敗はソケット作成の `Operation not permitted` と関連する子プロセス試験による。
+- 失敗した `npm --prefix crates/oriel-relay ci` を隔離キャッシュとオフライン設定で再実行し、web も `npm ci --offline --prefix crates/oriel-web` を実行した。いずれも `zod-4.4.3.tgz` の `ENOTCACHED` で停止した。ホスト側で依存取得が必要。
+
+検証設定、依存バージョン、承認・実行ポリシー、既存試験は変更していない。指定ベースは統合済みで、作業ツリー外のホストキャッシュは操作していない。

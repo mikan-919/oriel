@@ -1522,7 +1522,8 @@ fn dependency_cache_environment_from(
         }
     }
     let npm_cache = home.join(".npm");
-    git::private_directory(&npm_cache)?;
+    git::private_directory(&npm_cache)
+        .with_context(|| format!("prepare private npm cache {}", npm_cache.display()))?;
     if !offline {
         // Online verification owns its cache. A shared cache can disappear after
         // setup, leaving npm unable to mkdir through a dangling _cacache link.
@@ -3964,6 +3965,23 @@ mod tests {
                 );
             }
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_reports_obstructed_parent_without_deleting_it() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-parent-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join(".npm");
+        fs::write(&target, "preserve parent obstruction").unwrap();
+        let error = dependency_cache_environment_from(&root, None, None, false).unwrap_err();
+        assert!(error.to_string().contains(&target.display().to_string()));
+        assert!(error.to_string().contains("prepare private npm cache"));
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "preserve parent obstruction"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
