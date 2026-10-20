@@ -573,6 +573,19 @@ async fn terminal_exit(state: &mut watch::Receiver<TerminalState>) -> TerminalSt
     }
 }
 
+// Race the whole operation, including pending connection and retry timers, against
+// retained child state so an exit never permits another connection attempt.
+async fn while_terminal_running<T>(
+    state: &mut watch::Receiver<TerminalState>,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = terminal_exit(state) => None,
+        result = operation => Some(result),
+    }
+}
+
 struct Terminal {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -730,8 +743,15 @@ async fn run() -> Result<()> {
         }
         info!("connecting to relay");
 
-        match tokio::select! { biased; _ = terminal_exit(&mut state) => return Ok(()), result = connect_async(host_request(&relay_url, &identity)?) => result }
-        {
+        let Some(connection) = while_terminal_running(
+            &mut state,
+            connect_async(host_request(&relay_url, &identity)?),
+        )
+        .await
+        else {
+            return Ok(());
+        };
+        match connection {
             Ok((socket, _)) => {
                 info!("connected to relay");
 
@@ -745,7 +765,12 @@ async fn run() -> Result<()> {
             }
         }
 
-        tokio::select! { biased; _ = terminal_exit(&mut state) => return Ok(()), _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
+        if while_terminal_running(&mut state, tokio::time::sleep(Duration::from_secs(1)))
+            .await
+            .is_none()
+        {
+            return Ok(());
+        }
     }
 }
 
@@ -869,6 +894,7 @@ where
                                             "PTY writer mutex poisoned"
                                         );
 
+                                    if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
                                     writer
                                         .write_all(&data)
                                         .and_then(|_| writer.flush())
@@ -901,6 +927,7 @@ where
                                                 "PTY master mutex poisoned"
                                             );
 
+                                        if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
                                         master.resize(PtySize {
                                             rows,
                                             cols,
@@ -1064,6 +1091,47 @@ mod tests {
         tokio::task::yield_now().await;
         tx.send_replace(TerminalState::WaitFailed);
         assert!(matches!(waiting.await.unwrap(), TerminalState::WaitFailed));
+    }
+
+    #[tokio::test]
+    async fn exit_cancels_connection_attempt_and_retry_wait() {
+        for retry in [false, true] {
+            let (tx, mut state) = watch::channel(TerminalState::Running);
+            let task = tokio::spawn(async move {
+                while_terminal_running(&mut state, async {
+                    if retry {
+                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                })
+                .await
+            });
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+            tx.send_replace(TerminalState::WaitFailed);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let (tx, mut state) = watch::channel(TerminalState::WaitFailed);
+        let started = std::cell::Cell::new(false);
+        assert!(
+            while_terminal_running(&mut state, async {
+                started.set(true);
+            })
+            .await
+            .is_none()
+        );
+        assert!(
+            !started.get(),
+            "An already exited child must prevent starting an operation"
+        );
+        drop(tx);
     }
 
     #[tokio::test]
