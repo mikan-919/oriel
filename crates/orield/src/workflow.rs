@@ -1508,7 +1508,17 @@ fn snapshot_npm_cache(source: &Path, target: &Path) -> Result<()> {
         let destination = target.join(entry.file_name());
         if kind.is_dir() {
             snapshot_npm_cache(&entry.path(), &destination)?;
-        } else if kind.is_file() && !destination.exists() {
+        } else if kind.is_file() {
+            // Old cache layouts can also leave links below _cacache. Do not
+            // follow those links when populating the independent snapshot.
+            if fs::symlink_metadata(&destination)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                fs::remove_file(&destination)?;
+            }
+            if destination.exists() {
+                continue;
+            }
             match fs::copy(entry.path(), &destination) {
                 Ok(_) => {}
                 // Cache entries may disappear while another process cleans up.
@@ -3769,6 +3779,52 @@ mod tests {
         std::os::unix::fs::symlink(&source, &dangling).unwrap();
         snapshot_npm_cache(&source, &dangling).unwrap();
         assert!(dangling.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verification_cache_environment_repairs_stale_npm_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "oriel-verification-cache-{}",
+            random_hex::<12>().unwrap()
+        ));
+        let source = root.join("shared");
+        let home = root.join("verification-home");
+        let cache = home.join(".npm/_cacache");
+        fs::create_dir_all(source.join("_cacache/content-v2")).unwrap();
+        fs::write(source.join("_cacache/content-v2/package"), "package").unwrap();
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(root.join("removed-cache"), &cache).unwrap();
+
+        let environment =
+            dependency_cache_environment_from(&home, None, Some(&source), false).unwrap();
+        assert!(environment.contains(&(
+            "npm_config_cache".to_owned(),
+            home.join(".npm").to_string_lossy().into_owned()
+        )));
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, _)| key == "npm_config_offline")
+        );
+
+        // Repair legacy nested links too, without writing through them.
+        let package = cache.join("content-v2/package");
+        fs::remove_file(&package).unwrap();
+        let outside = root.join("removed-package");
+        std::os::unix::fs::symlink(&outside, &package).unwrap();
+        dependency_cache_environment_from(&home, None, Some(&source), false).unwrap();
+        assert!(!outside.exists());
+        assert!(
+            !fs::symlink_metadata(&package)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(&source).unwrap();
+        dependency_cache_environment_from(&home, None, Some(&source), false).unwrap();
+        fs::create_dir_all(&cache).unwrap(); // The mkdir that failed in npm ci.
+        assert_eq!(fs::read_to_string(package).unwrap(), "package");
         fs::remove_dir_all(root).unwrap();
     }
 
