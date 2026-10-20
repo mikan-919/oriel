@@ -2622,8 +2622,10 @@ async fn scan_inner(
                     if let Err(reflection) = session.action("fail", report).await {
                         // A failed provider read/write cannot establish a permanent
                         // task failure. Reconnect and read current facts instead.
-                        return Err(reflection
-                            .context(format!("could not record workflow failure: {error:#}")));
+                        return Err(reflection.context(format!(
+                            "could not record workflow failure for #{}: {error:#}",
+                            row.issue.number
+                        )));
                     }
                     // Code failures are stopped by Relay's confirmed Triage state.
                     // A human may reapprove identical content before our next scan.
@@ -3046,6 +3048,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scan_outcome_preserves_all_issue_failures_and_context() {
+        ScanOutcome::default().into_result().unwrap();
+        let outcome = ScanOutcome {
+            failures: vec![
+                (
+                    42,
+                    anyhow!("compiler diagnostic").context("implementation failed"),
+                ),
+                (43, anyhow!("verification failed")),
+            ],
+        };
+        let error = format!("{:#}", outcome.into_result().unwrap_err());
+        assert!(error.contains("#42: implementation failed: compiler diagnostic"));
+        assert!(error.contains("#43: verification failed"));
+    }
+
+    #[test]
+    fn once_process_exit_status() {
+        for (mode, success) in [
+            ("once-empty", true),
+            ("once-triage", true),
+            ("once-success", true),
+            ("once-implementation", false),
+            ("once-verification", false),
+            ("once-needs-human", false),
+            ("once-reflection", false),
+            ("continuous-failure", true),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("oriel-once-{}", random_hex::<12>().unwrap()));
+            fs::create_dir_all(&root).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "workflow::tests::sigint_subprocess",
+                    "--nocapture",
+                ])
+                .env("ORIEL_SIGNAL_TEST_ROOT", &root)
+                .env("ORIEL_SIGNAL_TEST_MODE", mode)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{mode}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !success {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("#1:"), "{mode}: {stderr}");
+                assert!(stderr.contains(mode), "{mode}: {stderr}");
+                if mode == "once-reflection" {
+                    assert!(stderr.contains("could not record workflow failure"));
+                }
+                assert_eq!(fs::read_to_string(root.join("work")).unwrap(), mode);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn outcome_work<'a>(
+        _: &'a mut Session,
+        root: &'a Path,
+        _: &'a Snapshot,
+        row: &'a Row,
+        _: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mode = std::env::var("ORIEL_SIGNAL_TEST_MODE").unwrap();
+            if mode == "continuous-failure" && row.issue.number == 1 && root.join("work").exists() {
+                return Err(Stop::Interrupted.into());
+            }
+            if row.issue.number == 1 && mode != "once-success" {
+                fs::write(root.join("work"), &mode).unwrap();
+                return Err(match mode.as_str() {
+                    "once-verification" => anyhow::Error::new(VerificationFailure {
+                        command: vec![mode],
+                        status: "exit status: 1".into(),
+                        logs: root.join("verification"),
+                    }),
+                    "once-needs-human" => anyhow::Error::new(AgentIntervention {
+                        reason: mode,
+                        output: root.join("result.json"),
+                    }),
+                    _ => anyhow!("{mode}: implementation failed"),
+                });
+            }
+            Ok(())
+        })
+    }
+
     #[tokio::test]
     async fn sigint_subprocess() {
         let Ok(root) = std::env::var("ORIEL_SIGNAL_TEST_ROOT") else {
@@ -3053,6 +3148,33 @@ mod tests {
         };
         let root = std::path::PathBuf::from(root);
         let mode = std::env::var("ORIEL_SIGNAL_TEST_MODE").unwrap();
+        let outcome_mode = mode.starts_with("once-") || mode == "continuous-failure";
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+        let reflection_fails = mode == "once-reflection";
+        let failure_mode = mode.clone();
+        let provider = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = http.accept().await {
+                let mut buffer = [0; 8192];
+                let size = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                assert!(request.contains("\"action\":\"fail\""));
+                let category = match failure_mode.as_str() {
+                    "once-verification" => "verification",
+                    "once-needs-human" => "needs-human",
+                    _ => "runtime",
+                };
+                assert!(request.contains(&format!("\"category\":\"{category}\"")));
+                assert!(request.contains(&failure_mode));
+                let status = if reflection_fails {
+                    "502 Bad Gateway"
+                } else {
+                    "200 OK"
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+            }
+        });
         // Register the process-wide handler before publishing readiness.
         let signal = tokio::signal::ctrl_c();
         tokio::pin!(signal);
@@ -3070,7 +3192,11 @@ mod tests {
                 if text == "oriel:ping" {
                     fs::write(server_root.join("ready"), "").unwrap();
                     socket
-                        .send(Message::Text("oriel:pong".into()))
+                        .send(Message::Text(if outcome_mode {
+                            json!({"type":"changed"}).to_string().into()
+                        } else {
+                            "oriel:pong".into()
+                        }))
                         .await
                         .unwrap();
                     continue;
@@ -3079,13 +3205,27 @@ mod tests {
                 let mut reply = json!({"request_id":request["request_id"]});
                 reply["type"] = json!(match request["type"].as_str().unwrap() {
                     "snapshot" => {
-                        let workflows = if server_mode == "waiting" {
+                        let workflows = if matches!(server_mode.as_str(), "waiting" | "once-empty")
+                        {
                             vec![]
                         } else {
                             vec![json!({
                                 "issue":{"number":1,"title":"WHAT","body":null,"url":"https://example.com"},
                                 "what_comments":[],"how_comments":[],"version":"approved","phase":"running"
                             })]
+                        };
+                        let workflows = if server_mode == "once-triage" {
+                            let mut rows = workflows;
+                            rows[0]["phase"] = json!("triage");
+                            rows
+                        } else if outcome_mode && server_mode != "once-empty" {
+                            let mut rows = workflows;
+                            let mut second = rows[0].clone();
+                            second["issue"]["number"] = json!(2);
+                            rows.push(second);
+                            rows
+                        } else {
+                            workflows
                         };
                         reply["snapshot"] = json!({"repository":{"owner":"octocat","name":"connected"},
                             "repository_id":1,"repository_node_id":"repo","base_branch":"main",
@@ -3095,7 +3235,9 @@ mod tests {
                     }
                     "claim" => {
                         claims += 1;
-                        assert_eq!(claims, 1);
+                        if !outcome_mode {
+                            assert_eq!(claims, 1);
+                        }
                         if server_mode == "claim" {
                             fs::write(server_root.join("ready"), "").unwrap();
                             continue;
@@ -3121,12 +3263,22 @@ mod tests {
                     .await
                     .unwrap();
             }
-            assert_eq!(releases, usize::from(server_mode.starts_with("child")));
+            let expected = match server_mode.as_str() {
+                "once-empty" | "once-triage" => 0,
+                "once-reflection" => 1,
+                "continuous-failure" => 3,
+                _ if outcome_mode => 2,
+                _ => usize::from(server_mode.starts_with("child")),
+            };
+            assert_eq!(releases, expected);
+            if outcome_mode {
+                assert_eq!(claims, expected);
+            }
         });
         let (socket, _) = connect_async(url).await.unwrap();
         let mut session = Session {
             client: Client::new(),
-            endpoint: Url::parse("http://localhost/").unwrap(),
+            endpoint,
             socket,
             repository: Repository {
                 owner: "octocat".into(),
@@ -3139,18 +3291,23 @@ mod tests {
             snapshot_http: false,
             verification_metadata: false,
         };
-        drive_session(
+        let result = drive_session(
             &mut session,
             &root,
             &mut HashMap::new(),
             &mut Console::default(),
-            mode == "child-once",
-            signal_child_work,
+            mode == "child-once" || mode.starts_with("once-"),
+            if outcome_mode {
+                outcome_work
+            } else {
+                signal_child_work
+            },
         )
-        .await
-        .unwrap();
+        .await;
         drop(session);
         server.await.unwrap();
+        provider.abort();
+        result.unwrap();
     }
 
     fn interrupt_pending_work<'a>(
@@ -3410,7 +3567,7 @@ mod tests {
                         verification_metadata: false,
                     };
                     let mut suppressed = HashMap::new();
-                    for _ in 0..scans {
+                    for index in 0..scans {
                         let result = scan(
                             &mut session,
                             Path::new("."),
@@ -3425,7 +3582,17 @@ mod tests {
                                     .contains("could not record workflow failure")
                             );
                         } else {
-                            result.unwrap();
+                            let outcome = result.unwrap();
+                            let failed = index == 0
+                                || (observe_triage && index == 3)
+                                || (!observe_triage && kind != "plan" && index == 1);
+                            assert_eq!(outcome.failures.len(), usize::from(failed));
+                            if failed {
+                                let reason = format!("{:#}", outcome.into_result().unwrap_err());
+                                assert!(reason.contains("#42: implementation failed"));
+                            } else {
+                                outcome.into_result().unwrap();
+                            }
                         }
                     }
                     let expected = if reflection_fails || kind == "plan" && !observe_triage {
