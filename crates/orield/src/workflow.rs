@@ -2472,6 +2472,8 @@ async fn drive_session(
     loop {
         let mut result = scan(session, root, suppressed, console, execute).await;
         if result.is_ok() && !once {
+            // Recorded task failures do not invalidate this session. Only the
+            // single-scan boundary converts them into an exit error.
             result = session
                 .wait(session.scan_interval)
                 .await
@@ -3093,6 +3095,7 @@ mod tests {
             ("once-triage", true),
             ("once-success", true),
             ("once-implementation", false),
+            ("once-multiple", false),
             ("once-verification", false),
             ("once-needs-human", false),
             ("once-reflection", false),
@@ -3122,6 +3125,9 @@ mod tests {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 assert!(stderr.contains("#1:"), "{mode}: {stderr}");
                 assert!(stderr.contains(mode), "{mode}: {stderr}");
+                if mode == "once-multiple" {
+                    assert!(stderr.contains("#2: once-multiple: second task failed"));
+                }
                 if mode == "once-reflection" {
                     assert!(stderr.contains("could not record workflow failure"));
                 }
@@ -3142,6 +3148,9 @@ mod tests {
             let mode = std::env::var("ORIEL_SIGNAL_TEST_MODE").unwrap();
             if mode == "continuous-failure" && row.issue.number == 1 && root.join("work").exists() {
                 return Err(Stop::Interrupted.into());
+            }
+            if mode == "once-multiple" && row.issue.number == 2 {
+                return Err(anyhow!("{mode}: second task failed"));
             }
             if row.issue.number == 1 && mode != "once-success" {
                 fs::write(root.join("work"), &mode).unwrap();
