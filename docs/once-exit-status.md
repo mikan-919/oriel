@@ -30,3 +30,13 @@
 - `cargo fmt --all -- --check`、`cargo clippy -p orield --all-targets --locked -- -D warnings`: 成功。
 - `cargo test -p orield --locked`: 48件成功、14件失敗。追加したキャッシュ回復試験は成功。失敗は従来同様、サンドボックスのローカルソケット作成制限と関連する子プロセス試験による。
 - `npm_config_cache=/tmp/oriel-npm-cache npm_config_offline=true npm --prefix crates/oriel-relay ci`: 再実行したが `zod-4.4.3.tgz` の `ENOTCACHED` で停止。ホストで依存取得と全設定済み検証を再実行する。
+
+## npm ENOTDIR 再発時の追加確認
+
+検証用 `_cacache` のリンク先がディレクトリではなく通常ファイルである場合も、リンクだけを解除して npm が必要とする階層を作成できることを回帰試験に追加した。共有元のファイルは保持する。リンク解除・ディレクトリ作成に失敗した場合は、対象パスと操作をエラーへ付加する。
+
+再発したホスト診断は、既存修正が作成する実ディレクトリと異なるキャッシュ状態を示している。リポジトリの修復だけで稼働中のホスト実行ファイルは更新されないため、修正後の orield による検証が必要である。作業ツリー外のキャッシュや実行ポリシーは変更していない。
+
+`npm_config_cache=/tmp/oriel-npm-cache npm_config_offline=true npm --prefix crates/oriel-relay ci` を再実行した。今回も `zod-4.4.3.tgz` の `ENOTCACHED` で停止したため、依存インストールの成功は未確認。
+
+追加修復後の `cargo fmt --all -- --check` と `cargo clippy -p orield --all-targets --locked -- -D warnings` は成功。`cargo test -p orield --locked` は49件成功、14件失敗。新規回帰試験は成功し、失敗はサンドボックスのソケット作成制限と関連する子プロセス試験による。ホストで全設定済み検証を再実行する。

@@ -1528,12 +1528,16 @@ fn dependency_cache_environment_from(
         // setup, leaving npm unable to mkdir through a dangling _cacache link.
         let contents = npm_cache.join("_cacache");
         match fs::symlink_metadata(&contents) {
-            Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(&contents)?,
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::remove_file(&contents)
+                    .with_context(|| format!("unlink npm cache {}", contents.display()))?;
+            }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        fs::create_dir_all(&contents)?;
+        fs::create_dir_all(&contents)
+            .with_context(|| format!("create npm cache {}", contents.display()))?;
         environment.push((
             "npm_config_cache".to_owned(),
             npm_cache.to_string_lossy().into_owned(),
@@ -3956,6 +3960,24 @@ mod tests {
                 );
             }
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_link_to_non_directory() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-enotdir-{}", random_hex::<12>().unwrap()));
+        let home = root.join("home");
+        let source = root.join("shared-file");
+        fs::create_dir_all(home.join(".npm")).unwrap();
+        fs::write(&source, "preserve shared file").unwrap();
+        let target = home.join(".npm/_cacache");
+        std::os::unix::fs::symlink(&source, &target).unwrap();
+        dependency_cache_environment_from(&home, None, Some(&root), false).unwrap();
+        // Exercise the nested directory creation that npm's content cache needs.
+        fs::create_dir_all(target.join("content-v2/sha512")).unwrap();
+        assert!(fs::symlink_metadata(&target).unwrap().is_dir());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "preserve shared file");
         fs::remove_dir_all(root).unwrap();
     }
 
