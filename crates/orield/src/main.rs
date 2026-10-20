@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 mod codex;
+mod executable;
 mod integrations;
 mod repository;
 mod verification_monitor;

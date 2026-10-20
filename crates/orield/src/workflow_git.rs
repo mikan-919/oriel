@@ -259,7 +259,7 @@ pub(super) async fn transport(
         };
         let _ = tokio::time::timeout(Duration::from_secs(30), response).await;
     });
-    let executable = std::env::current_exe()?;
+    let executable = crate::executable::current()?;
     let quoted = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
     let helper = format!(
         "!{} __workflow-credential {}",
