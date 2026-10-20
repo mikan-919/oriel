@@ -386,7 +386,8 @@ export class Integrations extends WorkflowReader {
     if (!row || (row.linear?.id ?? null) !== grant.linear_id && !(grant.kind === "plan" && grant.linear_id === null && row.phase === "triage")) this.auth.fail(409, "Formal workflow identity changed");
     const recoveredPlan = grant.kind === "plan" && grant.linear_id === null && row.phase === "triage" && await digest(["oriel/what-version/v1", facts.snapshot.repository_node_id, row.issue.node_id, row.issue.title, row.issue.body ?? ""]) === (grant.initial_what_version ?? grant.version);
     if (!changed && !recoveredPlan && (row.version !== grant.version || row.branch !== grant.branch)) this.auth.fail(409, "Workflow approval content changed");
-    if (phases && !phases.includes(row.phase)) this.auth.fail(409, row.blocked_reason ?? "Workflow native state no longer admits this operation");
+    if (phases && !phases.includes(row.phase)) this.auth.fail(409,
+      `Workflow native state no longer admits this operation (expected: ${phases.join(", ")}; actual: ${row.phase})${row.blocked_reason ? `: ${row.blocked_reason}` : ""}`);
     if (grant.issue_feedback && row.issue_feedback?.key !== grant.issue_feedback.key && !recoveredPlan) this.auth.fail(409, "Admitted Issue request was edited, deleted or answered");
     if (grant.execution && phases?.some(phase => ["approved", "running", "review"].includes(phase)) &&
       (facts.snapshot.target_oid !== grant.execution.target_oid || facts.snapshot.base_branch !== grant.execution.base_branch || !facts.snapshot.configuration.autonomous ||
@@ -417,7 +418,7 @@ export class Integrations extends WorkflowReader {
           !current.row.fingerprint || !current.facts.states.some(candidate => candidate.id === state.id && candidate.name === state.name && candidate.type === state.type)) this.auth.fail(409, "Native HOW transition identity changed");
         if (matches(current.row.linear!)) return current.row.linear!;
         if (state.type === "completed" || state.type === "canceled") this.auth.fail(409, "Completed or canceled HOW is not overwritten");
-        if (target.name === "In Progress" && !(state.name === "Todo" && state.type === "unstarted")) this.auth.fail(409, "Native HOW state cannot be safely moved to In Progress");
+        if (target.name === "In Progress" && !(state.name === "Todo" && state.type === "unstarted")) this.auth.fail(409, "Human changes prevented the HOW update (In Progress requires Todo)");
         if (target.name === "Triage" && !(state.name === "Todo" && state.type === "unstarted" || state.name === "In Progress" && state.type === "started" || review.length === 1 && state.id === review[0].id)) this.auth.fail(409, "Native HOW state cannot be safely returned to Triage");
       } else if (matches(current.row.linear!)) return current.row.linear!;
       if (expectedHead && (current.row.canonical_oid !== expectedHead || current.row.pull_request?.head_oid !== expectedHead)) this.auth.fail(409, "Verified PR head changed before progress reflection");

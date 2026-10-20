@@ -771,6 +771,7 @@ impl Session {
         } else if status == reqwest::StatusCode::CONFLICT
             && detail.as_deref().is_some_and(|message| {
                 message.starts_with("Human changes prevented the HOW update")
+                    || message.starts_with("Workflow native state no longer admits this operation")
             })
         {
             // Conflicting native reads require fresh admission, not a failure
@@ -876,7 +877,12 @@ impl Session {
         let response = self.owned_response(request).await?;
         if !response.status().is_success() {
             let uncertain = response.status().is_server_error();
-            let error = Self::http_failure(response, operation).await;
+            let action = if operation == "actions" {
+                body["action"].as_str().unwrap_or(operation)
+            } else {
+                operation
+            };
+            let error = Self::http_failure(response, action).await;
             return Err(if uncertain {
                 error.context(Stop::Uncertain)
             } else {
@@ -4088,6 +4094,10 @@ mod tests {
                     429,
                     json!({"error": "Linear rate limited", "retry_after_seconds": 180}).to_string(),
                 ),
+                (409, json!({"error":"Workflow native state no longer admits this operation"}).to_string()),
+                (409, json!({"error":"Workflow native state no longer admits this operation (expected: approved; actual: running)"}).to_string()),
+                (409, json!({"error":"Human changes prevented the HOW update (In Progress requires Todo)"}).to_string()),
+                (409, json!({"error":"PR requires actual source changes on a verified non-diverged head"}).to_string()),
             ] {
                 let (mut stream, _) = http.accept().await.unwrap();
                 let mut buffer = [0; 4096];
@@ -4165,6 +4175,21 @@ mod tests {
         assert!(matches!(stop, Stop::RateLimited(180)));
         assert!(stop.retryable());
         assert_eq!(stop.retry_delay(), Duration::from_secs(180));
+        for _ in 0..3 {
+            let conflict = session.action("begin", json!({})).await.unwrap_err();
+            assert!(format!("{conflict:#}").contains("workflow begin HTTP 409"));
+            assert!(matches!(
+                conflict.downcast_ref::<Stop>(),
+                Some(Stop::Uncertain)
+            ));
+            assert!(conflict.downcast_ref::<Stop>().unwrap().retryable());
+        }
+        let rejected = session.action("publish", json!({})).await.unwrap_err();
+        assert!(format!("{rejected:#}").contains("workflow publish HTTP 409"));
+        assert!(
+            rejected.downcast_ref::<Stop>().is_none(),
+            "A rejected publication is still a task failure"
+        );
         let limited = session
             .exchange(json!({"type":"claim"}), "granted")
             .await

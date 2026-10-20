@@ -393,6 +393,11 @@ test("begin accepts an already completed In Progress transition without overwrit
       if (stateId === "progress") {
         assert.equal(result.data.branch, approved.branch);
         assert.equal(result.data.canonical_oid, s.fixture.target_oid);
+      } else if (stateId === "review") {
+        assert.match(result.data.error, /^Human changes prevented the HOW update/);
+      } else {
+        const actual = { triage: "triage", done: "blocked", canceled: "closed" }[stateId];
+        assert.ok(result.data.error.includes(`expected: approved, running; actual: ${actual}`), result.data.error);
       }
     } finally { await s.close(); }
   }
