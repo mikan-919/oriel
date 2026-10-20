@@ -62,3 +62,19 @@ Relay統合テストは依存未導入のためwsの解決に失敗した。
 対象テストをisolationなしで実行してこの原因を確認した。ホストで全件再検証が必要。
 Webのnpmテストは4件すべて通過、workspace全対象のclippyも通過。
 daemon全体は48件通過・13件失敗で、sandboxの権限制限とsignal fixture起動失敗が残る。
+
+## 指定更新元の統合と終了競合の補強
+
+`740716fe0ac931e85349ec9ceae5cd1a9b22a618` を現在のブランチへマージした。
+接続試行と再試行待機は保持済み終了状態を優先する共通処理へまとめ、
+購読前・接続待機中・再試行待機中の終了が操作を開始／継続させないことを検証する。
+PTY入力・リサイズはロック取得後にも終了状態を確認し、ロック待ち中に終了した場合の操作を抑止する。
+
+今回の検証ではWebのnpmテスト4件とRelay Rust単体テスト3件が通過した。
+daemon全体は50件通過・13件失敗。追加した接続／再試行終了テスト、
+終了状態保持、購読前通知、送信停滞テストは通過している。
+失敗は従来と同じsandboxのOperation not permittedとsignal fixture起動失敗で、
+Relay terminal-presence統合テストもローカル待受が `listen EPERM 127.0.0.1` となる。
+ホストで設定済みの検証を再実行する必要がある。
+
+統合・補強後の `cargo clippy --workspace --all-targets -- -D warnings` も通過した。
