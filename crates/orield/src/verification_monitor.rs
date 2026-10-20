@@ -60,7 +60,9 @@ pub async fn wrap(
             Ok(())
         });
     }
-    let mut process = command.spawn()?;
+    let mut process = command
+        .spawn()
+        .context("could not start verification monitor")?;
     drop(child);
     use tokio::io::AsyncReadExt;
     let mut byte = [0];
@@ -127,7 +129,8 @@ pub fn run(args: &[std::ffi::OsString]) -> Result<()> {
         .args(&args[1..])
         .stdin(Stdio::null())
         .process_group(0)
-        .spawn()?;
+        .spawn()
+        .context("could not start configured verification command")?;
     let id = child.id();
     let status = loop {
         if let Some(status) = child
@@ -182,7 +185,7 @@ fn monitor_executable() -> Result<std::path::PathBuf> {
     if let Some(path) = option_env!("CARGO_BIN_EXE_orield") {
         return Ok(path.into());
     }
-    Ok(std::env::current_exe()?)
+    Ok(crate::executable::current()?)
 }
 
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Result<tokio::process::Command> {
