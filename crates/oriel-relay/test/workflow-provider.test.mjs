@@ -371,6 +371,38 @@ test("exact human approval seals atomically, publishes only verified source, res
   } finally { await s.close(); }
 });
 
+test("begin accepts an already completed In Progress transition without overwriting other states", { timeout: 60000 }, async () => {
+  for (const stateId of ["progress", "review", "triage", "done", "canceled"]) {
+    const s = await setup();
+    try {
+      const how = s.fixture.addHow();
+      const approved = (await s.snapshot()).workflows[0];
+      s.fixture.refs.set(approved.branch, s.fixture.target_oid);
+      const lease = await s.claim("implement");
+      let reads = 0;
+      s.fixture.holdReads = ({ operation }) => {
+        // The first begin read sees Todo. Another actor completes the transition
+        // before workflowUpdateHow rechecks its admission.
+        if (operation === "hows" && ++reads === 2) how.state = { ...s.fixture.states.find(state => state.id === stateId) };
+      };
+      const result = await s.action(lease, "begin");
+      assert.ok(reads >= 2, "The concurrent transition must occur inside begin");
+      assert.equal(result.status, stateId === "progress" ? 200 : 409, JSON.stringify(result.data));
+      assert.equal(how.state.id, stateId);
+      assert.equal(s.fixture.calls.filter(call => call.operation === "how-update").length, 0);
+      if (stateId === "progress") {
+        assert.equal(result.data.branch, approved.branch);
+        assert.equal(result.data.canonical_oid, s.fixture.target_oid);
+      } else if (stateId === "review") {
+        assert.match(result.data.error, /^Human changes prevented the HOW update/);
+      } else {
+        const actual = { triage: "triage", done: "blocked", canceled: "closed" }[stateId];
+        assert.ok(result.data.error.includes(`expected: approved, running; actual: ${actual}`), result.data.error);
+      }
+    } finally { await s.close(); }
+  }
+});
+
 test("aliases, ambiguous links, unknown states and strict target configuration cannot confer code approval", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
