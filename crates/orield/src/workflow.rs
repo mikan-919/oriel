@@ -1478,6 +1478,48 @@ fn link_cache(source: &Path, target: &Path) -> Result<bool> {
     Ok(available)
 }
 
+// npm writes into its cache during extraction. A shared-cache symlink can
+// become dangling after setup (for example when its owner removes a temporary
+// cache), causing ENOTDIR halfway through npm ci. Keep an independent snapshot
+// of package data only, without npm configuration or credentials.
+fn snapshot_npm_cache(source: &Path, target: &Path) -> Result<()> {
+    if fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        fs::remove_file(target)?;
+    }
+    git::private_directory(target)?;
+    match fs::symlink_metadata(source) {
+        Ok(metadata) if !metadata.is_dir() => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let entries = match fs::read_dir(source) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let destination = target.join(entry.file_name());
+        if kind.is_dir() {
+            snapshot_npm_cache(&entry.path(), &destination)?;
+        } else if kind.is_file() && !destination.exists() {
+            match fs::copy(entry.path(), &destination) {
+                Ok(_) => {}
+                // Cache entries may disappear while another process cleans up.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn dependency_cache_environment(home: &Path, offline: bool) -> Result<Vec<(String, String)>> {
     let cargo_source = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -1524,14 +1566,13 @@ fn dependency_cache_environment_from(
     if let Some(source) = npm_source {
         let npm_cache = home.join(".npm");
         git::private_directory(&npm_cache)?;
-        if link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))? {
-            environment.push((
-                "npm_config_cache".to_owned(),
-                npm_cache.to_string_lossy().into_owned(),
-            ));
-            if offline {
-                environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
-            }
+        snapshot_npm_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))?;
+        environment.push((
+            "npm_config_cache".to_owned(),
+            npm_cache.to_string_lossy().into_owned(),
+        ));
+        if offline {
+            environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
         }
     }
     Ok(environment)
@@ -3678,9 +3719,12 @@ mod tests {
         assert!(!private_cargo.join("credentials.toml").exists());
         assert_eq!(value("npm_config_cache"), private_npm.to_str().unwrap());
         assert_eq!(value("npm_config_offline"), "true");
-        assert_eq!(
-            fs::read_link(private_npm.join("_cacache")).unwrap(),
-            npm.join("_cacache")
+        assert!(private_npm.join("_cacache").is_dir());
+        assert!(
+            !fs::symlink_metadata(private_npm.join("_cacache"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
 
         let verification = root.join("verification/home");
@@ -3696,6 +3740,35 @@ mod tests {
                 .any(|(key, _)| matches!(key.as_str(), "CARGO_NET_OFFLINE" | "npm_config_offline"))
         );
         assert!(!verification.join(".cargo/credentials.toml").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn npm_cache_snapshot_survives_source_removal_and_repairs_old_links() {
+        let root = std::env::temp_dir().join(format!(
+            "oriel-npm-snapshot-{}",
+            random_hex::<12>().unwrap()
+        ));
+        let source = root.join("shared/_cacache");
+        let target = root.join("private/_cacache");
+        fs::create_dir_all(source.join("content-v2")).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(source.join("content-v2/package"), "cached package").unwrap();
+        fs::write(source.parent().unwrap().join(".npmrc"), "not package data").unwrap();
+        std::os::unix::fs::symlink(&source, &target).unwrap();
+        snapshot_npm_cache(&source, &target).unwrap();
+        fs::remove_dir_all(source.parent().unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.join("content-v2/package")).unwrap(),
+            "cached package"
+        );
+        assert!(!target.parent().unwrap().join(".npmrc").exists());
+        snapshot_npm_cache(&source, &target).unwrap();
+        fs::create_dir_all(&target).unwrap(); // npm mkdir must still succeed.
+        let dangling = root.join("private/dangling");
+        std::os::unix::fs::symlink(&source, &dangling).unwrap();
+        snapshot_npm_cache(&source, &dangling).unwrap();
+        assert!(dangling.is_dir());
         fs::remove_dir_all(root).unwrap();
     }
 
