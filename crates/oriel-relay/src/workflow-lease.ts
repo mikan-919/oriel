@@ -1,4 +1,4 @@
-import { attachmentBytes, ATTACHMENT_LIMIT, capacityError, WorkflowCapacityError } from "./workflow-capacity";
+import { attachmentBytes, ATTACHMENT_LIMIT, capacityError, workflowGrant, WorkflowCapacityError } from "./workflow-capacity";
 import type { Device, Integrations } from "./integrations";
 import { digest } from "./workflow";
 import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask, WorkflowSnapshot } from "./workflow";
@@ -446,7 +446,7 @@ export class WorkflowLeases {
       const capacity = capacityError(binding, admitted);
       if (capacity) throw new WorkflowCapacityError(capacity);
       const leaseId = crypto.randomUUID();
-      attachment.grant = { ...admitted, lease_id: leaseId };
+      attachment.grant = workflowGrant(admitted, leaseId);
       attachment.verification = undefined;
       attachment.stage = "preparing";
       attachment.task = null;

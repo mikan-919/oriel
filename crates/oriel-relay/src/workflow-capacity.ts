@@ -24,6 +24,11 @@ export function executionAdmission(snapshot: WorkflowSnapshot, row: WorkflowRow,
 
 export class WorkflowCapacityError extends Error {}
 
+/** Keep the persisted grant shape identical in admission reservations and claims. */
+export function workflowGrant(admission: WorkflowAdmission, lease_id: string) {
+  return { ...admission, lease_id };
+}
+
 // Reserve the simultaneous grant, progress evidence and paused-task copies.
 // All mutable scalar fields use their maximum encoded width.
 export function reservedAttachment(binding: WorkflowBinding, admission: WorkflowAdmission, commands = admission.execution?.verification ?? []) {
@@ -31,7 +36,9 @@ export function reservedAttachment(binding: WorkflowBinding, admission: Workflow
   const repository = `${binding.repository.owner}/${binding.repository.name}`;
   return {
     protocol: "oriel/workflow/v2", binding, expires_at: Number.MAX_SAFE_INTEGER,
-    grant: { ...admission, execution: admission.execution ? { ...admission.execution, verification: commands } : undefined, lease_id },
+    grant: workflowGrant({ ...admission,
+      ...(admission.execution ? { execution: { ...admission.execution, verification: commands } } : {}),
+    }, lease_id),
     stage: "implementing", task: { ...admission.task, repository }, updated_at: timestamp, changes: true, dirty: true,
     verification: admission.execution ? {
       execution_id: lease_id, repository, device_id: binding.device_id,
