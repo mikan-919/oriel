@@ -1310,6 +1310,33 @@ async fn committed_head(
     git::text(path, &["rev-parse", "HEAD"]).await
 }
 
+async fn resolved_merge_conflict(path: &Path, row: &Row, target: &str) -> Result<bool> {
+    if !row
+        .feedback
+        .as_ref()
+        .is_some_and(|feedback| feedback.kind == "merge_conflict")
+    {
+        return Ok(false);
+    }
+    let canonical = row
+        .canonical_oid
+        .as_deref()
+        .context("missing conflict head")?;
+    committed_head(
+        path,
+        row.branch.as_deref().context("missing branch")?,
+        canonical,
+        target,
+    )
+    .await?;
+    let previous = git::local(path, &["merge-base", "--is-ancestor", target, canonical]).await?;
+    ensure!(
+        matches!(previous.status.code(), Some(0 | 1)),
+        "could not establish conflict target ancestry"
+    );
+    Ok(!previous.status.success())
+}
+
 fn source_changes(paths: &[u8]) -> bool {
     paths
         .split(|b| *b == 0)
@@ -2386,9 +2413,14 @@ async fn implement(
         "checkpoint source baseline is not recoverable"
     );
     let changes = git::local(&path, &["diff", "--name-only", "-z", change_base]).await?;
-    let unchanged_response = respond && changes.stdout.is_empty();
+    // Integrating the target can resolve documentation-only conflicts, or keep
+    // the PR's entire tree unchanged. A verified merge still needs publication.
+    let merge_resolution =
+        respond && resolved_merge_conflict(&path, &active, &current.target_oid).await?;
+    let unchanged_response = respond && changes.stdout.is_empty() && !merge_resolution;
     ensure!(
-        changes.status.success() && (source_changes(&changes.stdout) || unchanged_response),
+        changes.status.success()
+            && (source_changes(&changes.stdout) || unchanged_response || merge_resolution),
         "no actual source changes; no PR will be published"
     );
     reject_project_authority(&path)?;
@@ -3923,6 +3955,76 @@ mod tests {
                 .await
                 .is_err()
         );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn conflict_resolution_accepts_documentation_and_unchanged_trees_only_after_integration()
+    {
+        let path = std::env::temp_dir().join(format!(
+            "oriel-doc-conflict-{}",
+            random_hex::<12>().unwrap()
+        ));
+        git::private_directory(&path).unwrap();
+        async fn run(path: &Path, args: &[&str]) {
+            assert!(git::local(path, args).await.unwrap().status.success());
+        }
+        run(&path, &["init", "--quiet", "-b", "task"]).await;
+        fs::write(path.join("README.md"), "base\n").unwrap();
+        run(&path, &["add", "README.md"]).await;
+        run(&path, &["commit", "--quiet", "-m", "base"]).await;
+        let base = git::text(&path, &["rev-parse", "HEAD"]).await.unwrap();
+        fs::write(path.join("README.md"), "approved documentation\n").unwrap();
+        run(&path, &["commit", "--quiet", "-am", "approved HOW"]).await;
+        let canonical = git::text(&path, &["rev-parse", "HEAD"]).await.unwrap();
+        run(&path, &["checkout", "--quiet", "-b", "target", &base]).await;
+        fs::write(path.join("README.md"), "target documentation\n").unwrap();
+        run(&path, &["commit", "--quiet", "-am", "target update"]).await;
+        let target = git::text(&path, &["rev-parse", "HEAD"]).await.unwrap();
+        run(&path, &["checkout", "--quiet", "task"]).await;
+        let row: Row = serde_json::from_value(json!({
+            "issue":{"number":42,"title":"WHAT","body":null,"url":"https://example.com"},
+            "what_comments":[],"how_comments":[],"version":"approved","phase":"review",
+            "branch":"task","canonical_oid":canonical,
+            "feedback":{"key":"conflict:7:head:target","kind":"merge_conflict","body":"Conflicts with main","comments":[]}
+        })).unwrap();
+        assert!(resolved_merge_conflict(&path, &row, &target).await.is_err());
+        for unchanged_tree in [false, true] {
+            run(&path, &["reset", "--hard", "--quiet", &canonical]).await;
+            let merge = git::local(&path, &["merge", "--no-commit", &target])
+                .await
+                .unwrap();
+            assert_eq!(merge.status.code(), Some(1));
+            assert!(resolved_merge_conflict(&path, &row, &target).await.is_err());
+            fs::write(
+                path.join("README.md"),
+                if unchanged_tree {
+                    "approved documentation\n"
+                } else {
+                    "approved documentation\ntarget documentation\n"
+                },
+            )
+            .unwrap();
+            run(&path, &["add", "README.md"]).await;
+            run(
+                &path,
+                &["commit", "--quiet", "-m", "resolve documentation conflict"],
+            )
+            .await;
+            let paths = git::local(&path, &["diff", "--name-only", "-z", &canonical])
+                .await
+                .unwrap();
+            assert!(!source_changes(&paths.stdout));
+            assert_eq!(paths.stdout.is_empty(), unchanged_tree);
+            assert!(resolved_merge_conflict(&path, &row, &target).await.unwrap());
+            assert!(
+                !resolved_merge_conflict(&path, &row, &canonical)
+                    .await
+                    .unwrap()
+            );
+            fs::write(path.join("README.md"), "uncommitted work\n").unwrap();
+            assert!(resolved_merge_conflict(&path, &row, &target).await.is_err());
+        }
         fs::remove_dir_all(path).unwrap();
     }
 
