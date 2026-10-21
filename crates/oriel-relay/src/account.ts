@@ -467,7 +467,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           const session = await this.requireSession(request);
           const devices = this.sql.exec<Pick<Device, "device_id" | "name" | "repository">>(
             "SELECT device_id, name, repository FROM devices WHERE user_id = ? ORDER BY name, device_id", session.user.id,
-          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null"), terminal_status: "unknown" }));
+          ).toArray().map(({ repository, ...device }) => ({ ...device, repository: JSON.parse(repository ?? "null"), terminal_status: "unknown", terminal_exit: null as unknown }));
           let cursor = 0;
           await Promise.all(Array.from({ length: Math.min(8, devices.length) }, async () => {
             while (cursor < devices.length) {
@@ -478,11 +478,11 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
                 const state = await Promise.race([
                   relay.fetch(new Request("https://relay/internal/terminal-status")).then(async response => {
                     if (!response.ok) throw new Error("State query failed");
-                    return response.text();
+                    return response.json() as Promise<{ terminal_status: string; terminal_exit?: unknown }>;
                   }),
-                  new Promise<string>((_, reject) => { timer = setTimeout(() => reject(new Error("State query timeout")), 2000); }),
+                  new Promise<{ terminal_status: string; terminal_exit?: unknown }>((_, reject) => { timer = setTimeout(() => reject(new Error("State query timeout")), 2000); }),
                 ]);
-                if (["online", "grace", "offline", "unknown"].includes(state)) device.terminal_status = state;
+                if (["online", "grace", "offline", "unknown"].includes(state.terminal_status)) { device.terminal_status = state.terminal_status; device.terminal_exit = state.terminal_exit ?? null; }
               } catch { /* Keep unknown when the relay cannot be queried. */ }
               finally { if (timer !== undefined) clearTimeout(timer); }
             }

@@ -8,4 +8,5 @@ build
 .wrangler
 .vlmkit
 
+# Project-local npm download cache
 .npm-cache/
