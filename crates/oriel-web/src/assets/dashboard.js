@@ -1,3 +1,9 @@
+function terminalExitReason(exit) {
+    if (exit?.state === "wait_failed") return "終了状態の取得に失敗しました（終了コード不明）";
+    if (exit?.state === "exited") return `${exit.code === 0 && !exit.signal ? "正常終了" : "異常終了"}（終了コード: ${exit.code}${exit.signal ? ` / ${exit.signal}` : ""}）`;
+    return "";
+}
+
 import {mountCodex} from "./codex.js";
 import {mountWorkflow} from "./workflow.js";
 const codexPanel = mountCodex();
@@ -690,7 +696,7 @@ async function updateDevices() {
             deviceList.append(row.item);
         }
         row.device = device;
-        row.label.textContent = `${device.name} (${device.device_id}) — ${({online:"使用可能", grace:"再接続中", offline:"使用不可", unknown:"状態確認中"})[device.terminal_status] || "状態確認中"}`;
+        row.label.textContent = `${device.name} (${device.device_id}) — ${({online:"使用可能", grace:"再接続中", offline:"使用不可", unknown:"状態確認中"})[device.terminal_status] || "状態確認中"}${device.terminal_exit ? ` — ${terminalExitReason(device.terminal_exit)}` : ""}`;
         row.repository.textContent = device.repository
             ? `最終報告リポジトリ: ${device.repository.owner}/${device.repository.name}`
             : "GitHubリポジトリは未取得です。GitHubのチェックアウトで最新の orield を起動してください。";
@@ -1055,6 +1061,7 @@ async function openTerminal(device) {
     disconnect();
     terminalOpener = opener;
     terminal.reset();
+    terminal.options.disableStdin = false;
     const url = new URL(`/device/${device.device_id}/client`, location.origin);
     url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const connection = new WebSocket(url, "oriel-client");
@@ -1062,6 +1069,7 @@ async function openTerminal(device) {
     connection.binaryType = "arraybuffer";
     status.textContent = `${device.name}に接続中…`;
     let failed = false;
+    let exitReason = "";
     connection.addEventListener("open", () => {
         if (socket !== connection) return;
         dashboard.hidden = true;
@@ -1074,6 +1082,23 @@ async function openTerminal(device) {
     });
     connection.addEventListener("message", async (event) => {
         if (socket !== connection) return;
+        if (typeof event.data === "string" && event.data.startsWith("oriel-terminal-exit:")) {
+            try {
+                const exit = JSON.parse(event.data.slice("oriel-terminal-exit:".length));
+                exitReason = terminalExitReason(exit);
+                device.terminal_exit = exit;
+                device.terminal_status = "offline";
+                const currentDevice = devices.find(row => row.device_id === device.device_id);
+                if (currentDevice) { currentDevice.terminal_exit = exit; currentDevice.terminal_status = "offline"; }
+                const row = deviceRows.get(device.device_id);
+                if (row) { row.open.disabled = true; row.label.textContent = `${device.name} (${device.device_id}) — ${exitReason}`; }
+                terminalTitle.textContent = `${device.name} (${device.device_id}) — ${exitReason}`;
+                terminal.options.disableStdin = true;
+                status.textContent = exitReason;
+                connection.close();
+            } catch { /* Invalid control messages are never terminal output. */ }
+            return;
+        }
         if (event.data instanceof ArrayBuffer) terminal.write(new Uint8Array(event.data));
         else if (event.data instanceof Blob) {
             const bytes = new Uint8Array(await event.data.arrayBuffer());
@@ -1086,9 +1111,9 @@ async function openTerminal(device) {
     connection.addEventListener("close", async (event) => {
         if (socket !== connection) return;
         disconnect();
-        status.textContent = failed
+        status.textContent = exitReason || (failed
             ? "接続に失敗しました。端末のオフライン、セッション失効、アクセス拒否を確認してください。"
-            : `切断されました（${event.code}）: ${event.reason || "端末を開き直して再接続してください。"}`;
+            : `切断されました（${event.code}）: ${event.reason || "端末を開き直して再接続してください。"}`);
         const ownerId = user?.id;
         try {
             const result = await api("/api/session");
@@ -1097,7 +1122,7 @@ async function openTerminal(device) {
                 if (!result.user) status.textContent = "セッションが失効しました。再度ログインしてください。";
             }
         } catch (error) {
-            if (!socket && user?.id === ownerId) status.textContent = errorText(error);
+            if (!socket && user?.id === ownerId && !exitReason) status.textContent = errorText(error);
         }
     });
 }
