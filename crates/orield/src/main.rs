@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -553,16 +553,57 @@ async fn pairing_response(mut response: reqwest::Response) -> Result<reqwest::Re
     response.error_for_status().map_err(Into::into)
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum TerminalState {
+    Running,
+    Exited { code: u32, signal: Option<String> },
+    WaitFailed,
+}
+
+async fn terminal_exit(state: &mut watch::Receiver<TerminalState>) -> TerminalState {
+    loop {
+        let value = state.borrow_and_update().clone();
+        if !matches!(value, TerminalState::Running) {
+            return value;
+        }
+        if state.changed().await.is_err() {
+            return TerminalState::WaitFailed;
+        }
+    }
+}
+
+// Race the whole operation, including pending connection and retry timers, against
+// retained child state so an exit never permits another connection attempt.
+async fn while_terminal_running<T>(
+    state: &mut watch::Receiver<TerminalState>,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = terminal_exit(state) => None,
+        result = operation => Some(result),
+    }
+}
+
 struct Terminal {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     output: broadcast::Sender<Vec<u8>>,
+    state: watch::Receiver<TerminalState>,
+    output_done: watch::Receiver<bool>,
 }
 
 type TerminalHandle = Arc<Terminal>;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let result = runtime.block_on(run());
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+async fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if let [command, socket, operation] = args.as_slice()
         && command == "__workflow-credential"
@@ -695,10 +736,22 @@ async fn main() -> Result<()> {
     info!("device: {}", identity.device_id);
     info!("relay: {relay_url}");
 
+    let mut state = terminal.state.clone();
     loop {
+        if !matches!(*state.borrow(), TerminalState::Running) {
+            return Ok(());
+        }
         info!("connecting to relay");
 
-        match connect_async(host_request(&relay_url, &identity)?).await {
+        let Some(connection) = while_terminal_running(
+            &mut state,
+            connect_async(host_request(&relay_url, &identity)?),
+        )
+        .await
+        else {
+            return Ok(());
+        };
+        match connection {
             Ok((socket, _)) => {
                 info!("connected to relay");
 
@@ -712,7 +765,12 @@ async fn main() -> Result<()> {
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if while_terminal_running(&mut state, tokio::time::sleep(Duration::from_secs(1)))
+            .await
+            .is_none()
+        {
+            return Ok(());
+        }
     }
 }
 
@@ -749,10 +807,14 @@ fn spawn_terminal(command: &str) -> Result<TerminalHandle> {
 
     let (output_tx, _) = broadcast::channel::<Vec<u8>>(256);
 
+    let (state_tx, state) = watch::channel(TerminalState::Running);
+    let (output_done_tx, output_done) = watch::channel(false);
     let terminal = Arc::new(Terminal {
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         output: output_tx.clone(),
+        state,
+        output_done,
     });
 
     thread::spawn(move || {
@@ -772,15 +834,21 @@ fn spawn_terminal(command: &str) -> Result<TerminalHandle> {
                 }
             }
         }
+        output_done_tx.send_replace(true);
     });
 
     thread::spawn(move || match child.wait() {
         Ok(status) => {
             info!("child exited: {status:?}");
+            state_tx.send_replace(TerminalState::Exited {
+                code: status.exit_code(),
+                signal: status.signal().map(str::to_owned),
+            });
         }
 
         Err(error) => {
             error!("failed waiting for child: {error}");
+            state_tx.send_replace(TerminalState::WaitFailed);
         }
     });
 
@@ -803,113 +871,165 @@ where
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(10));
 
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => bail!("relay keepalive response timed out"),
-            _ = keepalive.tick() => sender.send(Message::Text("oriel:ping".into())).await?,
-            _ = flush.tick(), if !pending.is_empty() => {
-                sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
-            },
-            message = receiver.next() => {
-                match message {
-                    Some(Ok(Message::Binary(data))) => {
-                        let result = {
-                            let mut writer = terminal
-                                .writer
-                                .lock()
-                                .expect(
-                                    "PTY writer mutex poisoned"
+    let mut state = terminal.state.clone();
+    let result = {
+        let running = async {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => bail!("relay keepalive response timed out"),
+                    _ = keepalive.tick() => sender.send(Message::Text("oriel:ping".into())).await?,
+                    _ = flush.tick(), if !pending.is_empty() => {
+                        sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
+                    },
+                    message = receiver.next() => {
+                        match message {
+                            Some(Ok(Message::Binary(data))) => {
+                                let terminal = terminal.clone();
+                                let result = tokio::task::spawn_blocking(move || {
+                                    if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
+                                    let mut writer = terminal
+                                        .writer
+                                        .lock()
+                                        .expect(
+                                            "PTY writer mutex poisoned"
+                                        );
+
+                                    if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
+                                    writer
+                                        .write_all(&data)
+                                        .and_then(|_| writer.flush())
+                                }).await?;
+
+                                result.context(
+                                    "failed writing to PTY"
+                                )?;
+                            }
+
+                            Some(Ok(Message::Text(text))) => {
+                                if text == "oriel:pong" {
+                                    deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+                                    continue;
+                                }
+                                if text.starts_with("oriel-heartbeat:") {
+                                    sender.send(Message::Text(text)).await?;
+                                    continue;
+                                }
+                                if let Some((cols, rows)) =
+                                    parse_resize(text.as_str())
+                                {
+                                    let terminal = terminal.clone();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
+                                        let master = terminal
+                                            .master
+                                            .lock()
+                                            .expect(
+                                                "PTY master mutex poisoned"
+                                            );
+
+                                        if !matches!(*terminal.state.borrow(), TerminalState::Running) { return Ok(()); }
+                                        master.resize(PtySize {
+                                            rows,
+                                            cols,
+                                            pixel_width: 0,
+                                            pixel_height: 0,
+                                        })
+                                    }).await?;
+
+                                    result.context(
+                                        "failed resizing PTY"
+                                    )?;
+                                }
+                            }
+
+                            Some(Ok(Message::Ping(data))) => {
+                                sender
+                                    .send(Message::Pong(data))
+                                    .await?;
+                            }
+
+                            Some(Ok(Message::Pong(_))) => {}
+
+                            Some(Ok(Message::Close(_))) | None => {
+                                break;
+                            }
+
+                            Some(Ok(_)) => {}
+
+                            Some(Err(error)) => {
+                                return Err(error.into());
+                            }
+                        }
+                    }
+
+                    data = output.recv() => {
+                        match data {
+                            Ok(data) => {
+                                pending.extend(data);
+                                if pending.len() >= 65_536 {
+                                    sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
+                                }
+                            }
+
+                            Err(
+                                broadcast::error::RecvError::Lagged(count)
+                            ) => {
+                                warn!(
+                                    "relay lagged by {count} terminal messages"
                                 );
+                            }
 
-                            writer
-                                .write_all(&data)
-                                .and_then(|_| writer.flush())
-                        };
-
-                        result.context(
-                            "failed writing to PTY"
-                        )?;
-                    }
-
-                    Some(Ok(Message::Text(text))) => {
-                        if text == "oriel:pong" {
-                            deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-                            continue;
+                            Err(
+                                broadcast::error::RecvError::Closed
+                            ) => {
+                                break;
+                            }
                         }
-                        if text.starts_with("oriel-heartbeat:") {
-                            sender.send(Message::Text(text)).await?;
-                            continue;
-                        }
-                        if let Some((cols, rows)) =
-                            parse_resize(text.as_str())
-                        {
-                            let result = {
-                                let master = terminal
-                                    .master
-                                    .lock()
-                                    .expect(
-                                        "PTY master mutex poisoned"
-                                    );
-
-                                master.resize(PtySize {
-                                    rows,
-                                    cols,
-                                    pixel_width: 0,
-                                    pixel_height: 0,
-                                })
-                            };
-
-                            result.context(
-                                "failed resizing PTY"
-                            )?;
-                        }
-                    }
-
-                    Some(Ok(Message::Ping(data))) => {
-                        sender
-                            .send(Message::Pong(data))
-                            .await?;
-                    }
-
-                    Some(Ok(Message::Pong(_))) => {}
-
-                    Some(Ok(Message::Close(_))) | None => {
-                        break;
-                    }
-
-                    Some(Ok(_)) => {}
-
-                    Some(Err(error)) => {
-                        return Err(error.into());
                     }
                 }
             }
 
-            data = output.recv() => {
-                match data {
-                    Ok(data) => {
-                        pending.extend(data);
-                        if pending.len() >= 65_536 {
-                            sender.send(Message::Binary(std::mem::take(&mut pending).into())).await?;
-                        }
-                    }
-
-                    Err(
-                        broadcast::error::RecvError::Lagged(count)
-                    ) => {
-                        warn!(
-                            "relay lagged by {count} terminal messages"
-                        );
-                    }
-
-                    Err(
-                        broadcast::error::RecvError::Closed
-                    ) => {
-                        break;
-                    }
-                }
-            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::select! {
+            biased;
+            exit = terminal_exit(&mut state) => Some(exit),
+            result = running => { result?; None }
         }
+    };
+    if let Some(exit) = result {
+        // Bound draining and notification even when the peer stops reading.
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            if !pending.is_empty() {
+                sender
+                    .send(Message::Binary(std::mem::take(&mut pending).into()))
+                    .await?;
+            }
+            let mut done = terminal.output_done.clone();
+            loop {
+                while let Ok(data) = output.try_recv() {
+                    sender.send(Message::Binary(data.into())).await?;
+                }
+                if *done.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = done.changed() => {},
+                    data = output.recv() => {
+                        if let Ok(data) = data { sender.send(Message::Binary(data.into())).await?; }
+                    }
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+        let notice = format!("oriel-terminal-exit:{}", serde_json::to_string(&exit)?);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            sender.send(Message::Text(notice.into())),
+        )
+        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), sender.close()).await;
     }
 
     Ok(())
@@ -940,16 +1060,153 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn exit_is_retained_before_subscription_and_while_waiting() {
+        for exit in [
+            TerminalState::Exited {
+                code: 0,
+                signal: None,
+            },
+            TerminalState::Exited {
+                code: 7,
+                signal: Some("TERM".into()),
+            },
+            TerminalState::WaitFailed,
+        ] {
+            let (tx, mut rx) = watch::channel(TerminalState::Running);
+            tx.send_replace(exit.clone());
+            let observed = terminal_exit(&mut rx).await;
+            assert_eq!(
+                serde_json::to_value(observed).unwrap(),
+                serde_json::to_value(&exit).unwrap()
+            );
+            let mut later = tx.subscribe();
+            assert!(!matches!(
+                terminal_exit(&mut later).await,
+                TerminalState::Running
+            ));
+        }
+        let (tx, mut rx) = watch::channel(TerminalState::Running);
+        let waiting = tokio::spawn(async move { terminal_exit(&mut rx).await });
+        tokio::task::yield_now().await;
+        tx.send_replace(TerminalState::WaitFailed);
+        assert!(matches!(waiting.await.unwrap(), TerminalState::WaitFailed));
+    }
+
+    #[tokio::test]
+    async fn exit_cancels_connection_attempt_and_retry_wait() {
+        for retry in [false, true] {
+            let (tx, mut state) = watch::channel(TerminalState::Running);
+            let task = tokio::spawn(async move {
+                while_terminal_running(&mut state, async {
+                    if retry {
+                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                })
+                .await
+            });
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+            tx.send_replace(TerminalState::WaitFailed);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let (tx, mut state) = watch::channel(TerminalState::WaitFailed);
+        let started = std::cell::Cell::new(false);
+        assert!(
+            while_terminal_running(&mut state, async {
+                started.set(true);
+            })
+            .await
+            .is_none()
+        );
+        assert!(
+            !started.get(),
+            "An already exited child must prevent starting an operation"
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn relay_reports_even_an_exit_before_subscription() {
+        for exit in [
+            TerminalState::Exited {
+                code: 0,
+                signal: None,
+            },
+            TerminalState::Exited {
+                code: 3,
+                signal: None,
+            },
+            TerminalState::WaitFailed,
+        ] {
+            let (mut terminal, _) = test_terminal();
+            let (_tx, state) = watch::channel(exit.clone());
+            Arc::get_mut(&mut terminal).unwrap().state = state;
+            let (mut peer, task) = relay_connection(terminal).await;
+            let frame = peer.next().await.unwrap().unwrap();
+            assert_eq!(
+                frame,
+                Message::Text(
+                    format!(
+                        "oriel-terminal-exit:{}",
+                        serde_json::to_string(&exit).unwrap()
+                    )
+                    .into()
+                )
+            );
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_interrupts_a_stalled_socket() {
+        let (mut terminal, _) = test_terminal();
+        let (tx, state) = watch::channel(TerminalState::Running);
+        Arc::get_mut(&mut terminal).unwrap().state = state;
+        let (_peer, task) = relay_connection(terminal.clone()).await;
+        // Fill the duplex socket while the peer does not read.
+        for _ in 0..64 {
+            let _ = terminal.output.send(vec![0; 8192]);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished());
+        tx.send_replace(TerminalState::Exited {
+            code: 0,
+            signal: None,
+        });
+        tokio::time::timeout(Duration::from_secs(7), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
     type TestSocket = tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>;
 
     fn test_terminal() -> (TerminalHandle, RecordingWriter) {
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
         let writer = RecordingWriter::default();
         let (output, _) = broadcast::channel(16);
+        let (state_tx, state) = watch::channel(TerminalState::Running);
+        std::mem::forget(state_tx);
         let terminal = Arc::new(Terminal {
             master: Mutex::new(pair.master),
             writer: Mutex::new(Box::new(writer.clone())),
             output,
+            state,
+            output_done: watch::channel(true).1,
         });
         (terminal, writer)
     }

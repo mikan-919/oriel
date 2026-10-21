@@ -394,3 +394,14 @@ test('current session expiration keeps the login guidance after account reset', 
   assert.equal(h.c.busy, false);
   assert.equal(h.timers.size, 0);
 });
+
+test('terminal exit reasons distinguish success, signal and unknown status as plain text', () => {
+  const c = vm.createContext({});
+  vm.runInContext(source.slice(0, source.indexOf('\n\n')), c);
+  assert.match(c.terminalExitReason({state:'exited',code:0}), /正常終了.*0/);
+  assert.match(c.terminalExitReason({state:'exited',code:9,signal:'KILL'}), /異常終了.*9.*KILL/);
+  assert.match(c.terminalExitReason({state:'wait_failed'}), /終了コード不明/);
+  assert.equal(c.terminalExitReason(null), '');
+  assert.match(source, /status\.textContent = exitReason/);
+  assert.match(source, /device\.terminal_status = "offline"/);
+});
