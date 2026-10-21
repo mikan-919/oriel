@@ -1,3 +1,4 @@
+import { attachmentBytes, ATTACHMENT_LIMIT, capacityError, workflowGrant, WorkflowCapacityError } from "./workflow-capacity";
 import type { Device, Integrations } from "./integrations";
 import { digest } from "./workflow";
 import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask, WorkflowSnapshot } from "./workflow";
@@ -74,6 +75,13 @@ export class WorkflowLeases {
     private readonly schedule: () => void,
     private readonly eventDriven: () => boolean = () => false,
   ) {}
+
+  private saveControl(ws: WebSocket, attachment: Attachment): void {
+    const used = attachmentBytes(attachment);
+    if (used > ATTACHMENT_LIMIT) throw new WorkflowCapacityError(
+      `execution.verification capacity exceeded: WebSocket attachment used ${used} bytes, limit ${ATTACHMENT_LIMIT} bytes`);
+    ws.serializeAttachment(attachment);
+  }
 
   private attachment(ws: WebSocket): Attachment | null {
     const value = ws.deserializeAttachment() as Attachment | null;
@@ -175,7 +183,7 @@ export class WorkflowLeases {
       if (!saved?.changes || saved.dirty || !users.has(saved.binding.user_id)) continue;
       try {
         const current = this.live(ws);
-        ws.serializeAttachment({...current, dirty:true});
+        this.saveControl(ws, {...current, dirty:true});
         this.send(ws, {type:"changed"});
       } catch { /* Revoked connections cannot receive notifications. */ }
     }
@@ -240,7 +248,7 @@ export class WorkflowLeases {
     const attachment: Attachment = { protocol: PROTOCOL, binding, expires_at: Date.now() + EXPIRY_MS, grant: null,
       stage: "idle", task: null, updated_at: new Date().toISOString() };
     this.ctx.acceptWebSocket(pair[1], [SOCKET_TAG]);
-    try { pair[1].serializeAttachment(attachment); }
+    try { this.saveControl(pair[1], attachment); }
     catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
     this.publish();
     this.schedule();
@@ -273,7 +281,7 @@ export class WorkflowLeases {
     check();
     const current = this.live(ws);
     if (renew) {
-      ws.serializeAttachment({ ...current, expires_at: Date.now() + EXPIRY_MS, changes: true, dirty: false });
+      this.saveControl(ws, { ...current, expires_at: Date.now() + EXPIRY_MS, changes: true, dirty: false });
       this.schedule();
     }
     return { issue_number: current.grant?.issue_number, check };
@@ -317,7 +325,7 @@ export class WorkflowLeases {
           attachment.expires_at = Date.now() + EXPIRY_MS;
           attachment.changes = request.changes === true;
           attachment.dirty = false;
-          ws.serializeAttachment(attachment);
+          this.saveControl(ws, attachment);
           this.schedule();
           const device = this.device(binding.device_id);
           if (!device) throw new WorkflowLeaseError();
@@ -339,7 +347,7 @@ export class WorkflowLeases {
       }
       if (request.type === "heartbeat") {
         attachment.expires_at = Date.now() + EXPIRY_MS;
-        ws.serializeAttachment(attachment);
+        this.saveControl(ws, attachment);
         this.schedule();
         this.send(ws, { type: "heartbeat", request_id: requestId });
         return;
@@ -382,7 +390,7 @@ export class WorkflowLeases {
         attachment.stage = request.stage as Stage;
         if (!attachment.grant && attachment.stage !== "paused") attachment.task = null;
         attachment.updated_at = new Date().toISOString();
-        ws.serializeAttachment(attachment);
+        this.saveControl(ws, attachment);
         this.send(ws, { type: "progressed", request_id: requestId });
         return;
       }
@@ -402,7 +410,7 @@ export class WorkflowLeases {
             attachment.task = null;
           }
           attachment.updated_at = new Date().toISOString();
-          ws.serializeAttachment(attachment);
+          this.saveControl(ws, attachment);
         }
         this.send(ws, { type: request.type === "check" ? "checked" : "released", request_id: requestId, lease_id: leaseId });
         return;
@@ -435,13 +443,15 @@ export class WorkflowLeases {
             (other.grant.issue_number === admitted.issue_number ||
              admitted.branch !== null && other.grant.branch === admitted.branch)) throw new WorkflowLeaseError();
       }
+      const capacity = capacityError(binding, admitted);
+      if (capacity) throw new WorkflowCapacityError(capacity);
       const leaseId = crypto.randomUUID();
-      attachment.grant = { ...admitted, lease_id: leaseId };
+      attachment.grant = workflowGrant(admitted, leaseId);
       attachment.verification = undefined;
       attachment.stage = "preparing";
       attachment.task = null;
       attachment.updated_at = new Date().toISOString();
-      ws.serializeAttachment(attachment);
+      this.saveControl(ws, attachment);
       this.send(ws, { type: "granted", request_id: requestId, lease_id: leaseId });
     } catch (error) {
       if (error instanceof Error && "status" in error && typeof error.status === "number" &&
@@ -449,7 +459,7 @@ export class WorkflowLeases {
         this.send(ws, { type: "error", request_id: requestId, status: error.status, error: error.message,
           ...("retryAfterSeconds" in error ? { retry_after_seconds: error.retryAfterSeconds } : {}) });
       } else {
-        this.send(ws, { type: "rejected", request_id: requestId, error: "Workflow request rejected" });
+        this.send(ws, { type: "rejected", request_id: requestId, error: error instanceof WorkflowCapacityError || error instanceof Error && error.message.startsWith("execution.verification capacity exceeded") ? error.message : "Workflow request rejected" });
       }
     } finally {
       this.publish();

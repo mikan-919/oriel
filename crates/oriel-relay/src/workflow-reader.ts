@@ -1,3 +1,4 @@
+import { capacityError, executionAdmission } from "./workflow-capacity";
 import { digest, githubIssueLink, OID, parseConfiguration, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
 import type { Auth, IntegrationEnv, WorkflowContext, WorkflowFacts, WorkflowHow, Page, LinkedIssue, GithubPull, GithubComment, LinearComment, SnapshotPreparation } from "./integrations";
 import type { WorkflowCI } from "./workflow";
@@ -338,6 +339,14 @@ export class WorkflowReader {
       snapshot.workflows.push(...rows.filter((row): row is WorkflowRow => row !== null));
     }
     context.check();
+    for (const row of snapshot.workflows) {
+      if (!["approved", "running", "review"].includes(row.phase) || !snapshot.configuration.autonomous) continue;
+      const kind = row.phase === "review" ? "respond" : "implement";
+      const error = capacityError(context.binding, executionAdmission(snapshot, row, {
+        kind, issue_number: row.issue.number, version: row.version, branch: row.branch,
+      }));
+      if (error) { row.phase = "blocked"; row.blocked_reason = error; }
+    }
     return { snapshot, states, hows, pulls, refs, recoveries };
   }
 
