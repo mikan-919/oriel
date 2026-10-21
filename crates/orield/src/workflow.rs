@@ -3171,6 +3171,19 @@ mod tests {
                     assert!(stderr.contains("could not record workflow failure"));
                 }
                 assert_eq!(fs::read_to_string(root.join("work")).unwrap(), mode);
+                if mode == "once-verification" {
+                    assert_eq!(
+                        fs::read_to_string(root.join("verification/stderr.log")).unwrap(),
+                        "compiler diagnostic\n"
+                    );
+                }
+            }
+            // A successful later task must run without clearing the earlier failure.
+            if matches!(
+                mode,
+                "once-implementation" | "once-verification" | "once-needs-human" | "once-success"
+            ) {
+                assert_eq!(fs::read_to_string(root.join("completed-2")).unwrap(), mode);
             }
             fs::remove_dir_all(root).unwrap();
         }
@@ -3193,6 +3206,14 @@ mod tests {
             }
             if row.issue.number == 1 && mode != "once-success" {
                 fs::write(root.join("work"), &mode).unwrap();
+                if mode == "once-verification" {
+                    fs::create_dir_all(root.join("verification")).unwrap();
+                    fs::write(
+                        root.join("verification/stderr.log"),
+                        "compiler diagnostic\n",
+                    )
+                    .unwrap();
+                }
                 return Err(match mode.as_str() {
                     "once-verification" => anyhow::Error::new(VerificationFailure {
                         command: vec![mode],
@@ -3206,6 +3227,7 @@ mod tests {
                     _ => anyhow!("{mode}: implementation failed"),
                 });
             }
+            fs::write(root.join(format!("completed-{}", row.issue.number)), &mode).unwrap();
             Ok(())
         })
     }
