@@ -473,7 +473,7 @@ test("Only the paired host reports normalized repository metadata; existing devi
     const route = `/api/integrations/${device}/repository`;
     const repository = { owner: "octocat", name: "working" };
     const devices = () => owner.api("/api/devices");
-    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline" }]);
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline", terminal_exit: null }]);
     assert.equal((await owner.api(route, { repository })).status, 401);
     assert.equal((await stranger.api(route, { repository })).status, 401);
     assert.equal((await stranger.api(route, { repository }, { Authorization: `Bearer ${"e".repeat(64)}` })).status, 403);
@@ -495,7 +495,7 @@ test("Only the paired host reports normalized repository metadata; existing devi
     await storage.exec("INSERT INTO devices SELECT device_id, name, user_id, host_hash FROM current_devices");
     await storage.exec("DROP TABLE current_devices");
     await worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
-    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline" }]);
+    assert.deepEqual((await devices()).data.devices, [{ device_id: device, name: "integration-host", repository: null, terminal_status: "offline", terminal_exit: null }]);
     assert.equal((await daemon.api(route, { repository }, hostHeaders)).status, 200);
     assert.deepEqual((await devices()).data.devices[0].repository, repository);
   } finally { await worker.dispose(); }
