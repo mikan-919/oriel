@@ -1521,18 +1521,57 @@ fn dependency_cache_environment_from(
             }
         }
     }
-    if let Some(source) = npm_source {
-        let npm_cache = home.join(".npm");
-        git::private_directory(&npm_cache)?;
-        if link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))? {
-            environment.push((
-                "npm_config_cache".to_owned(),
-                npm_cache.to_string_lossy().into_owned(),
-            ));
-            if offline {
-                environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
-            }
+    let mut npm_cache = home.join(".npm");
+    if !offline {
+        // Preserve obstructing files (and parent links) while giving online
+        // verification a fresh, private cache that npm can actually populate.
+        let obstructed = match fs::symlink_metadata(&npm_cache) {
+            Ok(metadata) if !metadata.is_dir() => true,
+            Ok(_) => match fs::symlink_metadata(npm_cache.join("_cacache")) {
+                Ok(metadata) => !metadata.is_dir() && !metadata.file_type().is_symlink(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if obstructed {
+            npm_cache = home.join(format!("npm-cache-{}", random_hex::<12>()?));
         }
+    }
+    git::private_directory(&npm_cache)
+        .with_context(|| format!("prepare private npm cache {}", npm_cache.display()))?;
+    if !offline {
+        // Online verification owns its cache. A shared cache can disappear after
+        // setup, leaving npm unable to mkdir through a dangling _cacache link.
+        let contents = npm_cache.join("_cacache");
+        match fs::symlink_metadata(&contents) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::remove_file(&contents)
+                    .with_context(|| format!("unlink npm cache {}", contents.display()))?;
+            }
+            Ok(metadata) => ensure!(
+                metadata.is_dir(),
+                "npm cache {} is not a directory; preserve the file and move it aside before retrying verification",
+                contents.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::create_dir_all(&contents)
+            .with_context(|| format!("create npm cache {}", contents.display()))?;
+        environment.push((
+            "npm_config_cache".to_owned(),
+            npm_cache.to_string_lossy().into_owned(),
+        ));
+    } else if let Some(source) = npm_source
+        && link_cache(&source.join("_cacache"), &npm_cache.join("_cacache"))?
+    {
+        environment.push((
+            "npm_config_cache".to_owned(),
+            npm_cache.to_string_lossy().into_owned(),
+        ));
+        environment.push(("npm_config_offline".to_owned(), "true".to_owned()));
     }
     Ok(environment)
 }
@@ -2426,7 +2465,27 @@ async fn read_only(
     Ok(())
 }
 
-fn interrupted(result: &Result<()>) -> bool {
+#[derive(Debug, Default)]
+struct ScanOutcome {
+    failures: Vec<(u64, anyhow::Error)>,
+}
+
+impl ScanOutcome {
+    fn into_result(self) -> Result<()> {
+        ensure!(
+            self.failures.is_empty(),
+            "workflow failures: {}",
+            self.failures
+                .iter()
+                .map(|(issue, error)| format!("#{issue}: {error:#}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        Ok(())
+    }
+}
+
+fn interrupted<T>(result: &Result<T>) -> bool {
     result
         .as_ref()
         .is_err_and(|error| matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)))
@@ -2452,7 +2511,12 @@ async fn drive_session(
     loop {
         let mut result = scan(session, root, suppressed, console, execute).await;
         if result.is_ok() && !once {
-            result = session.wait(session.scan_interval).await;
+            // Recorded task failures do not invalidate this session. Only the
+            // single-scan boundary converts them into an exit error.
+            result = session
+                .wait(session.scan_interval)
+                .await
+                .map(|()| ScanOutcome::default());
             if interrupted(&result) {
                 session.shutdown().await;
             }
@@ -2462,7 +2526,7 @@ async fn drive_session(
         }
         if once {
             session.shutdown().await;
-            return result;
+            return result.and_then(ScanOutcome::into_result);
         }
         result?;
     }
@@ -2506,7 +2570,7 @@ async fn scan(
     suppressed: &mut HashMap<(u64, String, String), String>,
     console: &mut Console,
     execute: Work,
-) -> Result<()> {
+) -> Result<ScanOutcome> {
     let result = scan_inner(session, root, suppressed, console, execute).await;
     if interrupted(&result) {
         session.shutdown().await;
@@ -2520,12 +2584,13 @@ async fn scan_inner(
     suppressed: &mut HashMap<(u64, String, String), String>,
     console: &mut Console,
     execute: Work,
-) -> Result<()> {
+) -> Result<ScanOutcome> {
     if crate::codex::paused() {
         session.progress("paused").await?;
-        return Ok(());
+        return Ok(ScanOutcome::default());
     }
     let snapshot = session.snapshot().await?;
+    let mut outcome = ScanOutcome::default();
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
         // Also visit Done rows after restart or another device's reconciliation.
@@ -2619,14 +2684,17 @@ async fn scan_inner(
                     if let Err(reflection) = session.action("fail", report).await {
                         // A failed provider read/write cannot establish a permanent
                         // task failure. Reconnect and read current facts instead.
-                        return Err(reflection
-                            .context(format!("could not record workflow failure: {error:#}")));
+                        return Err(reflection.context(format!(
+                            "could not record workflow failure for #{}: {error:#}",
+                            row.issue.number
+                        )));
                     }
                     // Code failures are stopped by Relay's confirmed Triage state.
                     // A human may reapprove identical content before our next scan.
                     if !matches!(kind, "implement" | "respond") {
                         suppressed.insert(identity, format!("{error:#}"));
                     }
+                    outcome.failures.push((row.issue.number, error));
                 }
             }
             session.progress("paused").await?;
@@ -2638,7 +2706,7 @@ async fn scan_inner(
     }
     session.progress(resting_stage).await?;
     console.connected();
-    Ok(())
+    Ok(outcome)
 }
 
 pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> Result<()> {
@@ -3042,6 +3110,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scan_outcome_preserves_all_issue_failures_and_context() {
+        ScanOutcome::default().into_result().unwrap();
+        let outcome = ScanOutcome {
+            failures: vec![
+                (
+                    42,
+                    anyhow!("compiler diagnostic").context("implementation failed"),
+                ),
+                (43, anyhow!("verification failed")),
+            ],
+        };
+        let error = format!("{:#}", outcome.into_result().unwrap_err());
+        assert!(error.contains("#42: implementation failed: compiler diagnostic"));
+        assert!(error.contains("#43: verification failed"));
+    }
+
+    #[test]
+    fn once_process_exit_status() {
+        for (mode, success) in [
+            ("once-empty", true),
+            ("once-triage", true),
+            ("once-success", true),
+            ("once-implementation", false),
+            ("once-multiple", false),
+            ("once-verification", false),
+            ("once-needs-human", false),
+            ("once-reflection", false),
+            ("continuous-failure", true),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("oriel-once-{}", random_hex::<12>().unwrap()));
+            fs::create_dir_all(&root).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "workflow::tests::sigint_subprocess",
+                    "--nocapture",
+                ])
+                .env("ORIEL_SIGNAL_TEST_ROOT", &root)
+                .env("ORIEL_SIGNAL_TEST_MODE", mode)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{mode}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !success {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("#1:"), "{mode}: {stderr}");
+                assert!(stderr.contains(mode), "{mode}: {stderr}");
+                if mode == "once-multiple" {
+                    assert!(stderr.contains("#2: once-multiple: second task failed"));
+                }
+                if mode == "once-reflection" {
+                    assert!(stderr.contains("could not record workflow failure"));
+                }
+                assert_eq!(fs::read_to_string(root.join("work")).unwrap(), mode);
+                if mode == "once-verification" {
+                    assert_eq!(
+                        fs::read_to_string(root.join("verification/stderr.log")).unwrap(),
+                        "compiler diagnostic\n"
+                    );
+                }
+            }
+            // A successful later task must run without clearing the earlier failure.
+            if matches!(
+                mode,
+                "once-implementation" | "once-verification" | "once-needs-human" | "once-success"
+            ) {
+                assert_eq!(fs::read_to_string(root.join("completed-2")).unwrap(), mode);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn outcome_work<'a>(
+        _: &'a mut Session,
+        root: &'a Path,
+        _: &'a Snapshot,
+        row: &'a Row,
+        _: &'a str,
+    ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mode = std::env::var("ORIEL_SIGNAL_TEST_MODE").unwrap();
+            if mode == "continuous-failure" && row.issue.number == 1 && root.join("work").exists() {
+                return Err(Stop::Interrupted.into());
+            }
+            if mode == "once-multiple" && row.issue.number == 2 {
+                return Err(anyhow!("{mode}: second task failed"));
+            }
+            if row.issue.number == 1 && mode != "once-success" {
+                fs::write(root.join("work"), &mode).unwrap();
+                if mode == "once-verification" {
+                    fs::create_dir_all(root.join("verification")).unwrap();
+                    fs::write(
+                        root.join("verification/stderr.log"),
+                        "compiler diagnostic\n",
+                    )
+                    .unwrap();
+                }
+                return Err(match mode.as_str() {
+                    "once-verification" => anyhow::Error::new(VerificationFailure {
+                        command: vec![mode],
+                        status: "exit status: 1".into(),
+                        logs: root.join("verification"),
+                    }),
+                    "once-needs-human" => anyhow::Error::new(AgentIntervention {
+                        reason: mode,
+                        output: root.join("result.json"),
+                    }),
+                    _ => anyhow!("{mode}: implementation failed"),
+                });
+            }
+            fs::write(root.join(format!("completed-{}", row.issue.number)), &mode).unwrap();
+            Ok(())
+        })
+    }
+
     #[tokio::test]
     async fn sigint_subprocess() {
         let Ok(root) = std::env::var("ORIEL_SIGNAL_TEST_ROOT") else {
@@ -3049,6 +3239,33 @@ mod tests {
         };
         let root = std::path::PathBuf::from(root);
         let mode = std::env::var("ORIEL_SIGNAL_TEST_MODE").unwrap();
+        let outcome_mode = mode.starts_with("once-") || mode == "continuous-failure";
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!("http://{}", http.local_addr().unwrap())).unwrap();
+        let reflection_fails = mode == "once-reflection";
+        let failure_mode = mode.clone();
+        let provider = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = http.accept().await {
+                let mut buffer = [0; 8192];
+                let size = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                assert!(request.contains("\"action\":\"fail\""));
+                let category = match failure_mode.as_str() {
+                    "once-verification" => "verification",
+                    "once-needs-human" => "needs-human",
+                    _ => "runtime",
+                };
+                assert!(request.contains(&format!("\"category\":\"{category}\"")));
+                assert!(request.contains(&failure_mode));
+                let status = if reflection_fails {
+                    "502 Bad Gateway"
+                } else {
+                    "200 OK"
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+            }
+        });
         // Register the process-wide handler before publishing readiness.
         let signal = tokio::signal::ctrl_c();
         tokio::pin!(signal);
@@ -3066,7 +3283,11 @@ mod tests {
                 if text == "oriel:ping" {
                     fs::write(server_root.join("ready"), "").unwrap();
                     socket
-                        .send(Message::Text("oriel:pong".into()))
+                        .send(Message::Text(if outcome_mode {
+                            json!({"type":"changed"}).to_string().into()
+                        } else {
+                            "oriel:pong".into()
+                        }))
                         .await
                         .unwrap();
                     continue;
@@ -3075,13 +3296,27 @@ mod tests {
                 let mut reply = json!({"request_id":request["request_id"]});
                 reply["type"] = json!(match request["type"].as_str().unwrap() {
                     "snapshot" => {
-                        let workflows = if server_mode == "waiting" {
+                        let workflows = if matches!(server_mode.as_str(), "waiting" | "once-empty")
+                        {
                             vec![]
                         } else {
                             vec![json!({
                                 "issue":{"number":1,"title":"WHAT","body":null,"url":"https://example.com"},
                                 "what_comments":[],"how_comments":[],"version":"approved","phase":"running"
                             })]
+                        };
+                        let workflows = if server_mode == "once-triage" {
+                            let mut rows = workflows;
+                            rows[0]["phase"] = json!("triage");
+                            rows
+                        } else if outcome_mode && server_mode != "once-empty" {
+                            let mut rows = workflows;
+                            let mut second = rows[0].clone();
+                            second["issue"]["number"] = json!(2);
+                            rows.push(second);
+                            rows
+                        } else {
+                            workflows
                         };
                         reply["snapshot"] = json!({"repository":{"owner":"octocat","name":"connected"},
                             "repository_id":1,"repository_node_id":"repo","base_branch":"main",
@@ -3091,7 +3326,9 @@ mod tests {
                     }
                     "claim" => {
                         claims += 1;
-                        assert_eq!(claims, 1);
+                        if !outcome_mode {
+                            assert_eq!(claims, 1);
+                        }
                         if server_mode == "claim" {
                             fs::write(server_root.join("ready"), "").unwrap();
                             continue;
@@ -3110,6 +3347,14 @@ mod tests {
                         releases += 1;
                         "released"
                     }
+                    // Provider actions can send ownership heartbeats while the
+                    // HTTP response is in flight, even for these local fixtures.
+                    "heartbeat" => "heartbeat",
+                    "check" => {
+                        assert_eq!(request["lease_id"], "lease");
+                        reply["lease_id"] = json!("lease");
+                        "checked"
+                    }
                     _ => panic!("unexpected request {request}"),
                 });
                 socket
@@ -3117,12 +3362,22 @@ mod tests {
                     .await
                     .unwrap();
             }
-            assert_eq!(releases, usize::from(server_mode.starts_with("child")));
+            let expected = match server_mode.as_str() {
+                "once-empty" | "once-triage" => 0,
+                "once-reflection" => 1,
+                "continuous-failure" => 3,
+                _ if outcome_mode => 2,
+                _ => usize::from(server_mode.starts_with("child")),
+            };
+            assert_eq!(releases, expected);
+            if outcome_mode {
+                assert_eq!(claims, expected);
+            }
         });
         let (socket, _) = connect_async(url).await.unwrap();
         let mut session = Session {
             client: Client::new(),
-            endpoint: Url::parse("http://localhost/").unwrap(),
+            endpoint,
             socket,
             repository: Repository {
                 owner: "octocat".into(),
@@ -3135,18 +3390,23 @@ mod tests {
             snapshot_http: false,
             verification_metadata: false,
         };
-        drive_session(
+        let result = drive_session(
             &mut session,
             &root,
             &mut HashMap::new(),
             &mut Console::default(),
-            mode == "child-once",
-            signal_child_work,
+            mode == "child-once" || mode.starts_with("once-"),
+            if outcome_mode {
+                outcome_work
+            } else {
+                signal_child_work
+            },
         )
-        .await
-        .unwrap();
+        .await;
         drop(session);
         server.await.unwrap();
+        provider.abort();
+        result.unwrap();
     }
 
     fn interrupt_pending_work<'a>(
@@ -3406,7 +3666,7 @@ mod tests {
                         verification_metadata: false,
                     };
                     let mut suppressed = HashMap::new();
-                    for _ in 0..scans {
+                    for index in 0..scans {
                         let result = scan(
                             &mut session,
                             Path::new("."),
@@ -3421,7 +3681,17 @@ mod tests {
                                     .contains("could not record workflow failure")
                             );
                         } else {
-                            result.unwrap();
+                            let outcome = result.unwrap();
+                            let failed = index == 0
+                                || (observe_triage && index == 3)
+                                || (!observe_triage && kind != "plan" && index == 1);
+                            assert_eq!(outcome.failures.len(), usize::from(failed));
+                            if failed {
+                                let reason = format!("{:#}", outcome.into_result().unwrap_err());
+                                assert!(reason.contains("#42: implementation failed"));
+                            } else {
+                                outcome.into_result().unwrap();
+                            }
                         }
                     }
                     let expected = if reflection_fails || kind == "plan" && !observe_triage {
@@ -3696,6 +3966,161 @@ mod tests {
                 .any(|(key, _)| matches!(key.as_str(), "CARGO_NET_OFFLINE" | "npm_config_offline"))
         );
         assert!(!verification.join(".cargo/credentials.toml").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_links_and_preserves_local_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "oriel-online-cache-{}",
+            random_hex::<12>().unwrap()
+        ));
+        let home = root.join("home");
+        let source = root.join("shared/_cacache");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("shared-entry"), "shared").unwrap();
+        fs::create_dir_all(home.join(".npm")).unwrap();
+        let target = home.join(".npm/_cacache");
+        std::os::unix::fs::symlink(&source, &target).unwrap();
+        for missing_source in [false, true] {
+            if missing_source {
+                fs::remove_dir_all(&source).unwrap();
+                fs::remove_dir_all(&target).unwrap();
+                std::os::unix::fs::symlink(&source, &target).unwrap();
+            }
+            let environment = dependency_cache_environment_from(&home, None, None, false).unwrap();
+            assert!(environment.iter().any(|(key, _)| key == "npm_config_cache"));
+            assert!(fs::symlink_metadata(&target).unwrap().is_dir());
+            fs::write(target.join("local-entry"), "local").unwrap();
+            dependency_cache_environment_from(&home, None, None, false).unwrap();
+            assert_eq!(
+                fs::read_to_string(target.join("local-entry")).unwrap(),
+                "local"
+            );
+            if !missing_source {
+                assert_eq!(
+                    fs::read_to_string(source.join("shared-entry")).unwrap(),
+                    "shared"
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn assert_recovered_npm_cache(home: &Path) {
+        let environment = dependency_cache_environment_from(home, None, None, false).unwrap();
+        let cache = environment
+            .iter()
+            .find(|(key, _)| key == "npm_config_cache")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap();
+        assert_ne!(cache, home.join(".npm"));
+        assert!(cache.starts_with(home));
+        assert!(fs::symlink_metadata(&cache).unwrap().is_dir());
+        fs::create_dir_all(cache.join("_cacache/content-v2/sha512")).unwrap();
+        fs::write(cache.join("_cacache/content-v2/sha512/entry"), "cached").unwrap();
+    }
+
+    #[test]
+    fn recovered_cache_is_usable_by_npm_offline() {
+        // npm is optional for Rust-only installations. When present, exercise
+        // its real cache layout rather than just writing our own test entry.
+        match std::process::Command::new("npm").arg("--version").output() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            result => assert!(result.unwrap().status.success()),
+        }
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-process-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(root.join(".npm")).unwrap();
+        let obstruction = root.join(".npm/_cacache");
+        fs::write(&obstruction, "preserve cache obstruction").unwrap();
+        let environment = dependency_cache_environment_from(&root, None, None, false).unwrap();
+        let output = std::process::Command::new("npm")
+            .args(["--offline", "cache", "verify"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &root)
+            .envs(environment)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "npm cache verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&obstruction).unwrap(),
+            "preserve cache obstruction"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_obstructed_parent_without_deleting_it() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-parent-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join(".npm");
+        fs::write(&target, "preserve parent obstruction").unwrap();
+        assert_recovered_npm_cache(&root);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "preserve parent obstruction"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_preserves_parent_link_and_its_destination() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-link-{}", random_hex::<12>().unwrap()));
+        let home = root.join("home");
+        let shared = root.join("shared");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("entry"), "preserved").unwrap();
+        std::os::unix::fs::symlink(&shared, home.join(".npm")).unwrap();
+        assert_recovered_npm_cache(&home);
+        assert_eq!(fs::read_link(home.join(".npm")).unwrap(), shared);
+        assert_eq!(
+            fs::read_to_string(shared.join("entry")).unwrap(),
+            "preserved"
+        );
+        assert!(!shared.join("_cacache").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_obstructing_file_without_deleting_it() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-file-{}", random_hex::<12>().unwrap()));
+        fs::create_dir_all(root.join(".npm")).unwrap();
+        let target = root.join(".npm/_cacache");
+        fs::write(&target, "preserve cache obstruction").unwrap();
+        assert_recovered_npm_cache(&root);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "preserve cache obstruction"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn online_npm_cache_recovers_link_to_non_directory() {
+        let root =
+            std::env::temp_dir().join(format!("oriel-npm-enotdir-{}", random_hex::<12>().unwrap()));
+        let home = root.join("home");
+        let source = root.join("shared-file");
+        fs::create_dir_all(home.join(".npm")).unwrap();
+        fs::write(&source, "preserve shared file").unwrap();
+        let target = home.join(".npm/_cacache");
+        std::os::unix::fs::symlink(&source, &target).unwrap();
+        dependency_cache_environment_from(&home, None, Some(&root), false).unwrap();
+        // Exercise the nested directory creation that npm's content cache needs.
+        fs::create_dir_all(target.join("content-v2/sha512")).unwrap();
+        assert!(fs::symlink_metadata(&target).unwrap().is_dir());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "preserve shared file");
         fs::remove_dir_all(root).unwrap();
     }
 
