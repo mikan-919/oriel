@@ -62,7 +62,8 @@ export type SnapshotPreparation = {
 export type WorkflowHow = LinearHow & { team: { id: string }; attachments: { url: string }[] };
 export type GithubPull = {
   number: number; html_url: string; body: string | null; state: "open" | "closed"; merged_at: string | null; draft: boolean;
-  head: { ref: string; sha: string; repo: { id: number } | null }; base: { ref: string; repo: { id: number } };
+  head: { ref: string; sha: string; repo: { id: number } | null }; base: { ref: string; sha: string; repo: { id: number } };
+  mergeable?: boolean | null;
 };
 export type GithubComment = { id: number; body: string; user: { type: string; login: string }; created_at: string };
 type CheckAnnotation = { path: string; start_line: number; annotation_level: string; title?: string; message: string; raw_details?: string };
@@ -336,7 +337,7 @@ export class Integrations extends WorkflowReader {
           if (!current.row.canonical_oid) this.auth.fail(409, "Code Git credentials require a current matching sealed branch");
           if (grant.kind === "respond") {
             if (!grant.feedback || current.row.pull_request?.number !== grant.feedback.pr_number ||
-              !(await this.workflowFeedback(context, { ...current.row.pull_request, head_oid: grant.feedback.head_oid }, grant.feedback.key))) this.auth.fail(409, "Admitted response feedback is no longer current");
+              !(await this.workflowFeedback(context, { ...current.row.pull_request, head_oid: grant.feedback.head_oid }, current.facts.snapshot.target_oid, grant.feedback.key))) this.auth.fail(409, "Admitted response feedback is no longer current");
           }
         }
         leased();
@@ -708,7 +709,7 @@ export class Integrations extends WorkflowReader {
       const pr = current.row.pull_request!;
       if (pr.head_oid !== body.head_oid || current.row.canonical_oid !== body.head_oid) this.auth.fail(409, "Response commit does not match the current PR and canonical heads");
       if (!grant.feedback || grant.feedback.key !== body.feedback_key || grant.feedback.pr_number !== pr.number) this.auth.fail(409, "Response does not match the lease's admitted feedback");
-      const original = await this.workflowFeedback(context, { ...pr, head_oid: grant.feedback.head_oid }, body.feedback_key);
+      const original = await this.workflowFeedback(context, { ...pr, head_oid: grant.feedback.head_oid }, current.facts.snapshot.target_oid, body.feedback_key);
       const valid = original?.key === body.feedback_key;
       const marker = await this.workflowMarker(context, "response", body.feedback_key);
       const comments = await this.workflowList<GithubComment>(context, `${context.path}/issues/${pr.number}/comments`);

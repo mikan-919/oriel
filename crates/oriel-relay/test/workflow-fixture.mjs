@@ -70,7 +70,8 @@ export function workflowFixture() {
     return failure ? new Response("private-provider-diagnostic", { status: typeof failure === "number" ? failure : 503 }) : null;
   };
   const howNode = how => ({ ...structuredClone(how), attachments: page(how.attachments, null, fixture.attachmentPageSize), comments: page(how.comments ?? [], null, fixture.issuePageSize) });
-  const pullNode = pr => ({ ...structuredClone(pr), head: { ...structuredClone(pr.head), sha: fixture.refs.get(pr.head.ref) ?? pr.head.sha } });
+  const pullNode = pr => ({ ...structuredClone(pr), head: { ...structuredClone(pr.head), sha: fixture.refs.get(pr.head.ref) ?? pr.head.sha },
+    base: { ...structuredClone(pr.base), sha: pr.base.sha ?? fixture.refs.get(pr.base.ref) } });
   fixture.fetch = async request => {
     const url = new URL(request.url);
     if (url.origin === "https://pipelines.actions.githubusercontent.com") {

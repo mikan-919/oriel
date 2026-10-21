@@ -313,7 +313,7 @@ export class WorkflowReader {
                 if (row.phase === "review") {
                   const exhausted: string[] = [];
                   const ci: { value?: WorkflowCI } = {};
-                  row.feedback = await this.workflowFeedback(context, row.pull_request!, undefined, exhausted, ci);
+                  row.feedback = await this.workflowFeedback(context, row.pull_request!, snapshot.target_oid, undefined, exhausted, ci);
                   row.ci = ci.value;
                   if (exhausted.length && !row.feedback) row.blocked_reason = exhausted.join(", ");
                 }
@@ -418,7 +418,7 @@ export class WorkflowReader {
     return cursors;
   }
 
-  protected async workflowFeedback(context: WorkflowContext, pr: PullRequest, requestedKey?: string, exhausted?: string[], ci?: { value?: WorkflowCI }): Promise<Feedback | null> {
+  protected async workflowFeedback(context: WorkflowContext, pr: PullRequest, targetOid: string, requestedKey?: string, exhausted?: string[], ci?: { value?: WorkflowCI }): Promise<Feedback | null> {
     if (ci) ci.value = {head_oid:pr.head_oid, acquisition:"unavailable", fetched_at:new Date().toISOString(), status:"unknown", checks:[]};
     const currentChecks: Check[] = [];
     for (let page = 1; ; page++) {
@@ -450,6 +450,25 @@ export class WorkflowReader {
     ]);
     context.check();
     const cursors = await this.workflowCursors(context, comments, "response");
+    if (requestedKey === undefined || requestedKey.startsWith("conflict:")) {
+      // List-pulls does not compute mergeability. null means GitHub is still
+      // calculating; a later scan will read it again without starting a repair.
+      const native = await this.workflowGithub<GithubPull>(context, `${context.path}/pulls/${pr.number}`);
+      if (!native) this.auth.fail(502, "PR mergeability is unavailable");
+      if (native.number !== pr.number || native.state !== "open" || native.merged_at || native.draft ||
+          native.head.ref !== pr.branch || native.head.repo?.id !== context.repository.repository_id ||
+          native.base.ref !== pr.base_branch || native.base.repo.id !== context.repository.repository_id ||
+          native.base.sha !== targetOid || !OID.test(native.head.sha)) this.auth.fail(409, "PR mergeability identity or target changed; retry discovery");
+      const key = `conflict:${pr.number}:${pr.head_oid}:${targetOid}`;
+      const admitted = requestedKey === key;
+      if (native.head.sha !== pr.head_oid && !admitted) this.auth.fail(409, "PR head changed during mergeability discovery");
+      // Reconstruct only the admitted cursor after our verified push changes the
+      // head and resolves the conflict. The lease still pins approval and target.
+      if (!cursors.has(key) && (requestedKey === undefined || admitted) &&
+          (native.mergeable === false || admitted && native.head.sha !== pr.head_oid)) {
+        return { key, kind: "merge_conflict", body: `PR #${pr.number} conflicts with ${pr.base_branch} at ${targetOid}. Integrate that exact target commit into the existing PR branch, resolve conflicts within the approved HOW, and rerun configured verification.`, comments: [] };
+      }
+    }
     const submitted = reviews.filter(review => review.state !== "PENDING" && review.submitted_at)
       .sort((a, b) => a.submitted_at!.localeCompare(b.submitted_at!) || a.id - b.id);
     const latest = new Map<string, typeof reviews[number]>();
