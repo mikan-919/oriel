@@ -5,8 +5,11 @@ import { attachmentBytes, ATTACHMENT_LIMIT, reservedAttachment } from "../src/wo
 
 // Exercise workerd's actual structured-clone attachment limit, not JSON size.
 test("reserved attachments at the admission boundary serialize in workerd", async () => {
-  const worker = new Miniflare({ modules: true, compatibilityDate: "2026-10-01",
-    durableObjects: { STORE: "Store" }, script: `
+  const worker = new Miniflare({ workers: [{ config: {
+    name: "attachment-test", compatibilityDate: "2026-10-01",
+    env: { STORE: { type: "durable-object", worker: "attachment-test", exportName: "Store" } },
+    exports: { Store: { type: "durable-object", storage: "sqlite" } },
+    manifest: { mainModule: "index.js", modules: { "index.js": { type: "esm", contents: `
       export class Store {
         async fetch(request) {
           const pair = new WebSocketPair();
@@ -19,7 +22,8 @@ test("reserved attachments at the admission boundary serialize in workerd", asyn
         }
       }
       export default { fetch(request, env) { return env.STORE.get(env.STORE.idFromName("test")).fetch(request); } };
-    ` });
+    ` } } },
+  } }] });
   const binding = { user_id: "u", device_id: "d", host_hash: "h", repository_generation: "r", github_generation: "g", linear_generation: "l", repository_id: 1, team_id: "t", repository: { owner: "owner", name: "repo" } };
   const admission = { kind: "implement", issue_number: 42, version: "a".repeat(64), branch: "work", linear_id: "id",
     task: { issue_number: 42, title: "Task", url: "https://example.test/42", how_identifier: null, how_url: null },

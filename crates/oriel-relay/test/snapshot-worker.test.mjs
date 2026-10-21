@@ -5,10 +5,11 @@ import { workflowFixture } from "./workflow-fixture.mjs";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import vm from "node:vm";
+import * as capacity from "../src/workflow-capacity.ts";
 
 test("HTTP discovery renews control ownership and final validation preserves pending notifications", () => {
   let now = 40000, schedules = 0;
-  const c = vm.createContext({ Date: { now: () => now }, WebSocket: { OPEN: 1 } });
+  const c = vm.createContext({ ...capacity, Date: { now: () => now }, WebSocket: { OPEN: 1 } });
   const source = stripTypeScriptTypes(readFileSync(new URL("../src/workflow-lease.ts", import.meta.url), "utf8"), { mode: "transform" });
   vm.runInContext(source.replace(/^import[\s\S]*?;/gm, "").replace(/^export /gm, "") + "\nglobalThis.WorkflowLeases = WorkflowLeases;", c);
   const device = { device_id: "device", user_id: "user", host_hash: "host", repository_generation: "revision" };
@@ -54,7 +55,7 @@ function progressHarness() {
     }
     close(code) { this.readyState = 3; this.code = code; }
   }
-  const c = vm.createContext({ Date, TextEncoder, Uint8Array, crypto,
+  const c = vm.createContext({ ...capacity, Date, TextEncoder, Uint8Array, crypto,
     WebSocket: { OPEN: 1 },
     WebSocketPair: class { constructor() { return [new Socket(), new Socket()]; } },
     Response: class { constructor(body, options) { Object.assign(this, options); } },
