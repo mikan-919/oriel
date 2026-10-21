@@ -14,7 +14,10 @@ function setup() {
   vm.runInContext(source.replace(/^import[\s\S]*?;/gm, "").replace(/^export /gm, "") + "\nglobalThis.Reader = WorkflowReader;", scope);
   const reader = new scope.Reader({ INTEGRATION_ENCRYPTION_KEY: "a".repeat(64) }, { fail(status, message) { throw new Error(`${status}: ${message}`); } });
   const runs = [], comments = [], statuses = [];
-  reader.workflowGithub = async (_context, path) => path.includes("/commits/")
+  reader.workflowGithub = async (_context, path) => path.includes("/pulls/")
+    ? { number: 42, state: "open", draft: false, merged_at: null, mergeable: true,
+      head: { ref: "work", sha: head, repo: { id: 501 } }, base: { ref: "main", sha: "1".repeat(40), repo: { id: 501 } } }
+    : path.includes("/commits/")
     ? { check_runs: runs.filter(run => run.head_sha === path.split("/commits/")[1].split("/")[0]) }
     : runs.find(run => run.id === Number(path.split("/").at(-1))) ?? null;
   reader.workflowList = async (_context, path) => path.includes("/issues/") ? comments : path.endsWith("/statuses") ? statuses : [];
@@ -24,7 +27,7 @@ function setup() {
   };
   const read = async requested => {
     const ci = {}, exhausted = [];
-    const feedback = await reader.workflowFeedback(context, { number: 42, head_oid: head }, requested, exhausted, ci);
+    const feedback = await reader.workflowFeedback(context, { number: 42, head_oid: head, branch: "work", base_branch: "main" }, "1".repeat(40), requested, exhausted, ci);
     return { feedback, ci: ci.value, exhausted };
   };
   const record = async key => comments.push({ created_at: "2026-02-01T00:00:00Z", body: await reader.workflowMarker(context, "response", key) + await reader.workflowMarker(context, "response-head", `${key}:${oldHead}`) });

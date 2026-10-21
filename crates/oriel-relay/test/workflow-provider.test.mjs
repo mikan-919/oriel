@@ -594,6 +594,116 @@ test("restart derives invalidate-only recovery from unique prior native Git iden
   } finally { await s.close(); }
 });
 
+test("managed PR conflicts resume approved work without comments or failed checks", async () => {
+  const s = await setup();
+  try {
+    const how = s.fixture.addHow();
+    const row = (await s.snapshot()).workflows[0], implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    assert.equal((await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" })).status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = s.fixture.pulls[0];
+    s.fixture.addCheck({ conclusion: "success" });
+    for (const mergeable of [undefined, null, true]) {
+      pr.mergeable = mergeable;
+      assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    }
+    pr.mergeable = false;
+    const conflict = (await s.snapshot()).workflows[0];
+    assert.equal(conflict.phase, "review"); assert.equal(conflict.ci.status, "success");
+    assert.equal(conflict.feedback.kind, "merge_conflict");
+    assert.equal(conflict.feedback.key, `conflict:${pr.number}:${head}:${s.fixture.target_oid}`);
+    const lease = await s.claim("respond");
+    await s.message({ type: "release", lease_id: lease });
+    const review = { ...how.state };
+    for (const disabled of ["triage", "configuration", "draft", "unmanaged"]) {
+      if (disabled === "triage") how.state = { ...s.fixture.states.find(state => state.name === "Triage") };
+      if (disabled === "configuration") s.fixture.autonomous = false;
+      if (disabled === "draft") pr.draft = true;
+      if (disabled === "unmanaged") pr.body = "Human-managed PR";
+      const blocked = (await s.snapshot()).workflows[0];
+      assert.equal(blocked.feedback, null, disabled);
+      const rejected = await s.message({ type: "claim", kind: "respond", issue_number: 42, version: blocked.version, branch: blocked.branch });
+      assert.equal(rejected.type, "rejected", disabled);
+      how.state = { ...review }; s.fixture.autonomous = true; pr.draft = false; pr.body = "Closes #42";
+    }
+  } finally { await s.close(); }
+});
+
+test("conflict repairs survive hibernation, acknowledge the admitted head once and pin the target", async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0], implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    const published = await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" });
+    assert.equal(published.status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = s.fixture.pulls[0]; pr.mergeable = false;
+    const feedback = (await s.snapshot()).workflows[0].feedback, lease = await s.claim("respond");
+    const token = () => s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: lease }, hostHeaders);
+    assert.equal((await token()).status, 200);
+    await s.worker.unsafeEvictDurableObject("oriel-relay", "AccountRegistry", { name: "accounts" });
+    assert.equal((await token()).status, 200);
+    const repaired = "4".repeat(40); s.fixture.refs.set(row.branch, repaired); pr.mergeable = true;
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    assert.equal((await token()).status, 200, "The admitted cursor remains valid for verified push readback");
+    const response = { head_oid: repaired, verified: true, feedback_key: feedback.key, summary: "Integrated target and verified conflict resolution" };
+    assert.equal((await s.action(lease, "responded", { ...response, verified: false })).status, 400);
+    assert.equal((await s.action(lease, "responded", response)).status, 200);
+    const comments = s.fixture.comments.get(pr.number).length;
+    assert.equal((await s.action(lease, "responded", response)).status, 200);
+    assert.equal(s.fixture.comments.get(pr.number).length, comments);
+    await s.message({ type: "release", lease_id: lease });
+    // Replaying the same conflicting pair cannot wake another repair.
+    s.fixture.refs.set(row.branch, head); pr.mergeable = false;
+    assert.equal((await s.snapshot()).workflows[0].feedback, null);
+    s.fixture.refs.set(row.branch, repaired);
+    s.fixture.target_oid = "5".repeat(40); s.fixture.refs.set("main", s.fixture.target_oid);
+    const next = (await s.snapshot()).workflows[0].feedback;
+    assert.equal(next.kind, "merge_conflict"); assert.notEqual(next.key, feedback.key);
+    const stale = await s.claim("respond");
+    s.fixture.target_oid = "6".repeat(40); s.fixture.refs.set("main", s.fixture.target_oid);
+    assert.equal((await s.daemon.api(`/api/workflows/${device}/git-token`, { lease_id: stale }, hostHeaders)).status, 409);
+    assert.equal((await s.action(stale, "responded", { ...response, feedback_key: next.key })).status, 409);
+    assert.equal(s.fixture.linears[0].state.name, "In Review");
+  } finally { await s.close(); }
+});
+
+test("mergeability reads reject PR and target races instead of starting stale repairs", async () => {
+  const s = await setup();
+  try {
+    s.fixture.addHow(); const row = (await s.snapshot()).workflows[0], implementation = await s.claim("implement");
+    assert.equal((await s.action(implementation, "begin")).status, 200);
+    const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+    assert.equal((await s.action(implementation, "publish", { head_oid: head, verified: true, summary: "Verified source" })).status, 200);
+    await s.message({ type: "release", lease_id: implementation });
+    const pr = s.fixture.pulls[0]; pr.mergeable = false;
+    for (const race of ["head", "target", "base", "closed", "foreign"]) {
+      let changed = false;
+      s.fixture.holdReads = async ({ operation }) => {
+        if (operation !== "pr" || changed) return;
+        changed = true;
+        if (race === "head") s.fixture.refs.set(row.branch, "3".repeat(40));
+        if (race === "target") s.fixture.refs.set("main", "3".repeat(40));
+        if (race === "base") pr.base.ref = "other";
+        if (race === "closed") pr.state = "closed";
+        if (race === "foreign") pr.head.repo.id = 999;
+      };
+      const stale = await s.daemon.api(`/api/workflows/${device}`, undefined, hostHeaders);
+      assert.equal(stale.status, 409, `${race}: ${JSON.stringify(stale.data)}`);
+      s.fixture.holdReads = undefined;
+      s.fixture.refs.set(row.branch, head); s.fixture.refs.set("main", s.fixture.target_oid);
+      pr.base.ref = "main"; pr.state = "open"; pr.head.repo.id = 501;
+    }
+    s.fixture.failures.set("pr", 503);
+    assert.equal((await s.daemon.api(`/api/workflows/${device}`, undefined, hostHeaders)).status, 502);
+    s.fixture.failures.delete("pr");
+    assert.equal((await s.snapshot()).workflows[0].feedback.kind, "merge_conflict");
+  } finally { await s.close(); }
+});
+
 test("ordinary human and bot PR comments resume once, with edits revoking stale feedback", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
