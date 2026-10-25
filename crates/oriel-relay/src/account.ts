@@ -860,6 +860,11 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       const pending = this.sql.exec<Pairing>("SELECT * FROM pairings WHERE device_id = ?", id).toArray()[0];
       // Expired pending rows still reserve the device ID for its original host secret.
       if (pending) this.checkHost(pending.host_hash, hostHash);
+      // ponytail: 1024 outstanding host reservations per registry; require an
+      // authenticated invitation if new-device demand outgrows this bound.
+      if (!pending && this.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM pairings").toArray()[0].total >= 1024) {
+        fail(429, "Pending device registration limit reached; complete or cancel an existing pairing before starting another");
+      }
       const expiresAt = now() + PAIR_SECONDS;
       this.sql.exec(
         "INSERT INTO pairings (device_id, name, host_hash, token_hash, expires_at, candidate_id) VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, token_hash = excluded.token_hash, expires_at = excluded.expires_at, candidate_id = NULL",
