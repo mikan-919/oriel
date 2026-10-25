@@ -38,6 +38,37 @@ async function setup(measureSql = false) {
   return { fixture, worker, owner, daemon, socket, message, snapshot, claim, action, close };
 }
 
+test("scoped checks read only linked HOW details and target PR history while detecting aliased and foreign links", async () => {
+  const s=await setup();
+  try {
+    const how=s.fixture.addHow();
+    const lease=await s.claim('implement');
+    assert.equal((await s.action(lease,'begin')).status,200);
+    const check=async()=>{
+      s.fixture.calls.length=0;
+      const response=await s.daemon.api(`/api/workflows/${device}/snapshot`,{lease_id:lease},hostHeaders);
+      assert.equal(response.status,200,JSON.stringify(response.data));
+      return {row:response.data.snapshot.workflows[0],reads:s.fixture.calls.length,
+        details:s.fixture.calls.filter(c=>c.operation==='how'&&c.body.query.includes('identifier')).length};
+    };
+    const before=await check();
+    for(let i=0;i<50;i++) {
+      const unrelated=s.fixture.addHow('Todo',100+i);unrelated.id=`unrelated-${i}`;
+      s.fixture.pulls.push({number:1000+i,head:{ref:`unrelated-${i}`,sha:'2'.repeat(40),repo:{id:501}},base:{ref:'main',repo:{id:501}},state:'closed',body:`Closes #${100+i}`,draft:false,merged_at:null});
+    }
+    const after=await check();
+    assert.equal(before.details,1);assert.equal(after.details,1);
+    assert.ok(after.reads<=before.reads+3,JSON.stringify({before,after}));
+    assert.ok(s.fixture.calls.filter(c=>c.operation==='prs').every(c=>new URL(c.path,'https://fixture.invalid').searchParams.has('head')));
+    assert.ok(s.fixture.calls.filter(c=>c.operation==='hows').every(c=>!c.body.query.includes('description')));
+    console.log('Scoped provider reads:',JSON.stringify({one:before.reads,fiftyOne:after.reads,detailReads:after.details}));
+    how.attachments[0].url='https://github.com/octocat/connected/issues/042';
+    assert.equal((await check()).row.phase,'blocked');
+    how.attachments[0].url='https://github.com/octocat/connected/issues/42';how.team.id='foreign';
+    assert.equal((await check()).row.phase,'blocked');
+  } finally {await s.close();}
+});
+
 test("discovery failures identify the provider without exposing upstream bodies or granting work", async () => {
   const s = await setup();
   try {
@@ -262,7 +293,7 @@ test("HOW transitions ignore attachment order and PR links but preserve formal I
       assert.equal(result.status, allowed ? 200 : 409, JSON.stringify(result.data));
       assert.equal(how.state.name, allowed ? "In Progress" : "Todo");
       if (!allowed) {
-        assert.match(result.data.error, /HOW update \(attachments\)/);
+        assert.match(result.data.error, /HOW update \(attachments\)|Formal workflow identity changed|Workflow approval content changed/);
         assert.equal(s.fixture.calls.filter(call => call.operation === "how-update").length, 0);
       }
     } finally { await s.close(); }

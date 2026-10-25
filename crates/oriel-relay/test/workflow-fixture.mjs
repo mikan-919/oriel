@@ -64,7 +64,7 @@ export function workflowFixture() {
     return response;
   };
   const record = async (provider, operation, request, body) => {
-    fixture.calls.push({ provider, operation, method: request.method, ...(body === undefined ? {} : { body: structuredClone(body) }) });
+    fixture.calls.push({ provider, operation, method: request.method, path:new URL(request.url).pathname+new URL(request.url).search, ...(body === undefined ? {} : { body: structuredClone(body) }) });
     if (request.method === "GET" || body?.query?.startsWith("query")) await fixture.holdReads?.({ provider, operation, body });
     const failure = fixture.failures.get(operation);
     return failure ? new Response("private-provider-diagnostic", { status: typeof failure === "number" ? failure : 503 }) : null;
@@ -198,7 +198,7 @@ export function workflowFixture() {
     const body = request.method === "GET" ? undefined : await request.json();
     const operation = path === "" ? "repository" : path.startsWith("/contents/") ? "configuration" : path.startsWith("/git/ref/") ? "ref" : path.startsWith("/git/matching-refs/") ? "refs" : path.startsWith("/git/commits/") ? "git-commit" : path.startsWith("/git/trees/") ? "tree" :
       path === "/issues" ? request.method === "POST" ? "what-create" : "whats" : path === "/pulls" ? request.method === "POST" ? "pr-create" : "prs" : path.startsWith("/compare/") ? "compare" :
-      /\/issues\/\d+\/comments$/.test(path) ? request.method === "POST" ? "pr-comment" : "pr-comments" : /\/pulls\/\d+\/reviews$/.test(path) ? "reviews" : /\/pulls\/\d+\/comments$/.test(path) ? "review-comments" : path.endsWith("/annotations") ? "annotations" : path.startsWith("/actions/jobs/") ? path.endsWith("/logs") ? "job-logs" : "action-job" : path.includes("/check-runs") ? "checks" : path.endsWith("/statuses") ? "statuses" : "pr";
+      /\/issues\/\d+\/timeline$/.test(path) ? "timeline" : /\/issues\/\d+\/comments$/.test(path) ? request.method === "POST" ? "pr-comment" : "pr-comments" : /\/pulls\/\d+\/reviews$/.test(path) ? "reviews" : /\/pulls\/\d+\/comments$/.test(path) ? "review-comments" : path.endsWith("/annotations") ? "annotations" : path.startsWith("/actions/jobs/") ? path.endsWith("/logs") ? "job-logs" : "action-job" : path.includes("/check-runs") ? "checks" : path.endsWith("/statuses") ? "statuses" : "pr";
     const failure = await record("github", operation, request, body); if (failure) return failure;
     if (fixture.apiFailed) return new Response("private-provider-diagnostic", { status: 503 });
     if (operation === "repository") return Response.json({ id: 501, node_id: fixture.repository_node_id, default_branch: fixture.base_branch });
@@ -224,7 +224,14 @@ export function workflowFixture() {
       const issue = { number, node_id: `I_${number}`, title: body.title, body: body.body, state: "open", html_url: `https://github.com/octocat/connected/issues/${number}` };
       fixture.issues.push(issue); return uncertain(operation, Response.json(issue, { status: 201 }));
     }
-    if (operation === "prs") return Response.json(restPage(fixture.pulls.map(pullNode), url));
+    if (operation === "timeline") {
+      const number=Number(path.split('/')[2]);
+      return Response.json(restPage(fixture.pulls.filter(pr=>pr.body?.includes(`#${number}`)).map(pr=>({event:'cross-referenced',source:{issue:{number:pr.number,pull_request:{url:`https://api.github.com/repos/octocat/connected/pulls/${pr.number}`}}}})),url));
+    }
+    if (operation === "prs") {
+      const head=url.searchParams.get('head');
+      return Response.json(restPage(fixture.pulls.filter(pr=>!head||`octocat:${pr.head.ref}`===head).map(pullNode), url));
+    }
     if (operation === "pr-create") {
       assert.equal(body.draft, false); assert.equal(body.base, fixture.base_branch);
       const pr = { number: 100 + fixture.pulls.length, html_url: `https://github.com/octocat/connected/pull/${100 + fixture.pulls.length}`, title: body.title, body: body.body, draft: false, state: "open", merged_at: null,
