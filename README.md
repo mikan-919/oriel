@@ -1,6 +1,6 @@
-# Oriel
+<h1 align="center">Oriel</h1>
 
-Orielは、ローカルで動くCodexをブラウザーから操作し、GitHub IssueとLinearを使って開発作業を進めるためのツールです。
+<p align="center">ローカルの Codex をブラウザーから操作し、GitHub Issue と Linear で開発を進めるツール</p>
 
 ## 構成
 
