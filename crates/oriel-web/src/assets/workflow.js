@@ -152,7 +152,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
     for(const button of document.querySelectorAll("[data-work-panel]"))button.addEventListener("click",()=>showPanel(button.dataset.workPanel));
     get("device").addEventListener("change",()=>onDevice(get("device").value));get("create").addEventListener("click",onCreate);
     get("codex").addEventListener("click",()=>onCodex(false));get("control").addEventListener("click",()=>onCodex(true));
-    return {update(next) {
+    return {select(number) { if(rows().some(row=>row.issue.number===number)){selected=number;showPanel("status");render();get("primary").focus();} },update(next) {
         const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify([next.snapshot?.repository_id,next.snapshot?.repository]);
         if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
         if(next.progress?.generation)generation=next.progress.generation;
@@ -175,5 +175,49 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         const progress=next.progress;
         if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const key=JSON.stringify([progress.updated_at,title,progress.verification]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
         render();
+    }};
+}
+
+export function mountWorkflowNotifications(onSelect) {
+    const toggle=document.getElementById("workflow-notifications-toggle"), status=document.getElementById("workflow-notifications-status");
+    let userId="", scope="", enabled=false, previous=new Map(), current=new Set();
+    const supported=()=>typeof Notification!=="undefined";
+    const close=()=>{for(const notification of current)notification.close();current.clear();};
+    const preference=()=>{try{localStorage.setItem("oriel:notifications:"+userId,String(enabled));}catch{}};
+    function render() {
+        toggle.disabled=!userId||!supported();toggle.textContent=enabled?"通知を無効にする":"通知を有効にする";
+        status.textContent=!supported()?"このブラウザーは通知に対応していません。":!userId?"ログインすると通知を設定できます。":Notification.permission==="denied"?"通知はブラウザーで拒否されています。許可の変更はブラウザーの設定で行ってください。":enabled&&Notification.permission==="granted"?"通知は有効です。この画面を開いている間、承認待ち・レビュー待ち・停止を通知します。":"通知は無効です。";
+    }
+    toggle.addEventListener("click",async()=>{
+        const owner=userId;
+        if(enabled){enabled=false;close();preference();render();return;}
+        try{const permission=await Notification.requestPermission();if(owner!==userId)return;enabled=permission==="granted";preference();}catch{enabled=false;}
+        render();
+    });
+    return {update(model) {
+        if(userId!==(model.userId||"")) {
+            userId=model.userId||"";enabled=false;
+            try{enabled=!!userId&&localStorage.getItem("oriel:notifications:"+userId)==="true";}catch{}
+        }
+        const nextScope=JSON.stringify([userId,model.device?.device_id,model.snapshot?.repository_id,model.snapshot?.repository]);
+        if(scope!==nextScope){scope=nextScope;previous.clear();close();}
+        render();if(!userId||!model.snapshot)return;
+        const next=new Map();
+        for(const row of model.snapshot.workflows) {
+            const old=previous.get(row.issue.number);
+            const paused=model.live&&model.progress?.task?.issue_number===row.issue.number&&model.progress.state==="paused";
+            const key=paused?"paused":!model.live&&old?.phase===row.phase?old.key:row.phase;
+            next.set(row.issue.number,{phase:row.phase,key});
+            if(!old||old.key===key||!enabled||!supported()||Notification.permission!=="granted"||!["triage","review","blocked","paused"].includes(key))continue;
+            const label={triage:"承認待ち",review:"レビュー待ち",blocked:"停止中",paused:"一時停止"}[key];
+            try {
+                const notification=new Notification("#"+row.issue.number+" "+row.issue.title,{body:label,tag:scope+":"+row.issue.number});
+                current.add(notification);if(current.size>32){const first=current.values().next().value;first.close();current.delete(first);}
+                const targetScope=scope;
+                notification.onclick=()=>{notification.close();current.delete(notification);if(scope===targetScope&&enabled){window.focus();onSelect(row.issue.number);}};
+                notification.onclose=()=>current.delete(notification);
+            } catch { /* Notification failure must not interrupt workflow controls. */ }
+        }
+        previous=next;
     }};
 }

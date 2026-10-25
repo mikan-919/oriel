@@ -5,7 +5,7 @@ function terminalExitReason(exit) {
 }
 
 import {mountCodex} from "./codex.js";
-import {mountWorkflow} from "./workflow.js";
+import {mountWorkflow, mountWorkflowNotifications} from "./workflow.js";
 const codexPanel = mountCodex();
 const workflowPanel = mountWorkflow({
     onDevice: id => perform(async () => {
@@ -21,9 +21,11 @@ const workflowPanel = mountWorkflow({
     },
     onCreate: () => { document.getElementById("what-status").textContent = pendingWhat ? "元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。" : ""; document.getElementById("workflow-create-dialog").showModal(); },
 });
+const workflowNotifications = mountWorkflowNotifications(number => {showPage("workflow");workflowPanel.select(number);});
 function renderWorkflowPanel() {
     const device = devices.find(item => item.device_id === repositoryDeviceId);
     workflowPanel.update({snapshot: workflowSnapshot, device, devices, progress: device && progressSnapshot.get(device.device_id), live:progressStream === "live", userId:user?.id, busy, pendingWhat:!!pendingWhat});
+    workflowNotifications.update({snapshot:workflowSnapshot,device,progress:device&&progressSnapshot.get(device.device_id),live:progressStream==="live",userId:user?.id});
 }
 
 const pairing = window.orielPairing;

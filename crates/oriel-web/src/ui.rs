@@ -138,6 +138,11 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                         <p id="workflow-progress-status" role="status" aria-live="polite" aria-atomic="true">"ログインすると実行状況を確認できます。"</p>
                         <ul id="devices"></ul>
                     </section>
+                    <section data-region="settings" aria-labelledby="notifications-heading">
+                        <h2 id="notifications-heading">"ブラウザー通知"</h2>
+                        <p id="workflow-notifications-status" role="status"></p>
+                        <button id="workflow-notifications-toggle" type="button">"通知を有効にする"</button>
+                    </section>
                     (workflow)
                     <section data-region="codex" aria-labelledby="codex-heading">
                         <h2 id="codex-heading">"Codexを操作"</h2>
