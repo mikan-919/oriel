@@ -34,7 +34,7 @@ export class WorkflowReader {
       if (!response.ok) this.auth.fail(502, "GitHub repository access could not be confirmed");
       const result = await response.json() as { repositories: { id: number }[] };
       if (!Array.isArray(result.repositories)) this.auth.fail(502, "GitHub repository access could not be confirmed");
-      if (result.repositories.some(repository => repository.id === context.repository.repository_id)) accessible = true;
+      if (result.repositories.some(repository => repository.id === context.repository.repository_id)) { accessible = true; break; }
       if (result.repositories.length < 100) break;
     }
     if (!accessible) this.auth.fail(403, "GitHub repository is no longer accessible");
