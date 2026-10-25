@@ -352,6 +352,12 @@ test("Missing provider encryption configuration leaves pairing and empty connect
       const result = await owner.api(`/api/integrations/${provider}/start`, {});
       assert.equal(result.status, 503);
       assert.match(result.data.error, /INTEGRATION_ENCRYPTION_KEY/);
+      assert.equal((await owner.api(`/api/integrations/${provider}/select`, {})).status, 503);
+      assert.deepEqual((await owner.api(`/api/integrations/${provider}/disconnect`, {})).data, {ok: true, revoked: true});
+      const user = (await owner.api("/api/session")).data.user.id;
+      await storage.exec("INSERT INTO account_integrations (user_id, provider, generation, active) VALUES (?, ?, ?, ?)", user, provider, "old-generation", "unreadable-credential");
+      assert.deepEqual((await owner.api(`/api/integrations/${provider}/disconnect`, {})).data, {ok: true, revoked: false});
+      assert.equal((await owner.api("/api/integrations")).data[provider], null);
     }
     assert.deepEqual((await owner.api("/api/integrations")).data, {
       github: null, linear: null, choices: { github: [], linear: [] },

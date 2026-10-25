@@ -1,7 +1,7 @@
 import { executionAdmission } from "./workflow-capacity";
 import { WorkflowReader } from "./workflow-reader";
 import type { WorkflowLeases } from "./workflow-lease";
-import { digest, githubIssueLink, OID, parseConfiguration, UUID, validBranch, type Feedback, type GithubWhat, type LinearHow, type LinearState, type PullRequest, type WorkflowAdmission, type WorkflowAuthority, type WorkflowBinding, type WorkflowClaim, type WorkflowGrant, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
+import { digest, OID, UUID, type Feedback, type GithubWhat, type LinearHow, type LinearState, type WorkflowAdmission, type WorkflowAuthority, type WorkflowBinding, type WorkflowClaim, type WorkflowGrant, type WorkflowRow, type WorkflowSnapshot } from "./workflow";
 
 export interface IntegrationEnv {
   PUBLIC_ORIGIN: string;
@@ -44,9 +44,6 @@ export type Auth = {
   json(data: unknown, status?: number): Response;
 };
 const SECRET = /^[a-f0-9]{64}$/;
-const GITHUB_COMMAND = "/oriel";
-const githubCommand = (body: string) => /^[\/／]oriel(?:\s|$)/i.test(body.trimStart())
-  ? { planning: /^[\/／]oriel\s+how(?:\s|$)/i.test(body.trimStart()) } : null;
 const PERMISSIONS = { contents: "write", issues: "write", pull_requests: "write", metadata: "read" };
 const TOKEN_ERRORS = ["incorrect_client_credentials", "bad_verification_code", "redirect_uri_mismatch", "access_denied", "invalid_grant", "invalid_client"];
 const now = () => Math.floor(Date.now() / 1000);
@@ -910,9 +907,9 @@ export class Integrations extends WorkflowReader {
     const body = await this.auth.body(request);
     check();
     const provider = browser[1] as Provider;
+    if (browser[2] === "disconnect") return this.disconnect(session.user.id, provider, check);
     this.config(provider);
     if (browser[2] === "start") return this.start(session, provider);
-    if (browser[2] === "disconnect") return this.disconnect(session.user.id, provider, check);
     return this.select(session.user.id, provider, body, check);
   }
 
