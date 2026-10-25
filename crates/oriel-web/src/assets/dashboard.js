@@ -741,10 +741,11 @@ async function waitForPair() {
         return;
     }
     pairStatus.textContent = "端末側の承認を待っています。端末でアカウント名とIDを確認してください。このタブを開いたままにしてください。";
+    scheduleDevices();
     const epoch = accountEpoch;
     try {
         await refreshDevices();
-        // The shared device refresh loop checks registration and pairing expiry.
+        // Only the pending pairing uses a short discovery interval.
     } catch (error) {
         if (!currentAccount(epoch)) return;
         pairStatus.textContent = errorText(error) + " 端末を更新して再確認してください。";
@@ -1217,7 +1218,7 @@ function scheduleDevices() {
             try { await refreshDevices(); } catch (_) {}
         }
         if (currentAccount(epoch)) scheduleDevices();
-    }, 900000);
+    }, pairClaimed && pairing.token && pairOwner?.id === user?.id ? 2000 : 900000);
 }
 render();
 perform(async () => {

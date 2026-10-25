@@ -103,7 +103,7 @@ test('background polling stops for hidden tabs and resumes device discovery when
   let periodic;
   let visibility;
   let timer;
-  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null,
+  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null, pairClaimed: false,
     progressStream: 'connecting', progressReceivedAt: 0, busy: false, workflowRefreshing: false,
     repositoryDeviceId: 'device', dashboard: {hidden: false}, status: {},
     document: {hidden: false, addEventListener(type, callback) {if (type === 'visibilitychange') visibility = callback;}},
@@ -141,6 +141,22 @@ test('background polling stops for hidden tabs and resumes device discovery when
   c.accountEpoch++;
   await timer();
   assert.equal(deviceRequests, 2, 'An old account timer cannot refresh a new account');
+});
+
+test('pairing polls only its owner while pending and returns to the normal interval after completion or expiry', async () => {
+  let callback, delay, reads = 0;
+  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null,
+    pairClaimed: true, pairing: {token: 'token'}, pairOwner: {id: 'owner'}, document: {hidden: false},
+    clearTimeout() {}, setTimeout(fn, milliseconds) {callback = fn; delay = milliseconds; return 1;},
+    currentAccount: epoch => c.accountEpoch === epoch && !!c.user,
+    refreshDevices: async () => {reads++; c.pairing.token = null;}});
+  vm.runInContext(source.slice(source.indexOf('function scheduleDevices()'), source.indexOf('\nrender();', source.indexOf('function scheduleDevices()'))), c);
+  c.scheduleDevices(); assert.equal(delay, 2000);
+  await callback(); assert.equal(reads, 1); assert.equal(delay, 900000);
+  c.pairing.token = 'token'; c.user = {id: 'other'};
+  c.scheduleDevices(); assert.equal(delay, 900000);
+  c.user = {id: 'owner'}; c.scheduleDevices();
+  c.accountEpoch++; await callback(); assert.equal(reads, 1);
 });
 function element(dataset = {}) {
   return {dataset, textContent: '', attributes: {}, hidden: false, focused: false,
