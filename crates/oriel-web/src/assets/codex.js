@@ -1,13 +1,14 @@
 export function mountCodex() {
     const get = id => document.getElementById(`codex-${id}`);
     const ui = Object.fromEntries(["device", "connect", "status", "engine", "model", "effort", "new", "refresh", "archived",
-        "threads", "fork", "archive", "name", "rename", "review", "review-kind", "review-target", "form", "input", "send",
+        "threads", "more", "fork", "archive", "name", "rename", "review", "review-kind", "review-target", "form", "input", "send",
         "steer", "interrupt", "pause", "resume", "workflow-model", "output", "diff", "requests", "skills", "skill-list",
         "mcp-list", "mcp-form", "mcp-name", "mcp-url"].map(id => [id, get(id)]));
     let owner = null, devices = [], socket = null, generation = 0, engines = [], engineId = "", threadId = "", turnId = "";
     let models = [], active = false, busy = 0, requests = new Map(), answered = new Set(), calls = new Map(), retry;
     const items = new Map();
     let keepalive, expiry;
+    let threadCursor = null, threadListRequest = 0, listedThreads = new Set();
     ui.skillList = ui["skill-list"]; ui.mcpList = ui["mcp-list"]; ui.mcpForm = ui["mcp-form"];
     const node = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
     const button = (text, action) => { const element = node("button", text); element.type = "button"; element.addEventListener("click", () => attempt(action)); return element; };
@@ -20,6 +21,7 @@ export function mountCodex() {
         ui.connect.disabled = !owner || !ui.device.value;
         for (const id of ["new", "refresh", "skills", "pause", "resume", "workflow-model"]) ui[id].disabled = !connected;
         ui.new.disabled ||= automatic || !!busy;
+        ui.more.disabled = !connected || !!busy || !threadCursor;
         for (const id of ["fork", "archive", "rename", "review", "send"]) ui[id].disabled = !connected || !threadId || automatic || active || !!busy;
         ui.name.disabled = !connected || automatic || active || !!busy;
         ui.input.disabled = !connected || !!busy;
@@ -39,6 +41,7 @@ export function mountCodex() {
         rejectCalls("接続が切れました。送信済みの操作を自動で再送しません。");
         engines = []; engineId = ""; threadId = ""; turnId = ""; active = false;
         requests.clear(); answered.clear(); ui.requests.replaceChildren();
+        threadListRequest++; threadCursor = null; listedThreads.clear(); ui.more.hidden = true;
         ui.engine.replaceChildren(); ui.threads.replaceChildren();
         const placeholder = node("option", "接続すると選択できます"); placeholder.value = ""; placeholder.disabled = true; ui.engine.append(placeholder);
         if (clear) { items.clear(); ui.output.replaceChildren(); ui.diff.textContent = ""; ui.diff.parentElement.hidden = true; ui.input.value = ""; ui.name.value = ""; }
@@ -159,14 +162,22 @@ export function mountCodex() {
         if (event.method === "oriel/engineEnded") { active = false; status("Codexの実行が終了しました。保存済みの作業は残っています。"); }
         controls();
     }
-    async function refreshThreads() {
-        const result = await rpc("thread/list", {limit: 50, archived: ui.archived.checked});
-        ui.threads.replaceChildren();
+    async function refreshThreads(more = false) {
+        const current = ++threadListRequest, currentGeneration = generation, engine = engineId, archived = ui.archived.checked;
+        const cursor = more ? threadCursor : null;
+        if (more && !cursor) return;
+        if (!more) { threadCursor = null; listedThreads.clear(); ui.more.hidden = true; ui.threads.replaceChildren(); }
+        const result = await rpc("thread/list", {limit: 50, archived, ...(cursor ? {cursor} : {})});
+        if (current !== threadListRequest || currentGeneration !== generation || engine !== engineId || archived !== ui.archived.checked) return;
         for (const thread of result.data ?? []) {
+            if (listedThreads.has(thread.id)) continue;
+            listedThreads.add(thread.id);
             const item = node("li"); item.append(button(thread.name || thread.preview || thread.id, () => openThread(thread.id)));
             const detail = node("span", thread.status?.type === "active" ? "実行中" : ""); item.append(detail); ui.threads.append(item);
         }
         if (!ui.threads.children.length) ui.threads.append(node("li", "保存された会話はありません。"));
+        threadCursor = result.nextCursor && result.nextCursor !== cursor ? result.nextCursor : null;
+        ui.more.hidden = !threadCursor;
     }
     async function openThread(id) {
         if (!selectedEngine()?.automatic) await rpc("thread/resume", {threadId: id});
@@ -237,7 +248,12 @@ export function mountCodex() {
     ui.model.addEventListener("change", fillEfforts);
     ui.new.addEventListener("click", () => attempt(async () => { const {effort, ...params} = modelParams(); const result = await rpc("thread/start", params); showThread(result.thread); await refreshThreads(); }));
     ui.refresh.addEventListener("click", () => attempt(async () => { await refreshThreads(); if (threadId) await openThread(threadId); }));
-    ui.archived.addEventListener("change", () => attempt(refreshThreads));
+    ui.more.addEventListener("click", () => attempt(() => refreshThreads(true)));
+    ui.archived.addEventListener("change", () => {
+        threadId = ""; turnId = ""; active = false; items.clear(); ui.output.replaceChildren(); ui.name.value = ""; ui.diff.textContent = "";
+        status("一覧を切り替えました。操作する会話を選んでください。");
+        attempt(() => refreshThreads());
+    });
     ui.fork.addEventListener("click", () => attempt(async () => { const result = await rpc("thread/fork", {threadId}); showThread(result.thread); await refreshThreads(); }));
     ui.archive.addEventListener("click", () => attempt(async () => { await rpc(ui.archived.checked ? "thread/unarchive" : "thread/archive", {threadId}); threadId = ""; await refreshThreads(); }));
     ui.rename.addEventListener("click", () => attempt(async () => { await rpc("thread/name/set", {threadId, name: ui.name.value}); await refreshThreads(); }));

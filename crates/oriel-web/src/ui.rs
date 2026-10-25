@@ -168,6 +168,7 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                                 <button id="codex-refresh" type="button">"会話を更新"</button>
                                 <label><input id="codex-archived" type="checkbox" />"保管した会話を表示"</label>
                                 <ul id="codex-threads"></ul>
+                                <button id="codex-more" type="button" hidden="">"次の会話を表示"</button>
                             </section>
                             <section aria-labelledby="codex-current-heading">
                                 <h3 id="codex-current-heading">"選択した会話"</h3>
