@@ -12,6 +12,8 @@
 
 ## 利用する
 
+[最初の作業を完了する](docs/getting-started.md)に、端末登録、GitHub・Linearの接続、実行設定、WHATから完了までの手順をまとめています。
+
 [orieldの導入・使い方](crates/orield/README.md)を参照してください。Codexと稼働中のWeb・Relayが必要です。`orield`のインストールには、Web・Relayの配備は含まれません。
 
 `orield workflow`は、GitHub Issueの要求（WHAT）からLinearに実装計画（HOW）を作ります。計画の作成は読み取り専用です。コードの変更には、人によるLinear Todoでの承認と、対象リポジトリの`.oriel.yaml`による実行許可が必要です。
