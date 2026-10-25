@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
     "dev": "cargo run --release -p oriel-web && cf dev",
     "build": "cargo run --release -p oriel-web && cf build",
     "check": "npm run build && cf deploy --prebuilt --dry-run",
@@ -13,9 +14,11 @@
   "devDependencies": {
     "@cloudflare/build-output-utils": "0.8.2",
     "@cloudflare/config": "0.20.0",
+    "@cloudflare/workers-types": "^5.20261025.1",
     "@xterm/addon-fit": "file:test/vendor/xterm-addon-fit-0.11.0.tgz",
     "@xterm/xterm": "file:test/vendor/xterm-xterm-6.0.0.tgz",
     "cf": "1.0.0-beta.5",
+    "typescript": "^7.0.2",
     "wrangler": "^4.136.0"
   }
 }

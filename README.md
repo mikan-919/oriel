@@ -26,14 +26,17 @@ Rust stableとNode.jsを使用します。Nixを使う場合は、`nix develop`�
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 npm --prefix crates/oriel-relay ci
+npm --prefix crates/oriel-relay run typecheck
 npm --prefix crates/oriel-relay run build
 npm --prefix crates/oriel-relay test
 npm --prefix crates/oriel-web ci
+npm --prefix crates/oriel-web run typecheck
 npm --prefix crates/oriel-web run build
 npm --prefix crates/oriel-web test
 ```
 
 このリポジトリで自動実装に使う検証コマンドは[.oriel.yaml](.oriel.yaml)にあります。
+`typecheck`はWorker（Cloudflareで動く処理）のTypeScriptを検査します。実行環境の型を開発依存に含めており、`npm ci`後はビルド・配備・外部認証なしで実行できます。Rustから生成するRelayの入口だけは、`src/wasm.d.ts`で境界の型を定義しています。
 
 ## 公開と配備
 

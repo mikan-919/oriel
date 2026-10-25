@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
     "dev": "cf dev",
     "build": "cf build",
     "test": "node --test test/*.test.mjs",
@@ -13,9 +14,11 @@
   "devDependencies": {
     "@cloudflare/build-output-utils": "0.8.2",
     "@cloudflare/config": "0.20.0",
+    "@cloudflare/workers-types": "^5.20261025.1",
     "@mizchi/vlmkit": "^0.23.0",
     "cf": "1.0.0-beta.5",
     "miniflare": "5.20261001.0-alpha",
+    "typescript": "^7.0.2",
     "wrangler": "^4.136.0",
     "ws": "8.21.0"
   },
