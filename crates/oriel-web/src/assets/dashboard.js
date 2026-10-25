@@ -450,8 +450,7 @@ function connectProgress() {
     try {
         connection = new WebSocket(url);
     } catch (_) {
-        setProgressStream("stale");
-        retryProgress(epoch);
+        staleProgress();
         return;
     }
     progressSocket = connection;
@@ -529,11 +528,7 @@ function connectProgress() {
     });
     connection.addEventListener("close", () => {
         if (!current()) return;
-        clearTimeout(progressExpiry);
-        clearInterval(progressKeepalive);
-        progressSocket = undefined;
-        setProgressStream("stale");
-        retryProgress(epoch);
+        staleProgress();
     });
 }
 

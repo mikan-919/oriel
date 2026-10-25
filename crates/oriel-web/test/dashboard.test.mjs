@@ -40,7 +40,8 @@ test('state notifications reuse provider facts, retain unrelated issues and pres
 });
 
 test('runtime pongs keep unchanged progress live; missing pongs or an initial snapshot expire', () => {
-  for (const baseline of [true, false]) {
+  for (const failure of ['missing-pong', 'close', 'error', 'missing-snapshot']) {
+    const baseline = failure !== 'missing-snapshot';
     let now = 0, serial = 0, connection, answer = true;
     const timers = new Map();
     const add = (callback, delay, repeat = false) => {const id = ++serial; timers.set(id, {callback, delay, repeat, due: now + delay}); return id;};
@@ -72,17 +73,27 @@ test('runtime pongs keep unchanged progress live; missing pongs or an initial sn
       setInterval: (callback, delay) => add(callback, delay, true), clearInterval: id => timers.delete(id)});
     vm.runInContext(source.slice(source.indexOf('function stopProgress()'), source.indexOf('function updateProgressLink(')), c);
     c.connectProgress(); connection.listeners.open();
-    if (baseline) connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', devices: [{device_id: 'device', state: 'idle'}]})});
+    if (baseline) connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', poll_after_seconds: 900, devices: [{device_id: 'device', state: 'idle'}]})});
     advance(baseline ? 90000 : 60000);
     assert.equal(c.progressStream, baseline ? 'live' : 'stale');
     if (baseline) {
       assert.equal(c.progressSocket, connection, 'Unchanged state does not force a reconnect');
       assert.equal(c.progressSnapshot.get('device').state, 'idle');
       assert.equal(connection.sent.filter(raw => raw === 'oriel:ping').length, 6);
-      answer = false; advance(60000);
+      assert.equal(c.workflowPollInterval, 900000);
+      if (failure === 'close') connection.close();
+      else if (failure === 'error') connection.listeners.error();
+      else { answer = false; advance(60000); }
       assert.equal(c.progressStream, 'stale');
       assert.equal(connection.readyState, 3);
     }
+    assert.equal(c.workflowPollInterval, 60000);
+    connection.listeners.error(); connection.listeners.close();
+    assert.equal([...timers.values()].filter(timer => timer.delay === 5000).length, 1);
+    timers.clear(); c.progressRetry = undefined;
+    c.connectProgress(); connection.listeners.open();
+    connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', poll_after_seconds: 900, devices: []})});
+    assert.equal(c.workflowPollInterval, 900000);
   }
 });
 
