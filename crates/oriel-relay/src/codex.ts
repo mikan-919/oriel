@@ -11,7 +11,7 @@ const METHODS = new Set(["engines/list", "workflow/pause", "workflow/resume", "w
 type Attachment = {
   protocol: typeof PROTOCOL; role: "host" | "browser"; device_id: string; user_id: string;
   host_hash: string; repository_generation: string; client_id: string; session_hash: string;
-  expires_at: number; pending: string[];
+  expires_at: number; pending: (string | [string, number])[];
 };
 
 /** Authenticated control only. Transcripts and Codex credentials remain on the device. */
@@ -31,6 +31,14 @@ export class CodexConnections {
     if (!a || a.protocol !== PROTOCOL || ws.readyState !== WebSocket.OPEN || !d ||
       d.user_id !== a.user_id || d.host_hash !== a.host_hash || d.repository_generation !== a.repository_generation ||
       !expiry || expiry <= Date.now()) { this.close(ws); throw new Error("Codex connection is unavailable"); }
+    if (a.role === "browser") {
+      const expired = a.pending.filter(entry => typeof entry === "string" || entry[1] <= Date.now());
+      if (expired.length) {
+        a.pending = a.pending.filter(entry => !expired.includes(entry));
+        ws.serializeAttachment(a);
+        for (const entry of expired) this.send(ws, {type: "response", request_id: typeof entry === "string" ? entry : entry[0], error: "Codex response timed out; operation outcome is unknown. Refresh before retrying."});
+      }
+    }
     return { ...a, expires_at: expiry };
   }
   private sockets(): WebSocket[] { return this.ctx.getWebSockets(TAG).filter(ws => { try { this.live(ws); return true; } catch { return false; } }); }
@@ -90,8 +98,8 @@ export class CodexConnections {
         } else if (message.type === "response" && UUID.test(message.client) && UUID.test(message.request_id)) {
           for (const peer of this.sockets()) {
             const p = this.live(peer);
-            if (p.role === "browser" && p.device_id === a.device_id && p.client_id === message.client && p.pending.includes(message.request_id)) {
-              p.pending = p.pending.filter(id => id !== message.request_id); peer.serializeAttachment(p);
+            if (p.role === "browser" && p.device_id === a.device_id && p.client_id === message.client && p.pending.some(entry => entry[0] === message.request_id)) {
+              p.pending = p.pending.filter(entry => entry[0] !== message.request_id); peer.serializeAttachment(p);
               this.send(peer, { type: "response", request_id: message.request_id, result: message.result, error: message.error });
             }
           }
@@ -101,10 +109,11 @@ export class CodexConnections {
       } else {
         if (message.type !== "rpc" || !UUID.test(message.request_id) || !METHODS.has(message.method) ||
           typeof message.engine !== "string" || message.engine.length > 80 || !message.params ||
-          typeof message.params !== "object" || Array.isArray(message.params) || a.pending.length >= 16 || a.pending.includes(message.request_id)) throw new Error();
+          typeof message.params !== "object" || Array.isArray(message.params) || a.pending.length >= 16 || a.pending.some(entry => entry[0] === message.request_id)) throw new Error();
         const host = this.host(a.device_id);
         if (!host) { this.send(ws, { type: "response", request_id: message.request_id, error: "Codex is offline" }); return; }
-        a.pending.push(message.request_id); ws.serializeAttachment(a);
+        a.pending.push([message.request_id, Date.now() + 90000]); ws.serializeAttachment(a);
+        this.schedule();
         this.send(host, { type: "request", client: a.client_id, request_id: message.request_id,
           engine: message.engine, method: message.method, params: message.params });
       }
@@ -123,7 +132,7 @@ export class CodexConnections {
   }
   deadline(): number | null {
     const live = this.sockets().flatMap(ws => { try { return [this.live(ws)]; } catch { return []; } });
-    return live.length ? Math.min(...live.map(a => a.expires_at)) : null;
+    return live.length ? Math.min(...live.flatMap(a => [a.expires_at, ...a.pending.flatMap(entry => typeof entry === "string" ? [] : [entry[1]])])) : null;
   }
   async alarm(): Promise<void> { for (const ws of this.ctx.getWebSockets(TAG)) { try { this.live(ws); } catch { this.ended(ws); } } }
 }
