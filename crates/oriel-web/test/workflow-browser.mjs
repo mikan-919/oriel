@@ -80,6 +80,31 @@ try {
     panel=mountWorkflow({onDevice(){},onCodex(){},onCreate(){}});update();});
   assert.match(await text('local-checks'),/過去結果の取得経路なし/);
   await page.setViewportSize({width:320,height:800});
+  await page.evaluate(()=>{
+    const row=model.snapshot.workflows[0];
+    row.what_comments=[{author:'reviewer',created_at:'2026-10-25',body:'First comment'}];
+    update();
+    document.querySelector('[data-work-panel="plan"]').click();
+    const discussion=document.querySelector('#workflow-discussion details');
+    discussion.open=true;discussion.querySelector('summary').focus();
+    window.previousSummary=document.activeElement;
+    row.what_comments.push({author:'reviewer',created_at:'2026-10-25',body:'New comment'});
+    update();
+  });
+  assert.equal(await page.evaluate(()=>document.activeElement===window.previousSummary),true);
+  assert.equal(await page.locator('#workflow-discussion details').first().getAttribute('open'),'');
+  await page.evaluate(()=>{
+    document.querySelector('[data-work-panel="status"]').click();
+    document.getElementById('workflow-primary').focus();window.previousLink=document.activeElement;
+    model.snapshot.workflows[0].ci.status='failure';update();
+  });
+  assert.equal(await page.evaluate(()=>document.activeElement===window.previousLink),true);
+  await page.evaluate(()=>{
+    const row=structuredClone(model.snapshot.workflows[0]);row.issue.number=999;row.what_comments=[];
+    model.snapshot.workflows=[row];update();
+  });
+  assert.equal(await page.locator('#workflow-discussion details').first().getAttribute('open'),null);
+  assert.doesNotMatch(await page.locator('#workflow-discussion').textContent(),/New comment/);
   assert.equal(await page.locator('#workflow-ci-badge').isVisible(),true);
   console.log('Workflow browser assertions passed');
 } finally {await browser.close();}
