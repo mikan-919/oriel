@@ -133,6 +133,7 @@ export function mountCodex() {
     function outputItem(item) {
         const key = `${engineId}:${threadId}:${item.id}`;
         let element = items.get(key);
+        if (element && item.type === "commandExecution" && item.aggregatedOutput == null) return;
         if (!element) { element = node("pre"); element.dataset.item = item.id; items.set(key, element); ui.output.append(element); }
         const content = item.type === "agentMessage" ? item.text : item.type === "userMessage" ? (item.content ?? []).map(part => part.text || "").join("\n")
             : item.type === "commandExecution" ? `$ ${item.command || ""}\n${item.aggregatedOutput || ""}`
