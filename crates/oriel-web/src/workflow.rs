@@ -43,7 +43,7 @@ pub(crate) fn page(__cx: &Cx) -> impl View {
                         <div class="task-links" id="workflow-links"></div><p class="check-note" id="workflow-evidence-note"></p>
                     </div>
                     <div class="detail-body prose" id="work-plan-panel" hidden=""><section><h3>"WHAT — 達成したいこと"</h3><p class="how-description" id="workflow-what-body"></p></section><section><h3 id="workflow-how-heading">"HOW — 作業の進め方"</h3><p class="how-description" id="workflow-how-body"></p></section><section><h3>"相談とフィードバック"</h3><div id="workflow-discussion"></div></section></div>
-                    <div class="detail-body" id="work-history-panel" hidden=""><h3 class="section-label">"この画面で受信した実行履歴"</h3><p class="check-note">"履歴はこのタブ内に保持します。再読み込み後の過去の実行履歴は取得していません。"</p><ol class="timeline" id="workflow-history"></ol></div>
+                    <div class="detail-body" id="work-history-panel" hidden=""><h3 class="section-label">"実行履歴"</h3><p class="check-note" id="workflow-history-status" role="status"></p><button id="workflow-history-refresh" type="button">"履歴を更新"</button><ol class="timeline" id="workflow-history"></ol></div>
                 </section>
             </div>
             <details class="workflow-help"><summary>"ワークフローの進め方"</summary><p>"GitHub IssueがWHAT、LinearがHOW、PRが変更のレビューです。HOWを確認し、LinearでTodoに移すと実装を承認します。PRのレビューとマージはGitHubで行います。端末のチェックアウトで orield workflow を実行してください。"</p></details>

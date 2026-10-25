@@ -13,6 +13,7 @@ import { WorkflowLeaseError, WorkflowLeases } from "./workflow-lease";
 import { CodexConnections } from "./codex";
 import { quotaResponse } from "./quota";
 import { AccountState } from "./account-state";
+import { WorkflowHistory } from "./workflow-history";
 import type { WorkflowSnapshot } from "./workflow";
 
 export interface AccountEnv extends IntegrationEnv { RELAY: DurableObjectNamespace; }
@@ -246,6 +247,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
   private readonly integrations: Integrations;
   private readonly workflows: WorkflowLeases;
   private readonly codex: CodexConnections;
+  private readonly history: WorkflowHistory;
   private scheduledAlarm: number | null | undefined;
 
   constructor(ctx: DurableObjectState, env: AccountEnv) {
@@ -336,6 +338,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
       changed: () => this.workflows.publish(),
       body: readBody, fail, json,
     });
+    this.history = new WorkflowHistory(this.ctx.storage.sql);
     this.workflows = new WorkflowLeases(this.ctx, this.integrations,
       id => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0],
       userId => this.sql.exec<Pick<Device, "device_id">>("SELECT device_id FROM devices WHERE user_id = ? ORDER BY name, device_id", userId).toArray(),
@@ -345,7 +348,7 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
           sessionHash, userId, now(),
         ).toArray()[0];
         return session ? session.expires_at * 1000 : null;
-      }, () => this.scheduleSockets(), () => !!env.GITHUB_APP_WEBHOOK_SECRET && !!env.LINEAR_WEBHOOK_SECRET);
+      }, () => this.scheduleSockets(), () => !!env.GITHUB_APP_WEBHOOK_SECRET && !!env.LINEAR_WEBHOOK_SECRET, this.history);
     this.codex = new CodexConnections(this.ctx,
       id => this.sql.exec<Device>("SELECT * FROM devices WHERE device_id = ?", id).toArray()[0],
       (hash, user) => {
@@ -444,6 +447,16 @@ export class AccountRegistry extends DurableObject<AccountEnv> {
         if (request.method === "POST" || request.headers.has("Origin")) this.requireOrigin(request);
       }
       const workflowRoute = url.pathname === "/api/workflows" || url.pathname.startsWith("/api/workflows/");
+      const historyRoute=/^\/api\/workflows\/([a-f0-9]{32})\/history$/.exec(url.pathname);
+      if(historyRoute) {
+        if(request.method!=="GET"||[...url.searchParams.keys()].some(key=>!["issue_number","repository_id"].includes(key)))fail(400,"Invalid history request");
+        const session=await this.requireSession(request);
+        const device=this.sql.exec<Device>("SELECT * FROM devices WHERE device_id=?",historyRoute[1]).toArray()[0];
+        if(!device||device.user_id!==session.user.id)fail(403,"Device belongs to another account");
+        const issue=Number(url.searchParams.get('issue_number')),repository=Number(url.searchParams.get('repository_id'));
+        if(!Number.isSafeInteger(issue)||issue<1||!Number.isSafeInteger(repository)||repository<1)fail(400,"Invalid history scope");
+        return json(this.history.read(session.user.id,repository,device.device_id,issue));
+      }
       if (workflowRoute || url.pathname === "/api/integrations" || url.pathname.startsWith("/api/integrations/")) {
         try {
           response = await (workflowRoute

@@ -20,6 +20,7 @@ const workflowPanel = mountWorkflow({
         status.textContent = control ? "端末に接続後、Codexの一時停止・再開で実行を操作してください。" : "この端末のCodexに接続します。実装の会話は操作するCodexから選択してください。";
     },
     onCreate: () => { document.getElementById("what-status").textContent = pendingWhat ? "元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。" : ""; document.getElementById("workflow-create-dialog").showModal(); },
+    loadHistory: (device,repository,issue) => integrationApi(`/api/workflows/${device}/history?repository_id=${repository}&issue_number=${issue}`),
 });
 const workflowNotifications = mountWorkflowNotifications(number => {showPage("workflow");workflowPanel.select(number);});
 function renderWorkflowPanel() {

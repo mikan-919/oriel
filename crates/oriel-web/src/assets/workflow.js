@@ -16,7 +16,7 @@ export function currentCI(row) {
 }
 export function verificationEvidence(row, snapshot, progress, live) {
     const value=progress?.verification;
-    if (!value) return {value:null, reason:"未受信・過去結果の取得経路なし（再読み込み後を含む）"};
+    if (!value) return {value:null, reason:"この接続の検証報告は未受信です。保存した実行の経過は実行履歴で確認できます。"};
     if (value.issue_number !== row.issue.number) return {value:null,reason:"別の作業の結果です"};
     if (!value.execution_id || !value.configuration_id || !Array.isArray(value.commands)) return {value:null,reason:"旧形式の通知には実行・設定の証拠がありません"};
     if (!["running","success","failure"].includes(value.status) || !Number.isSafeInteger(value.completed) ||
@@ -35,12 +35,25 @@ export function currentVerification(row, snapshot, progress, live) {
     return verificationEvidence(row,snapshot,progress,live).value;
 }
 
-export function mountWorkflow({onDevice, onCodex, onCreate}) {
+export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
     let staged = null, detailIdentity = "";
     const get=id=>staged?.get(id) ?? document.getElementById("workflow-"+id);
     const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;return element;};
     const list=document.getElementById("repository-issues");
     let model={}, selected=null, filter="all", panel="status", scope="", generation="", histories=new Map(), evidence=new Map();
+    const savedHistory=new Map();let historyRequest=0;
+    async function refreshHistory(number=selected) {
+        if(!loadHistory||!number||!model.device||!model.snapshot)return;
+        const currentScope=scope,request=++historyRequest;
+        if(savedHistory.size>=64&&!savedHistory.has(number))savedHistory.delete(savedHistory.keys().next().value);
+        savedHistory.set(number,{loading:true,events:[],request});render();
+        try {
+            const result=await loadHistory(model.device.device_id,model.snapshot.repository_id,number);
+            if(scope!==currentScope||savedHistory.get(number)?.request!==request)return;
+            savedHistory.set(number,{...result,loading:false,request});
+        } catch {if(scope===currentScope&&savedHistory.get(number)?.request===request)savedHistory.set(number,{events:[],error:true,request});}
+        if(scope===currentScope&&savedHistory.get(number)?.request===request)render();
+    }
     const rows=()=>[...(model.snapshot?.workflows ?? [])].sort((a,b)=>b.issue.number-a.issue.number);
     const state=row=>workflowState(row,model.progress,model.live);
     const selectedRow=()=>rows().find(row=>row.issue.number===selected);
@@ -54,6 +67,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         panel=name;
         for(const button of document.querySelectorAll("[data-work-panel]"))button.setAttribute("aria-pressed",String(button.dataset.workPanel===name));
         for(const key of ["status","plan","history"])document.getElementById("work-"+key+"-panel").hidden=key!==name;
+        if(name==="history"&&!savedHistory.has(selected))refreshHistory();
     }
     function badge(id,label,tone) {get(id).textContent=label;get(id).className="badge "+tone;}
     function checkRow(name,status) {const item=node("div",undefined,"check-row");item.append(node("span",name),node("span",status,{"成功":"passed","失敗":"failed"}[status]||""));return item;}
@@ -125,8 +139,18 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         get("discussion").replaceChildren();
         for(const [title,comments] of [["WHATのコメント",row.what_comments||[]],["HOWのコメント",row.how_comments||[]]]) {const section=node("details");section.append(node("summary",title+"（"+comments.length+"件）"));for(const comment of comments){section.append(node("p",(comment.author||"投稿者不明")+" · "+comment.created_at,"check-note"),node("p",comment.body,"how-description"));}get("discussion").append(section);}
         if(row.feedback) get("discussion").append(node("h4","PRフィードバック"),node("p",[row.feedback.body,...(row.feedback.comments||[]).map(comment=>(comment.path||"")+" "+(comment.line||"")+" "+comment.body)].join("\n\n"),"how-description"));
-        get("history").replaceChildren(...(histories.get(row.issue.number)||[]).map(event=>{const item=node("li");const info=node("div");info.append(node("strong",event.title),node("p",event.body));item.append(node("time",new Date(event.time).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})),info);return item;}));
-        if(!get("history").children.length)get("history").append(node("li","この作業の進捗通知はまだありません。"));
+        const saved=savedHistory.get(row.issue.number);
+        const reasons={completed:"処理完了","web-paused":"Webから一時停止","approval-changed":"承認内容の変更","authority-unconfirmed":"実行権限を確認できません","interrupted":"端末で中断","pr-closed":"PR終了","target-changed":"対象コミットの変更","model-capacity":"モデル利用上限","rate-limited":"外部サービスの利用上限","needs-human":"人の判断が必要","verification":"検証失敗","runtime":"実行失敗"};
+        const stored=(saved?.events||[]).map(event=>{
+            const v=event.verification;
+            return {key:JSON.stringify([event.execution_id,event.stage,v&&[v.head_oid,v.target_oid,v.status,v.completed,v.total]]),time:event.recorded_at,
+              title:event.kind==="ended"?reasons[event.outcome?.reason]||"実行終了":event.kind==="started"?event.resumed?"実行再開（新しい実行）":"実行開始":event.kind==="disconnected"?"接続切断・実行結果は未確定":event.kind==="released"?"実行権の解放":stageLabels[event.stage]||event.stage,
+              body:"実行 "+event.execution_id+" · 端末 "+model.device.device_id+(v?" · 検証コミット "+v.head_oid+" · 基準 "+v.target_oid+" · "+v.completed+" / "+v.total+" · "+v.status:"")};
+        });
+        const keys=new Set(stored.map(event=>event.key));
+        const combined=[...stored,...(histories.get(row.issue.number)||[]).filter(event=>!keys.has(event.key))].sort((a,b)=>b.time.localeCompare(a.time));
+        get("history-status").textContent=saved?.loading?"保存済み履歴を取得中です。":saved?.error?"保存済み履歴を取得できません。履歴を更新して再試行してください。":saved?combined.length?(saved.truncated?"取得上限の200件を表示しています。":"保存済み履歴とこの画面の進捗を表示しています。検証結果は記載されたコミットの結果です。現在のPRの検証結果は状態欄で確認してください。"):"保存済み履歴はありません。":"履歴欄を開くと保存済み履歴を取得します。";
+        get("history").replaceChildren(...combined.map(event=>{const item=node("li");const info=node("div");info.append(node("strong",event.title),node("p",event.body));item.append(node("time",new Date(event.time).toLocaleString("ja-JP")),info);return item;}));
         const updates=staged;staged=null;
         for(const [id,content] of updates)sync(get(id),content);
         showPanel(panel);
@@ -150,11 +174,12 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
     get("search").addEventListener("input",render);
     for(const button of document.querySelectorAll("[data-work-filter]"))button.addEventListener("click",()=>{filter=button.dataset.workFilter;for(const item of document.querySelectorAll("[data-work-filter]"))item.setAttribute("aria-pressed",String(item===button));render();});
     for(const button of document.querySelectorAll("[data-work-panel]"))button.addEventListener("click",()=>showPanel(button.dataset.workPanel));
+    get("history-refresh").addEventListener("click",()=>refreshHistory());
     get("device").addEventListener("change",()=>onDevice(get("device").value));get("create").addEventListener("click",onCreate);
     get("codex").addEventListener("click",()=>onCodex(false));get("control").addEventListener("click",()=>onCodex(true));
     return {select(number) { if(rows().some(row=>row.issue.number===number)){selected=number;showPanel("status");render();get("primary").focus();} },update(next) {
         const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify([next.snapshot?.repository_id,next.snapshot?.repository]);
-        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
+        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();savedHistory.clear();historyRequest++;get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
         if(next.progress?.generation)generation=next.progress.generation;
         model=next;
         const report=next.live&&next.progress?.verification;
@@ -173,7 +198,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         if(next.pendingWhat)get("device").disabled=true;
         for(const button of document.querySelectorAll("[data-work-filter],[data-work-panel]"))button.disabled=!!next.busy||!next.snapshot;
         const progress=next.progress;
-        if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const key=JSON.stringify([progress.updated_at,title,progress.verification]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
+        if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const v=progress.verification;const key=JSON.stringify([progress.execution_id,progress.stage,v&&[v.head_oid,v.target_oid,v.status,v.completed,v.total]]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
         render();
     }};
 }

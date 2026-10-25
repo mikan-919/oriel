@@ -1,5 +1,6 @@
 import { attachmentBytes, ATTACHMENT_LIMIT, capacityError, workflowGrant, WorkflowCapacityError } from "./workflow-capacity";
 import type { Device, Integrations } from "./integrations";
+import type { WorkflowHistory, HistoryEvent } from "./workflow-history";
 import { digest } from "./workflow";
 import type { WorkflowAdmission, WorkflowBinding, WorkflowClaim, WorkflowGrant, WorkflowTask, WorkflowSnapshot } from "./workflow";
 
@@ -74,7 +75,16 @@ export class WorkflowLeases {
     private readonly sessionExpiry: (sessionHash: string, userId: string) => number | null,
     private readonly schedule: () => void,
     private readonly eventDriven: () => boolean = () => false,
+    private readonly history?: WorkflowHistory,
   ) {}
+
+  private record(a: Attachment, kind: HistoryEvent['kind'], outcome?: HistoryEvent['outcome']): void {
+    if(!a.grant)return;
+    const v=a.verification;
+    this.history?.record(a.binding,a.grant.lease_id,a.grant.issue_number,{kind,stage:a.stage,
+      ...(a.grant.execution?{target_oid:a.grant.execution.target_oid}:{}),
+      ...(outcome?{outcome}:{}),...(v?{verification:{head_oid:v.head_oid,target_oid:v.target_oid,configuration_id:v.configuration_id,completed:v.completed,total:v.total,status:v.status}}:{})});
+  }
 
   private saveControl(ws: WebSocket, attachment: Attachment): void {
     const used = attachmentBytes(attachment);
@@ -89,6 +99,8 @@ export class WorkflowLeases {
   }
 
   private stop(ws: WebSocket, reason = "Workflow connection ended"): void {
+    try {const a=this.attachment(ws);if(a)this.record(a,'disconnected');}
+    catch { /* History storage failure must never prevent authority revocation. */ }
     try { ws.serializeAttachment(null); } catch { /* Closed sockets cannot retain grants. */ }
     try { ws.close(1008, reason); } catch { /* Already closed. */ }
   }
@@ -252,7 +264,7 @@ export class WorkflowLeases {
     catch { this.stop(pair[1]); throw new WorkflowLeaseError(); }
     this.publish();
     this.schedule();
-    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Snapshot-Transport": "http", "X-Oriel-Verification": "1" } });
+    return new Response(null, { status: 101, webSocket: pair[0], headers: { "X-Oriel-Snapshot-Transport": "http", "X-Oriel-Verification": "1", "X-Oriel-History": "1" } });
   }
 
   verify(device: Device, leaseId: string): WorkflowGrant {
@@ -353,7 +365,7 @@ export class WorkflowLeases {
         return;
       }
       if (request.type === "progress") {
-        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id", "verification"].includes(key)) ||
+        if (Object.keys(request).some(key => !["type", "request_id", "stage", "lease_id", "verification", "outcome"].includes(key)) ||
             !STAGES.includes(request.stage as Stage)) throw new Error();
         if (attachment.grant) {
           if (request.lease_id !== attachment.grant.lease_id) throw new WorkflowLeaseError();
@@ -383,7 +395,11 @@ export class WorkflowLeases {
             configuration_id: configurationId,
             issue_number:attachment.grant.issue_number, updated_at:new Date().toISOString() } as Verification;
         }
-        if (attachment.stage === request.stage && request.verification === undefined) {
+        const outcome=request.outcome as HistoryEvent['outcome'];
+        if(outcome!==undefined && (!attachment.grant || !outcome || typeof outcome!=="object" || Array.isArray(outcome) ||
+          Object.keys(outcome).some(key=>!["status","reason"].includes(key)) || !["completed","failed","stopped"].includes(outcome.status) ||
+          !["completed","web-paused","approval-changed","authority-unconfirmed","interrupted","pr-closed","target-changed","model-capacity","rate-limited","needs-human","verification","runtime"].includes(outcome.reason)))throw new Error();
+        if (attachment.stage === request.stage && request.verification === undefined && outcome === undefined) {
           this.send(ws, { type: "progressed", request_id: requestId });
           return;
         }
@@ -391,6 +407,7 @@ export class WorkflowLeases {
         if (!attachment.grant && attachment.stage !== "paused") attachment.task = null;
         attachment.updated_at = new Date().toISOString();
         this.saveControl(ws, attachment);
+        this.record(attachment,outcome?'ended':'progress',outcome);
         this.send(ws, { type: "progressed", request_id: requestId });
         return;
       }
@@ -400,6 +417,7 @@ export class WorkflowLeases {
         }
         const leaseId = attachment.grant.lease_id;
         if (request.type === "release") {
+          this.record(attachment,'released');
           if (attachment.stage === "paused") {
             attachment.task = { repository: `${attachment.binding.repository.owner}/${attachment.binding.repository.name}`,
               ...attachment.grant.task };
@@ -452,6 +470,7 @@ export class WorkflowLeases {
       attachment.task = null;
       attachment.updated_at = new Date().toISOString();
       this.saveControl(ws, attachment);
+      this.record(attachment,'started');
       this.send(ws, { type: "granted", request_id: requestId, lease_id: leaseId });
     } catch (error) {
       if (error instanceof Error && "status" in error && typeof error.status === "number" &&
