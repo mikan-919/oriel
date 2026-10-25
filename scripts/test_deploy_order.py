@@ -124,6 +124,7 @@ class DeploymentOrder(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         steps = [s for s in workflow.split('      - ') if s.startswith('name: ')]
         for failure in ['Build Relay', 'Verify authentication boundaries',
+                        'Check Relay types', 'Check Browser types', 'Verify Browser', 'Clippy',
                         'Check main head before deployment',
                         'Deploy Relay before its Browser client', 'Build Browser']:
             with self.subTest(failure=failure):
@@ -142,9 +143,7 @@ class DeploymentOrder(unittest.TestCase):
                         succeeded = result.returncode == 0
                     if 'run: npm run deploy:prebuilt' in step:
                         deployed.append(name)
-                expected = (['Deploy Relay before its Browser client']
-                            if failure == 'Build Browser' else [])
-                self.assertEqual(deployed, expected)
+                self.assertEqual(deployed, [])
 
     def test_workflow_lock_and_success_conditions(self):
         text = (ROOT / '.github/workflows/ci.yml').read_text()
@@ -152,17 +151,30 @@ class DeploymentOrder(unittest.TestCase):
         self.assertNotIn('always()', text)
         self.assertNotIn('continue-on-error', text)
         steps = text.split('      - ')
-        names = ['Build Relay', 'Verify authentication boundaries', 'Check main head before deployment',
-                 'Deploy Relay before its Browser client', 'Install Browser dependencies', 'Build Browser', 'Deploy Browser']
+        names = ['Build Relay', 'Verify authentication boundaries', 'Install Browser dependencies',
+                 'Build Browser', 'Verify Browser', 'Check main head before deployment',
+                 'Deploy Relay before its Browser client', 'Deploy Browser']
         positions = [text.index('name: ' + name + '\n') for name in names]
         self.assertEqual(positions, sorted(positions))
-        for name in names[3:]:
+        for name in names[-2:]:
             step = next(s for s in steps if s.startswith('name: ' + name + '\n'))
             self.assertIn("        if: steps.deploy-head.outputs.deploy == 'true'\n", step)
         head = next(s for s in steps if s.startswith('name: Check main head before deployment\n'))
         self.assertIn('working-directory: .\n', head)
         self.assertIn('DEPLOY_SHA: ${{ github.sha }}', head)
         self.assertIn('run: bash scripts/check-deploy-head.sh', head)
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'", head)
+
+    def test_pr_and_push_validate_the_same_paths_without_deployment_credentials(self):
+        text = (ROOT / '.github/workflows/ci.yml').read_text()
+        push, pull = text.split('  pull_request:')
+        paths = ['crates/oriel-web/**', 'crates/oriel-relay/**', 'Cargo.toml', 'Cargo.lock']
+        for path in paths:
+            self.assertIn('"' + path + '"', push)
+            self.assertIn('"' + path + '"', pull)
+        for step in text.split('      - '):
+            if 'secrets.' in step:
+                self.assertIn("if: steps.deploy-head.outputs.deploy == 'true'", step)
 
 
 if __name__ == '__main__':
