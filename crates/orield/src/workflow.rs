@@ -794,6 +794,7 @@ impl Session {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(end) => return Ok(()),
+                    _ = crate::codex::workflow_changed() => return Ok(()),
                     _ = tokio::time::sleep_until(deadline) => bail!("workflow Relay keepalive timed out"),
                     _ = ping.tick() => self.socket.send(Message::Text("oriel:ping".into())).await?,
                     frame = self.socket.next() => match frame.context("workflow ownership connection ended while waiting")?? {
@@ -1346,9 +1347,10 @@ fn source_changes(paths: &[u8]) -> bool {
                 && !path.starts_with(b".git/")
                 && !path.starts_with(b".codex/")
                 && path.rsplit(|byte| *byte == b'/').next() != Some(b".oriel.yaml".as_slice())
-                && !path
-                    .get(path.len().saturating_sub(3)..)
-                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".md"))
+                && !matches!(
+                    path.rsplit(|byte| *byte == b'/').next(),
+                    Some(b"AGENTS.md" | b"HANDOFF.md")
+                )
         })
 }
 
@@ -2639,6 +2641,9 @@ fn execute_work<'a>(
     kind: &'a str,
 ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
+        if crate::codex::paused() {
+            return Err(Stop::WebPaused.into());
+        }
         match kind {
             "plan" => read_only(session, root, snapshot, row, false).await,
             "discuss" => read_only(session, root, snapshot, row, true).await,
@@ -2692,6 +2697,10 @@ async fn scan_inner(
     let mut outcome = ScanOutcome::default();
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
+        if crate::codex::paused() {
+            resting_stage = "paused";
+            break;
+        }
         // Also visit Done rows after restart or another device's reconciliation.
         // Local cleanup must not depend on successfully updating Linear.
         match cleanup_merged_worktree(root, &snapshot, row).await {
@@ -2741,6 +2750,10 @@ async fn scan_inner(
             resting_stage = "paused";
             continue;
         }
+        if crate::codex::paused() {
+            resting_stage = "paused";
+            break;
+        }
         if let Err(error) = session.claim(row, kind).await {
             // A timed-out claim can still be granted by Relay. Reconnecting
             // discards that session instead of mixing its late reply with
@@ -2750,6 +2763,11 @@ async fn scan_inner(
                 format!("#{} · Failed: {error:#}", row.issue.number),
             );
             return Err(error);
+        }
+        if crate::codex::paused() {
+            session.release().await?;
+            resting_stage = "paused";
+            break;
         }
         event(
             "Starting",
@@ -2763,6 +2781,15 @@ async fn scan_inner(
             })
             .await?;
         let result = execute(session, root, &snapshot, row, kind).await;
+        if crate::codex::paused()
+            || result
+                .as_ref()
+                .is_err_and(|error| matches!(error.downcast_ref::<Stop>(), Some(Stop::WebPaused)))
+        {
+            session.release().await?;
+            resting_stage = "paused";
+            break;
+        }
         if let Err(error) = result {
             event("Stopped", format!("#{} · {error:#}", row.issue.number));
             if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) {
@@ -3236,6 +3263,7 @@ mod tests {
             ("once-multiple", false),
             ("once-verification", false),
             ("once-needs-human", false),
+            ("once-web-paused", true),
             ("once-reflection", false),
             ("continuous-failure", true),
         ] {
@@ -3323,6 +3351,7 @@ mod tests {
                         reason: mode,
                         output: root.join("result.json"),
                     }),
+                    "once-web-paused" => Stop::WebPaused.into(),
                     _ => anyhow!("{mode}: implementation failed"),
                 });
             }
@@ -3463,7 +3492,7 @@ mod tests {
             }
             let expected = match server_mode.as_str() {
                 "once-empty" | "once-triage" => 0,
-                "once-reflection" => 1,
+                "once-reflection" | "once-web-paused" => 1,
                 "continuous-failure" => 3,
                 _ if outcome_mode => 2,
                 _ => usize::from(server_mode.starts_with("child")),
@@ -4014,7 +4043,7 @@ mod tests {
             let paths = git::local(&path, &["diff", "--name-only", "-z", &canonical])
                 .await
                 .unwrap();
-            assert!(!source_changes(&paths.stdout));
+            assert_eq!(source_changes(&paths.stdout), !unchanged_tree);
             assert_eq!(paths.stdout.is_empty(), unchanged_tree);
             assert!(resolved_merge_conflict(&path, &row, &target).await.unwrap());
             assert!(
@@ -5267,6 +5296,8 @@ mod tests {
             b".oriel.yaml\0.codex/config.toml\0AGENTS.md\0"
         ));
         assert!(source_changes(b"src/lib.rs\0"));
+        assert!(source_changes(b"README.md\0docs/setup.MD\0"));
+        assert!(!source_changes(b"HANDOFF.md\0nested/AGENTS.md\0"));
         assert!(!source_changes(b""));
     }
 

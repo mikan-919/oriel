@@ -480,9 +480,9 @@ export class Integrations extends WorkflowReader {
     return matching[0];
   }
 
-  private async workflowSourceChange(context: WorkflowContext, base: string, head: string, files: { filename: string }[]): Promise<boolean> {
-    const source = (path: string) => !/(^|\/)(HANDOFF\.md|\.oriel\.yaml)$/.test(path) && !/\.md$/i.test(path);
-    if (files.some(file => source(file.filename))) return true;
+  private async workflowSourceChange(context: WorkflowContext, base: string, head: string, files: { filename: string; previous_filename?: string }[]): Promise<boolean> {
+    const source = (path: string) => path !== ".git" && !path.startsWith(".git/") && !path.startsWith(".codex/") && !/(^|\/)(AGENTS\.md|HANDOFF\.md|\.oriel\.yaml)$/.test(path);
+    if (files.some(file => source(file.filename) || file.previous_filename && source(file.previous_filename))) return true;
     if (files.length < 300) return false;
     // GitHub caps compare's changed-file summary at 300. Walk only differing native
     // trees rather than treating documentation-heavy summaries as a proof of no code.

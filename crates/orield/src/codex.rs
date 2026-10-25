@@ -36,6 +36,10 @@ const COMMAND_OUTPUT_TAIL: usize = 64 * 1024;
 const KEEPALIVE_PING: &str = "oriel:ping";
 const KEEPALIVE_PONG: &str = "oriel:pong";
 static HUB: OnceLock<Hub> = OnceLock::new();
+static WORKFLOW_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+pub(super) async fn workflow_changed() {
+    WORKFLOW_CHANGED.notified().await;
+}
 #[derive(Clone)]
 pub(super) struct Hub {
     engines: Arc<Mutex<HashMap<String, (Client, Value)>>>,
@@ -50,6 +54,7 @@ pub(super) fn paused() -> bool {
 pub(super) fn pause() {
     if let Some(hub) = HUB.get() {
         hub.paused.store(true, Ordering::SeqCst);
+        WORKFLOW_CHANGED.notify_one();
         hub.changed();
     }
 }
@@ -89,6 +94,7 @@ impl Hub {
         if matches!(method, "workflow/pause" | "workflow/resume") {
             self.paused
                 .store(method == "workflow/pause", Ordering::SeqCst);
+            WORKFLOW_CHANGED.notify_one();
             self.changed();
             return Ok(json!({}));
         }
@@ -1006,6 +1012,27 @@ async fn control_engine(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn resume_notifies_a_waiting_workflow_without_provider_polling() {
+        let hub = super::Hub::new();
+        let notified = super::workflow_changed();
+        tokio::pin!(notified);
+        hub.dispatch(&serde_json::json!({"method":"workflow/pause"}))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut notified)
+            .await
+            .unwrap();
+        assert!(hub.paused.load(std::sync::atomic::Ordering::SeqCst));
+        let notified = super::workflow_changed();
+        hub.dispatch(&serde_json::json!({"method":"workflow/resume"}))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), notified)
+            .await
+            .unwrap();
+        assert!(!hub.paused.load(std::sync::atomic::Ordering::SeqCst));
+    }
     use super::*;
 
     // Exercise the production connection future, including a stalled handshake.

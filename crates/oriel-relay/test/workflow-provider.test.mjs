@@ -965,16 +965,36 @@ test("commit-pinned configuration and canonical-head races revoke publication ra
   } finally { await s.close(); }
 });
 
-test("source proof traverses native trees when GitHub truncates a documentation-heavy comparison", { timeout: 60000 }, async () => {
+test("approved verified documentation, renames and deletions can publish without source padding", async () => {
+  for (const file of [
+    {filename: "README.md", status: "modified"},
+    {filename: "docs/setup.md", status: "added"},
+    {filename: "guide.md", previous_filename: "main.rs", status: "renamed"},
+    {filename: "old.md", status: "removed"},
+  ]) {
+    const s = await setup();
+    try {
+      s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const lease = await s.claim("implement");
+      assert.equal((await s.action(lease, "begin")).status, 200);
+      const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
+      s.fixture.compare = {status: "ahead", total_commits: 1, files: [file]};
+      assert.equal((await s.action(lease, "publish", {head_oid: head, verified: false, summary: "Unverified"})).status, 400);
+      const published = await s.action(lease, "publish", {head_oid: head, verified: true, summary: "Verified documentation"});
+      assert.equal(published.status, 200, JSON.stringify(published.data));
+    } finally {await s.close();}
+  }
+});
+
+test("change proof traverses native trees when GitHub truncates a policy-only comparison", { timeout: 60000 }, async () => {
   const s = await setup();
   try {
     s.fixture.addHow(); const row = (await s.snapshot()).workflows[0]; const lease = await s.claim("implement");
     assert.equal((await s.action(lease, "begin")).status, 200);
     const head = "2".repeat(40); s.fixture.refs.set(row.branch, head);
-    s.fixture.compare = { status: "ahead", total_commits: 1, files: Array.from({ length: 300 }, (_, index) => ({ filename: `docs/${index}.md`, status: "added" })) };
+    s.fixture.compare = { status: "ahead", total_commits: 1, files: Array.from({ length: 300 }, (_, index) => ({ filename: `.codex/${index}.toml`, status: "added" })) };
     s.fixture.trees.set(s.fixture.target_oid, { tree: [], truncated: false });
     s.fixture.trees.set(head, { tree: [{ path: "docs", type: "tree", sha: "d".repeat(40) }], truncated: false });
-    s.fixture.trees.set("d".repeat(40), { tree: [{ path: "request.md", type: "blob", sha: "e".repeat(40) }], truncated: false });
+    s.fixture.trees.set("d".repeat(40), { tree: [{ path: "AGENTS.md", type: "blob", sha: "e".repeat(40) }], truncated: false });
     assert.equal((await s.action(lease, "publish", { head_oid: head, verified: true, summary: "Documentation only" })).status, 409);
     assert.equal(s.fixture.pulls.length, 0);
     s.fixture.trees.get(head).tree.push({ path: "src", type: "tree", sha: "a".repeat(40) });
