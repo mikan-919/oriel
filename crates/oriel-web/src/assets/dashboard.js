@@ -987,6 +987,8 @@ async function createWhat() {
     if (!pendingWhat) {
         const title = whatTitle.value.trim();
         if (!title) throw new Error("WHATのタイトルを入力してください。");
+        if (title.length > 256) throw new Error("タイトルは256文字以内で入力してください。絵文字などは2文字分になる場合があります。");
+        if (whatBody.value.length > 60000) throw new Error("本文は60000文字以内で入力してください。絵文字などは2文字分になる場合があります。");
         pendingWhat = {deviceId: repositoryDeviceId, title, body: whatBody.value, requestId: crypto.randomUUID()};
     }
     const pending = pendingWhat;
@@ -1005,7 +1007,7 @@ async function createWhat() {
     whatTitle.value = "";
     whatBody.value = "";
     document.getElementById("workflow-create-dialog").close();
-    status.textContent = `GitHub WHAT #${result.issue.number} を作成しました。チェックアウトで orield workflow を実行してHOWを提案してください。`;
+    status.replaceChildren(`GitHub WHAT #${result.issue.number} を作成しました。`, issueLink("作成したIssueを開く", result.issue.url, "github.com"), " に /oriel how で始まるコメントを投稿して計画を依頼してください。その後、チェックアウトで orield workflow を実行するとHOWが提案されます。HOWを確認し、LinearでTodoに移すと実装を承認します。");
     await refreshWorkflow();
 }
 
@@ -1161,7 +1163,7 @@ whatForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const epoch = accountEpoch;
     perform(async () => { try { await createWhat(); } catch (error) {
-        if (epoch === accountEpoch) document.getElementById("what-status").textContent = `${errorText(error)} 元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。`;
+        if (epoch === accountEpoch) document.getElementById("what-status").textContent = errorText(error) + (pendingWhat ? " 元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。" : "");
         throw error;
     } });
 });

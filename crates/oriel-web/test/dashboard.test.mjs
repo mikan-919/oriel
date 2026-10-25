@@ -341,7 +341,7 @@ test('WHAT retry preserves original request and contents until confirmed', async
   let fail=true; const calls=[];
   const c=vm.createContext({user:{id:'owner'},accountEpoch:1,repositoryDeviceId:'a',workflowSnapshot:{},
     pendingWhat:null,whatTitle:{value:'original'},whatBody:{value:'body'},crypto:{randomUUID:()=> 'same-id'},
-    currentAccount:epoch=>epoch===c.accountEpoch, status:{}, refreshWorkflow:async()=>{},
+    currentAccount:epoch=>epoch===c.accountEpoch, status:{replaceChildren(){}}, issueLink:()=>({}), refreshWorkflow:async()=>{},
     document:{getElementById:()=>({close(){}})},
     integrationApi:async(path,body)=>{calls.push({path,...body}); if(fail) throw Error('timeout'); return {issue:{number:1}};}});
   vm.runInContext(source.slice(source.indexOf('async function createWhat()'),source.indexOf('function sendResize()')),c);
