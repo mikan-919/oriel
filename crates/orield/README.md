@@ -26,6 +26,8 @@ orield --help
 
 ## 使い方
 
+端末登録から最初の作業の完了までは[導入手順](https://github.com/mikan-919/oriel/blob/main/docs/getting-started.md)を参照してください。[設定例](https://github.com/mikan-919/oriel/blob/main/.oriel.example.yaml)はRustプロジェクト向けです。
+
 作業するリポジトリで`orield`を起動します。初回はブラウザーでパスキーのアカウントに端末を接続し、端末側でも接続先を確認します。接続済みの端末は、次回から自動で再接続します。
 
 | コマンド | 動作 |

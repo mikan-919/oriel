@@ -40,7 +40,8 @@ test('state notifications reuse provider facts, retain unrelated issues and pres
 });
 
 test('runtime pongs keep unchanged progress live; missing pongs or an initial snapshot expire', () => {
-  for (const baseline of [true, false]) {
+  for (const failure of ['missing-pong', 'close', 'error', 'missing-snapshot']) {
+    const baseline = failure !== 'missing-snapshot';
     let now = 0, serial = 0, connection, answer = true;
     const timers = new Map();
     const add = (callback, delay, repeat = false) => {const id = ++serial; timers.set(id, {callback, delay, repeat, due: now + delay}); return id;};
@@ -72,17 +73,27 @@ test('runtime pongs keep unchanged progress live; missing pongs or an initial sn
       setInterval: (callback, delay) => add(callback, delay, true), clearInterval: id => timers.delete(id)});
     vm.runInContext(source.slice(source.indexOf('function stopProgress()'), source.indexOf('function updateProgressLink(')), c);
     c.connectProgress(); connection.listeners.open();
-    if (baseline) connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', devices: [{device_id: 'device', state: 'idle'}]})});
+    if (baseline) connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', poll_after_seconds: 900, devices: [{device_id: 'device', state: 'idle'}]})});
     advance(baseline ? 90000 : 60000);
     assert.equal(c.progressStream, baseline ? 'live' : 'stale');
     if (baseline) {
       assert.equal(c.progressSocket, connection, 'Unchanged state does not force a reconnect');
       assert.equal(c.progressSnapshot.get('device').state, 'idle');
       assert.equal(connection.sent.filter(raw => raw === 'oriel:ping').length, 6);
-      answer = false; advance(60000);
+      assert.equal(c.workflowPollInterval, 900000);
+      if (failure === 'close') connection.close();
+      else if (failure === 'error') connection.listeners.error();
+      else { answer = false; advance(60000); }
       assert.equal(c.progressStream, 'stale');
       assert.equal(connection.readyState, 3);
     }
+    assert.equal(c.workflowPollInterval, 60000);
+    connection.listeners.error(); connection.listeners.close();
+    assert.equal([...timers.values()].filter(timer => timer.delay === 5000).length, 1);
+    timers.clear(); c.progressRetry = undefined;
+    c.connectProgress(); connection.listeners.open();
+    connection.listeners.message({data: JSON.stringify({type: 'workflow-progress', poll_after_seconds: 900, devices: []})});
+    assert.equal(c.workflowPollInterval, 900000);
   }
 });
 
@@ -92,7 +103,7 @@ test('background polling stops for hidden tabs and resumes device discovery when
   let periodic;
   let visibility;
   let timer;
-  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null,
+  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null, pairClaimed: false,
     progressStream: 'connecting', progressReceivedAt: 0, busy: false, workflowRefreshing: false,
     repositoryDeviceId: 'device', dashboard: {hidden: false}, status: {},
     document: {hidden: false, addEventListener(type, callback) {if (type === 'visibilitychange') visibility = callback;}},
@@ -130,6 +141,22 @@ test('background polling stops for hidden tabs and resumes device discovery when
   c.accountEpoch++;
   await timer();
   assert.equal(deviceRequests, 2, 'An old account timer cannot refresh a new account');
+});
+
+test('pairing polls only its owner while pending and returns to the normal interval after completion or expiry', async () => {
+  let callback, delay, reads = 0;
+  const c = vm.createContext({user: {id: 'owner'}, accountEpoch: 1, deviceTimer: null,
+    pairClaimed: true, pairing: {token: 'token'}, pairOwner: {id: 'owner'}, document: {hidden: false},
+    clearTimeout() {}, setTimeout(fn, milliseconds) {callback = fn; delay = milliseconds; return 1;},
+    currentAccount: epoch => c.accountEpoch === epoch && !!c.user,
+    refreshDevices: async () => {reads++; c.pairing.token = null;}});
+  vm.runInContext(source.slice(source.indexOf('function scheduleDevices()'), source.indexOf('\nrender();', source.indexOf('function scheduleDevices()'))), c);
+  c.scheduleDevices(); assert.equal(delay, 2000);
+  await callback(); assert.equal(reads, 1); assert.equal(delay, 900000);
+  c.pairing.token = 'token'; c.user = {id: 'other'};
+  c.scheduleDevices(); assert.equal(delay, 900000);
+  c.user = {id: 'owner'}; c.scheduleDevices();
+  c.accountEpoch++; await callback(); assert.equal(reads, 1);
 });
 function element(dataset = {}) {
   return {dataset, textContent: '', attributes: {}, hidden: false, focused: false,
@@ -330,7 +357,7 @@ test('WHAT retry preserves original request and contents until confirmed', async
   let fail=true; const calls=[];
   const c=vm.createContext({user:{id:'owner'},accountEpoch:1,repositoryDeviceId:'a',workflowSnapshot:{},
     pendingWhat:null,whatTitle:{value:'original'},whatBody:{value:'body'},crypto:{randomUUID:()=> 'same-id'},
-    currentAccount:epoch=>epoch===c.accountEpoch, status:{}, refreshWorkflow:async()=>{},
+    currentAccount:epoch=>epoch===c.accountEpoch, status:{replaceChildren(){}}, issueLink:()=>({}), refreshWorkflow:async()=>{},
     document:{getElementById:()=>({close(){}})},
     integrationApi:async(path,body)=>{calls.push({path,...body}); if(fail) throw Error('timeout'); return {issue:{number:1}};}});
   vm.runInContext(source.slice(source.indexOf('async function createWhat()'),source.indexOf('function sendResize()')),c);

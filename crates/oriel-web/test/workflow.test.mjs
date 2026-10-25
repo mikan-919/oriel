@@ -26,7 +26,7 @@ test('running push-before-PR evidence stays progress, never current PR success',
   assert.equal(observation.current,false);
   assert.match(observation.reason,/push前/);
   assert.match(observation.reason,/現在は未確認/);
-  assert.match(verificationEvidence(row,snapshot,{},true).reason,/未受信.*取得経路なし/);
+  assert.match(verificationEvidence(row,snapshot,{},true).reason,/未受信.*実行履歴/);
 });
 test('CI empty acquisition and unavailability remain independent of local success',()=>{
   const empty={...row,ci:{head_oid:head,status:'unknown',checks:[],acquisition:'received'}};

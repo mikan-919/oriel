@@ -5,7 +5,7 @@ function terminalExitReason(exit) {
 }
 
 import {mountCodex} from "./codex.js";
-import {mountWorkflow} from "./workflow.js";
+import {mountWorkflow, mountWorkflowNotifications} from "./workflow.js";
 const codexPanel = mountCodex();
 const workflowPanel = mountWorkflow({
     onDevice: id => perform(async () => {
@@ -20,10 +20,13 @@ const workflowPanel = mountWorkflow({
         status.textContent = control ? "端末に接続後、Codexの一時停止・再開で実行を操作してください。" : "この端末のCodexに接続します。実装の会話は操作するCodexから選択してください。";
     },
     onCreate: () => { document.getElementById("what-status").textContent = pendingWhat ? "元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。" : ""; document.getElementById("workflow-create-dialog").showModal(); },
+    loadHistory: (device,repository,issue) => integrationApi(`/api/workflows/${device}/history?repository_id=${repository}&issue_number=${issue}`),
 });
+const workflowNotifications = mountWorkflowNotifications(number => {showPage("workflow");workflowPanel.select(number);});
 function renderWorkflowPanel() {
     const device = devices.find(item => item.device_id === repositoryDeviceId);
     workflowPanel.update({snapshot: workflowSnapshot, device, devices, progress: device && progressSnapshot.get(device.device_id), live:progressStream === "live", userId:user?.id, busy, pendingWhat:!!pendingWhat});
+    workflowNotifications.update({snapshot:workflowSnapshot,device,progress:device&&progressSnapshot.get(device.device_id),live:progressStream==="live",userId:user?.id});
 }
 
 const pairing = window.orielPairing;
@@ -450,8 +453,7 @@ function connectProgress() {
     try {
         connection = new WebSocket(url);
     } catch (_) {
-        setProgressStream("stale");
-        retryProgress(epoch);
+        staleProgress();
         return;
     }
     progressSocket = connection;
@@ -529,11 +531,7 @@ function connectProgress() {
     });
     connection.addEventListener("close", () => {
         if (!current()) return;
-        clearTimeout(progressExpiry);
-        clearInterval(progressKeepalive);
-        progressSocket = undefined;
-        setProgressStream("stale");
-        retryProgress(epoch);
+        staleProgress();
     });
 }
 
@@ -746,10 +744,11 @@ async function waitForPair() {
         return;
     }
     pairStatus.textContent = "端末側の承認を待っています。端末でアカウント名とIDを確認してください。このタブを開いたままにしてください。";
+    scheduleDevices();
     const epoch = accountEpoch;
     try {
         await refreshDevices();
-        // The shared device refresh loop checks registration and pairing expiry.
+        // Only the pending pairing uses a short discovery interval.
     } catch (error) {
         if (!currentAccount(epoch)) return;
         pairStatus.textContent = errorText(error) + " 端末を更新して再確認してください。";
@@ -992,6 +991,8 @@ async function createWhat() {
     if (!pendingWhat) {
         const title = whatTitle.value.trim();
         if (!title) throw new Error("WHATのタイトルを入力してください。");
+        if (title.length > 256) throw new Error("タイトルは256文字以内で入力してください。絵文字などは2文字分になる場合があります。");
+        if (whatBody.value.length > 60000) throw new Error("本文は60000文字以内で入力してください。絵文字などは2文字分になる場合があります。");
         pendingWhat = {deviceId: repositoryDeviceId, title, body: whatBody.value, requestId: crypto.randomUUID()};
     }
     const pending = pendingWhat;
@@ -1010,7 +1011,7 @@ async function createWhat() {
     whatTitle.value = "";
     whatBody.value = "";
     document.getElementById("workflow-create-dialog").close();
-    status.textContent = `GitHub WHAT #${result.issue.number} を作成しました。チェックアウトで orield workflow を実行してHOWを提案してください。`;
+    status.replaceChildren(`GitHub WHAT #${result.issue.number} を作成しました。`, issueLink("作成したIssueを開く", result.issue.url, "github.com"), " に /oriel how で始まるコメントを投稿して計画を依頼してください。その後、チェックアウトで orield workflow を実行するとHOWが提案されます。HOWを確認し、LinearでTodoに移すと実装を承認します。");
     await refreshWorkflow();
 }
 
@@ -1166,7 +1167,7 @@ whatForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const epoch = accountEpoch;
     perform(async () => { try { await createWhat(); } catch (error) {
-        if (epoch === accountEpoch) document.getElementById("what-status").textContent = `${errorText(error)} 元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。`;
+        if (epoch === accountEpoch) document.getElementById("what-status").textContent = errorText(error) + (pendingWhat ? " 元の内容・IDで再確認してください。再読込すると再確認と重複防止の保証が失われます。" : "");
         throw error;
     } });
 });
@@ -1220,7 +1221,7 @@ function scheduleDevices() {
             try { await refreshDevices(); } catch (_) {}
         }
         if (currentAccount(epoch)) scheduleDevices();
-    }, 900000);
+    }, pairClaimed && pairing.token && pairOwner?.id === user?.id ? 2000 : 900000);
 }
 render();
 perform(async () => {

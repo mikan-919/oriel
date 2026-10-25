@@ -434,6 +434,7 @@ struct Session {
     scan_interval: Duration,
     snapshot_http: bool,
     verification_metadata: bool,
+    history_metadata: bool,
 }
 impl Session {
     async fn connect(
@@ -486,6 +487,10 @@ impl Session {
                 .headers()
                 .get("x-oriel-snapshot-transport")
                 .is_some_and(|value| value == "http"),
+            history_metadata: response
+                .headers()
+                .get("x-oriel-history")
+                .is_some_and(|value| value == "1"),
             verification_metadata: response
                 .headers()
                 .get("x-oriel-verification")
@@ -620,6 +625,42 @@ impl Session {
             request["lease_id"] = json!(lease);
         }
         self.exchange(request, "progressed").await?;
+        Ok(())
+    }
+    async fn finished(&mut self, result: &Result<()>) -> Result<()> {
+        if !self.history_metadata || self.exchange_pending || self.lease.is_none() {
+            return Ok(());
+        }
+        let reason = match result {
+            Ok(()) => "completed",
+            Err(error) => match error.downcast_ref::<Stop>() {
+                Some(Stop::WebPaused) => "web-paused",
+                Some(Stop::Changed) => "approval-changed",
+                Some(Stop::Interrupted) => "interrupted",
+                Some(Stop::PullClosed) => "pr-closed",
+                Some(Stop::TargetChanged) => "target-changed",
+                Some(Stop::ModelCapacity) => "model-capacity",
+                Some(Stop::RateLimited(_)) => "rate-limited",
+                Some(_) => "authority-unconfirmed",
+                None if error.downcast_ref::<AgentIntervention>().is_some() => "needs-human",
+                None if error.downcast_ref::<VerificationFailure>().is_some() => "verification",
+                None => "runtime",
+            },
+        };
+        let status = if result.is_ok() {
+            "completed"
+        } else if result
+            .as_ref()
+            .is_err_and(|error| error.downcast_ref::<Stop>().is_some())
+        {
+            "stopped"
+        } else {
+            "failed"
+        };
+        // A bounded report never repeats work or leaks raw diagnostics. An
+        // uncertain reply ends the session instead of reusing its pending RPC.
+        tokio::time::timeout(Duration::from_secs(2),self.exchange(json!({"type":"progress","lease_id":self.lease,"stage":if result.is_ok(){"idle"}else{"paused"},"outcome":{"status":status,"reason":reason}}),"progressed")).await
+            .map_err(|_| anyhow!(Stop::Uncertain))??;
         Ok(())
     }
     async fn verification(
@@ -794,6 +835,7 @@ impl Session {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(end) => return Ok(()),
+                    _ = crate::codex::workflow_changed() => return Ok(()),
                     _ = tokio::time::sleep_until(deadline) => bail!("workflow Relay keepalive timed out"),
                     _ = ping.tick() => self.socket.send(Message::Text("oriel:ping".into())).await?,
                     frame = self.socket.next() => match frame.context("workflow ownership connection ended while waiting")?? {
@@ -892,6 +934,9 @@ impl Session {
         response.json().await.map_err(|_| anyhow!(Stop::Uncertain))
     }
     async fn action(&mut self, action: &str, mut body: Value) -> Result<Value> {
+        if crate::codex::paused() {
+            return Err(Stop::WebPaused.into());
+        }
         body["action"] = json!(action);
         self.post("actions", body).await
     }
@@ -1346,9 +1391,10 @@ fn source_changes(paths: &[u8]) -> bool {
                 && !path.starts_with(b".git/")
                 && !path.starts_with(b".codex/")
                 && path.rsplit(|byte| *byte == b'/').next() != Some(b".oriel.yaml".as_slice())
-                && !path
-                    .get(path.len().saturating_sub(3)..)
-                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".md"))
+                && !matches!(
+                    path.rsplit(|byte| *byte == b'/').next(),
+                    Some(b"AGENTS.md" | b"HANDOFF.md")
+                )
         })
 }
 
@@ -2639,6 +2685,9 @@ fn execute_work<'a>(
     kind: &'a str,
 ) -> futures_util::future::LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
+        if crate::codex::paused() {
+            return Err(Stop::WebPaused.into());
+        }
         match kind {
             "plan" => read_only(session, root, snapshot, row, false).await,
             "discuss" => read_only(session, root, snapshot, row, true).await,
@@ -2692,6 +2741,10 @@ async fn scan_inner(
     let mut outcome = ScanOutcome::default();
     let mut resting_stage = "idle";
     for row in &snapshot.workflows {
+        if crate::codex::paused() {
+            resting_stage = "paused";
+            break;
+        }
         // Also visit Done rows after restart or another device's reconciliation.
         // Local cleanup must not depend on successfully updating Linear.
         match cleanup_merged_worktree(root, &snapshot, row).await {
@@ -2741,6 +2794,10 @@ async fn scan_inner(
             resting_stage = "paused";
             continue;
         }
+        if crate::codex::paused() {
+            resting_stage = "paused";
+            break;
+        }
         if let Err(error) = session.claim(row, kind).await {
             // A timed-out claim can still be granted by Relay. Reconnecting
             // discards that session instead of mixing its late reply with
@@ -2750,6 +2807,11 @@ async fn scan_inner(
                 format!("#{} · Failed: {error:#}", row.issue.number),
             );
             return Err(error);
+        }
+        if crate::codex::paused() {
+            session.release().await?;
+            resting_stage = "paused";
+            break;
         }
         event(
             "Starting",
@@ -2763,6 +2825,21 @@ async fn scan_inner(
             })
             .await?;
         let result = execute(session, root, &snapshot, row, kind).await;
+        if let Err(report) = session.finished(&result).await {
+            if interrupted(&result) {
+                return Err(result.unwrap_err());
+            }
+            return Err(report);
+        }
+        if crate::codex::paused()
+            || result
+                .as_ref()
+                .is_err_and(|error| matches!(error.downcast_ref::<Stop>(), Some(Stop::WebPaused)))
+        {
+            session.release().await?;
+            resting_stage = "paused";
+            break;
+        }
         if let Err(error) = result {
             event("Stopped", format!("#{} · {error:#}", row.issue.number));
             if matches!(error.downcast_ref::<Stop>(), Some(Stop::Interrupted)) {
@@ -2899,6 +2976,66 @@ pub(super) async fn run(origin: &Url, identity: &DeviceIdentity, once: bool) -> 
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn execution_results_report_classified_reasons_without_private_diagnostics() {
+        use super::*;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for (status, reason) in [
+                ("completed", "completed"),
+                ("failed", "needs-human"),
+                ("stopped", "web-paused"),
+            ] {
+                let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                    panic!()
+                };
+                assert!(!text.contains("private-secret"));
+                let request: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(request["outcome"], json!({"status":status,"reason":reason}));
+                socket
+                    .send(Message::Text(
+                        json!({"type":"progressed","request_id":request["request_id"]})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let (socket, _) = connect_async(url).await.unwrap();
+        let mut session = Session {
+            client: Client::new(),
+            endpoint: Url::parse("http://localhost/").unwrap(),
+            socket,
+            repository: Repository {
+                owner: "owner".into(),
+                name: "repo".into(),
+            },
+            lease: Some("execution".into()),
+            changed: false,
+            exchange_pending: false,
+            scan_interval: SCAN_INTERVAL,
+            snapshot_http: false,
+            verification_metadata: false,
+            history_metadata: true,
+        };
+        session.finished(&Ok(())).await.unwrap();
+        session
+            .finished(&Err(anyhow::Error::new(AgentIntervention {
+                reason: "private-secret".into(),
+                output: PathBuf::from("private-secret"),
+            })))
+            .await
+            .unwrap();
+        session
+            .finished(&Err(Stop::WebPaused.into()))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
     use super::*;
 
     async fn merged_worktree_fixture() -> (PathBuf, Value, PathBuf, PathBuf) {
@@ -3092,6 +3229,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
         };
         scan(
             &mut session,
@@ -3236,6 +3374,7 @@ mod tests {
             ("once-multiple", false),
             ("once-verification", false),
             ("once-needs-human", false),
+            ("once-web-paused", true),
             ("once-reflection", false),
             ("continuous-failure", true),
         ] {
@@ -3323,6 +3462,7 @@ mod tests {
                         reason: mode,
                         output: root.join("result.json"),
                     }),
+                    "once-web-paused" => Stop::WebPaused.into(),
                     _ => anyhow!("{mode}: implementation failed"),
                 });
             }
@@ -3463,7 +3603,7 @@ mod tests {
             }
             let expected = match server_mode.as_str() {
                 "once-empty" | "once-triage" => 0,
-                "once-reflection" => 1,
+                "once-reflection" | "once-web-paused" => 1,
                 "continuous-failure" => 3,
                 _ if outcome_mode => 2,
                 _ => usize::from(server_mode.starts_with("child")),
@@ -3488,6 +3628,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
         };
         let result = drive_session(
             &mut session,
@@ -3610,6 +3751,7 @@ mod tests {
                 scan_interval: SCAN_INTERVAL,
                 snapshot_http: false,
                 verification_metadata: false,
+                history_metadata: false,
             };
             let root = std::env::temp_dir()
                 .join(format!("oriel-interrupt-{}", random_hex::<12>().unwrap()));
@@ -3768,6 +3910,7 @@ mod tests {
                         scan_interval: SCAN_INTERVAL,
                         snapshot_http: false,
                         verification_metadata: false,
+                        history_metadata: false,
                     };
                     let mut suppressed = HashMap::new();
                     for index in 0..scans {
@@ -4014,7 +4157,7 @@ mod tests {
             let paths = git::local(&path, &["diff", "--name-only", "-z", &canonical])
                 .await
                 .unwrap();
-            assert!(!source_changes(&paths.stdout));
+            assert_eq!(source_changes(&paths.stdout), !unchanged_tree);
             assert_eq!(paths.stdout.is_empty(), unchanged_tree);
             assert!(resolved_merge_conflict(&path, &row, &target).await.unwrap());
             assert!(
@@ -4639,6 +4782,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
         };
         let row = serde_json::from_value(json!({
             "issue":{"number":42,"title":"WHAT","body":null,"url":"https://github.com/octocat/connected/issues/42"},
@@ -4702,6 +4846,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
         };
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -4789,6 +4934,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
         };
         session.wait(Duration::from_secs(46)).await.unwrap();
         assert!(
@@ -4839,6 +4985,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
             lease: Some("lease".into()),
         };
         let error = session.checked().await.unwrap_err();
@@ -4930,6 +5077,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
             lease: Some("lease".into()),
         };
         let snapshot: Snapshot = serde_json::from_value(json!({
@@ -5093,6 +5241,7 @@ mod tests {
                 scan_interval: SCAN_INTERVAL,
                 snapshot_http,
                 verification_metadata: false,
+                history_metadata: false,
                 lease: Some("lease".into()),
             };
             if snapshot_http {
@@ -5209,6 +5358,7 @@ mod tests {
             scan_interval: SCAN_INTERVAL,
             snapshot_http: false,
             verification_metadata: false,
+            history_metadata: false,
         };
         let snapshot = session.snapshot().await.unwrap();
         assert!(!snapshot.configuration.autonomous);
@@ -5267,6 +5417,8 @@ mod tests {
             b".oriel.yaml\0.codex/config.toml\0AGENTS.md\0"
         ));
         assert!(source_changes(b"src/lib.rs\0"));
+        assert!(source_changes(b"README.md\0docs/setup.MD\0"));
+        assert!(!source_changes(b"HANDOFF.md\0nested/AGENTS.md\0"));
         assert!(!source_changes(b""));
     }
 

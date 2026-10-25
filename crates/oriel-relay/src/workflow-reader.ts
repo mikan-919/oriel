@@ -34,7 +34,7 @@ export class WorkflowReader {
       if (!response.ok) this.auth.fail(502, "GitHub repository access could not be confirmed");
       const result = await response.json() as { repositories: { id: number }[] };
       if (!Array.isArray(result.repositories)) this.auth.fail(502, "GitHub repository access could not be confirmed");
-      if (result.repositories.some(repository => repository.id === context.repository.repository_id)) accessible = true;
+      if (result.repositories.some(repository => repository.id === context.repository.repository_id)) { accessible = true; break; }
       if (result.repositories.length < 100) break;
     }
     if (!accessible) this.auth.fail(403, "GitHub repository is no longer accessible");
@@ -141,6 +141,10 @@ export class WorkflowReader {
     }
     if (!result.issue) return null;
     const { attachments, ...issue } = result.issue;
+    return { ...issue, attachments: await this.workflowAttachments(context, id, attachments) };
+  }
+
+  private async workflowAttachments(context: WorkflowContext, id: string, attachments: Page<{url: string}>): Promise<{url: string}[]> {
     const all = [...attachments.nodes];
     let page = attachments;
     const seen = new Set<string>();
@@ -154,7 +158,7 @@ export class WorkflowReader {
       page = next.issue.attachments;
       all.push(...page.nodes);
     }
-    return { ...issue, attachments: all };
+    return all;
   }
 
   protected async workflowStates(context: WorkflowContext): Promise<LinearState[]> {
@@ -173,7 +177,7 @@ export class WorkflowReader {
     return nodes;
   }
 
-  protected async workflowHows(context: WorkflowContext): Promise<WorkflowHow[]> {
+  protected async workflowHows(context: WorkflowContext, issueNumber?: number): Promise<WorkflowHow[]> {
     const hows: WorkflowHow[] = [];
     let after: string | null = null;
     const cursors = new Set<string>();
@@ -182,17 +186,25 @@ export class WorkflowReader {
       // Read HOW metadata in the collection instead of issuing one extra query
       // per HOW on every live guard. Bound both connections to keep complexity
       // below Linear's per-query limit, and retain full attachment pagination.
+      const metadata = issueNumber === undefined ? "identifier title description url state{id name type} team{id}" : "";
       const data: { issues: Page<LinearHow & { team: { id: string }; attachments: Page<{ url: string }> }> } = await this.workflowLinear(context,
-        "query($prefix:String!,$after:String){issues(first:20,after:$after,includeArchived:true,orderBy:createdAt,filter:{attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id identifier title description url state{id name type} team{id} attachments(first:20,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}",
+        `query($prefix:String!,$after:String){issues(first:20,after:$after,includeArchived:true,orderBy:createdAt,filter:{attachments:{some:{url:{startsWithIgnoreCase:$prefix}}}}){nodes{id ${metadata} attachments(first:20,includeArchived:true){nodes{url} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}`,
         { prefix: `https://github.com/${context.repository.owner}/${context.repository.name}/issues/`, after });
       const candidates = [...new Map(data.issues.nodes.map(candidate => [candidate.id, candidate])).values()]
         .filter(candidate => !hows.some(how => how.id === candidate.id));
       for (let offset = 0; offset < candidates.length; offset += 4) {
-        const batch = await Promise.all(candidates.slice(offset, offset + 4).map(candidate =>
-          candidate.attachments.pageInfo.hasNextPage ? this.workflowHow(context, candidate.id) :
-            { ...candidate, attachments: candidate.attachments.nodes }));
+        const batch = await Promise.all(candidates.slice(offset, offset + 4).map(async candidate => {
+          if(issueNumber === undefined) return candidate.attachments.pageInfo.hasNextPage ? this.workflowHow(context, candidate.id) : {...candidate, attachments:candidate.attachments.nodes};
+          const attachments = await this.workflowAttachments(context, candidate.id, candidate.attachments);
+          const relevant = attachments.some(attachment => {
+            const link=/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/0*([0-9]+)(?:[/?#].*)?$/i.exec(attachment.url);
+            return !!link && link[1].toLowerCase()===context.repository.owner.toLowerCase() && link[2].toLowerCase()===context.repository.name.toLowerCase() && Number(link[3])===issueNumber;
+          });
+          return relevant ? this.workflowHow(context,candidate.id) : undefined;
+        }));
         context.check();
         for (const how of batch) {
+          if(how === undefined) continue;
           if (!how) this.auth.fail(502, "Linked HOW is unavailable");
           hows.push(how);
         }
@@ -221,9 +233,9 @@ export class WorkflowReader {
         ? this.workflowList<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues?state=all&sort=created&direction=asc`)
         : this.workflowGithub<GithubWhat & { html_url: string; pull_request?: unknown }>(context, `${context.path}/issues/${issueNumber}`, "GET", undefined, true)
           .then(issue => issue ? [issue] : []),
-      this.workflowList<GithubPull>(context, `${context.path}/pulls?state=all`),
+      issueNumber === undefined ? this.workflowList<GithubPull>(context, `${context.path}/pulls?state=all`) : Promise.resolve([] as GithubPull[]),
       this.workflowGithub<{ ref: string; object: { sha: string } }[]>(context, `${context.path}/git/matching-refs/heads/oriel/`),
-      this.workflowHows(context),
+      this.workflowHows(context, issueNumber),
       this.workflowStates(context),
     ]);
     context.check();
@@ -281,6 +293,7 @@ export class WorkflowReader {
             if (!validBranch(row.branch)) { row.phase = "blocked"; row.blocked_reason = "Canonical branch is not a valid Git reference"; }
             else {
               row.canonical_oid = refs.get(row.branch) ?? null;
+              if(issueNumber !== undefined) pulls.push(...await this.workflowScopedPulls(context,issue.number,row.branch,`oriel/${how.identifier}-gh-${issue.number}-`,refs));
               const matching = pulls.filter(pr => pr.head.ref === row.branch && pr.head.repo?.id === repository.id && pr.base.repo.id === repository.id && pr.base.ref === snapshot.base_branch);
               const managed = matching.filter(pr => pr.body?.trim() === `Closes #${issue.number}` && !pr.draft);
               if (matching.length !== managed.length || managed.length > 1) { row.phase = "blocked"; row.blocked_reason = "Canonical PR natural key is ambiguous or not Oriel-managed"; }
@@ -348,6 +361,24 @@ export class WorkflowReader {
       if (error) { row.phase = "blocked"; row.blocked_reason = error; }
     }
     return { snapshot, states, hows, pulls, refs, recoveries };
+  }
+
+  private async workflowScopedPulls(context: WorkflowContext, issue: number, branch: string, prefix: string, refs: Map<string,string>): Promise<GithubPull[]> {
+    // Live refs catch malformed canonical PRs; the issue timeline also retains
+    // obsolete approval evidence after its branch has been deleted.
+    const branches = new Set([branch,...[...refs.keys()].filter(ref=>ref.startsWith(prefix))]);
+    const groups = await Promise.all([...branches].map(head=>this.workflowList<GithubPull>(context,`${context.path}/pulls?state=all&head=${encodeURIComponent(context.repository.owner+":"+head)}`)));
+    const pulls=new Map(groups.flat().map(pr=>[pr.number,pr]));
+    const events=await this.workflowList<{event:string;source?:{issue?:{number:number;pull_request?:{url:string}}}}>(context,`${context.path}/issues/${issue}/timeline`);
+    for(const event of events) {
+      const source=event.source?.issue;
+      if(event.event!=="cross-referenced" || !source?.pull_request || !Number.isSafeInteger(source.number) || source.number<1 ||
+        source.pull_request.url.toLowerCase()!==`https://api.github.com${context.path}/pulls/${source.number}`.toLowerCase() || pulls.has(source.number))continue;
+      const pr=await this.workflowGithub<GithubPull>(context,`${context.path}/pulls/${source.number}`);
+      if(!pr)this.auth.fail(502,"Linked PR is unavailable");
+      pulls.set(pr.number,pr);
+    }
+    return [...pulls.values()];
   }
 
   protected workflowPull(pr: GithubPull): PullRequest {

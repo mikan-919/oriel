@@ -52,7 +52,7 @@ try {
   assert.match(await text('local-checks'),/cargo test/);
   await page.evaluate(()=>{model.userId='other';update();});
   assert.equal(await text('local-badge'),'未取得');
-  assert.match(await text('local-checks'),/過去結果の取得経路なし/);
+  assert.match(await text('local-checks'),/未受信.*実行履歴/);
   await page.evaluate(()=>{model.userId='owner';model.progress={generation:'g2'};update();});
   assert.equal(await text('local-badge'),'未取得');
   for(const status of ['pending','failure','success']) {
@@ -78,8 +78,53 @@ try {
   assert.equal(await text('local-badge'),'未取得');
   await page.evaluate(()=>{model.device={device_id:'device'};model.progress=null;
     panel=mountWorkflow({onDevice(){},onCodex(){},onCreate(){}});update();});
-  assert.match(await text('local-checks'),/過去結果の取得経路なし/);
+  assert.match(await text('local-checks'),/未受信.*実行履歴/);
   await page.setViewportSize({width:320,height:800});
+  await page.evaluate(()=>{
+    const row=model.snapshot.workflows[0];
+    row.what_comments=[{author:'reviewer',created_at:'2026-10-25',body:'First comment'}];
+    update();
+    document.querySelector('[data-work-panel="plan"]').click();
+    const discussion=document.querySelector('#workflow-discussion details');
+    discussion.open=true;discussion.querySelector('summary').focus();
+    window.previousSummary=document.activeElement;
+    row.what_comments.push({author:'reviewer',created_at:'2026-10-25',body:'New comment'});
+    update();
+  });
+  assert.equal(await page.evaluate(()=>document.activeElement===window.previousSummary),true);
+  assert.equal(await page.locator('#workflow-discussion details').first().getAttribute('open'),'');
+  await page.evaluate(()=>{
+    document.querySelector('[data-work-panel="status"]').click();
+    document.getElementById('workflow-primary').focus();window.previousLink=document.activeElement;
+    model.snapshot.workflows[0].ci.status='failure';update();
+  });
+  assert.equal(await page.evaluate(()=>document.activeElement===window.previousLink),true);
+  await page.evaluate(()=>{
+    const row=structuredClone(model.snapshot.workflows[0]);row.issue.number=999;row.what_comments=[];
+    model.snapshot.workflows=[row];update();
+  });
+  assert.equal(await page.locator('#workflow-discussion details').first().getAttribute('open'),null);
+  assert.doesNotMatch(await page.locator('#workflow-discussion').textContent(),/New comment/);
+  await page.evaluate(()=>{
+    window.historyCalls=[];window.historyPending=[];
+    panel=mountWorkflow({onDevice(){},onCodex(){},onCreate(){},loadHistory(...args){historyCalls.push(args);return new Promise((resolve,reject)=>historyPending.push({resolve,reject}));}});
+    update();document.querySelector('[data-work-panel="history"]').click();
+  });
+  assert.match(await text('history-status'),/取得中/);
+  await page.evaluate(()=>historyPending.shift().resolve({events:[{id:1,execution_id:'saved-run',recorded_at:new Date().toISOString(),kind:'ended',stage:'idle',outcome:{status:'completed',reason:'completed'},verification:{head_oid:'c'.repeat(40),target_oid:'b'.repeat(40),completed:2,total:2,status:'success'}}]}));
+  await page.waitForFunction(()=>document.getElementById('workflow-history').textContent.includes('saved-run'));
+  assert.match(await text('history'),/cccccccccccccccccccccccccccccccccccccccc/);
+  assert.match(await text('history-status'),/現在のPR/);
+  await page.locator('#workflow-history-refresh').click();
+  await page.evaluate(()=>historyPending.shift().reject(Error('network failure')));
+  await page.waitForFunction(()=>document.getElementById('workflow-history-status').textContent.includes('取得できません'));
+  await page.locator('#workflow-history-refresh').click();
+  await page.evaluate(()=>historyPending.shift().resolve({events:[]}));
+  await page.waitForFunction(()=>document.getElementById('workflow-history-status').textContent.includes('履歴はありません'));
+  await page.locator('#workflow-history-refresh').click();
+  await page.evaluate(()=>{model.userId='new-owner';update();historyPending.shift().resolve({events:[{execution_id:'foreign-result'}]});});
+  await page.waitForTimeout(20);
+  assert.doesNotMatch(await text('history'),/foreign-result/);
   assert.equal(await page.locator('#workflow-ci-badge').isVisible(),true);
   console.log('Workflow browser assertions passed');
 } finally {await browser.close();}

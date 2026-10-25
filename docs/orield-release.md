@@ -1,5 +1,7 @@
 # orieldの公開
 
+利用者向けのインストールと端末登録は[導入手順](getting-started.md)を参照してください。
+
 `orield`だけをcrates.ioへ公開します。バージョンはルートの`Cargo.toml`の`[workspace.package]`から継承し、初回は`0.1.0`、ライセンスはMIT、所有者は`mikan-919`です。Web・Relayの配備は別の処理です。
 
 ## 初回の設定

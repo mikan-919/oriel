@@ -16,7 +16,7 @@ export function currentCI(row) {
 }
 export function verificationEvidence(row, snapshot, progress, live) {
     const value=progress?.verification;
-    if (!value) return {value:null, reason:"未受信・過去結果の取得経路なし（再読み込み後を含む）"};
+    if (!value) return {value:null, reason:"この接続の検証報告は未受信です。保存した実行の経過は実行履歴で確認できます。"};
     if (value.issue_number !== row.issue.number) return {value:null,reason:"別の作業の結果です"};
     if (!value.execution_id || !value.configuration_id || !Array.isArray(value.commands)) return {value:null,reason:"旧形式の通知には実行・設定の証拠がありません"};
     if (!["running","success","failure"].includes(value.status) || !Number.isSafeInteger(value.completed) ||
@@ -35,11 +35,25 @@ export function currentVerification(row, snapshot, progress, live) {
     return verificationEvidence(row,snapshot,progress,live).value;
 }
 
-export function mountWorkflow({onDevice, onCodex, onCreate}) {
-    const get=id=>document.getElementById("workflow-"+id);
+export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
+    let staged = null, detailIdentity = "";
+    const get=id=>staged?.get(id) ?? document.getElementById("workflow-"+id);
     const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;return element;};
     const list=document.getElementById("repository-issues");
     let model={}, selected=null, filter="all", panel="status", scope="", generation="", histories=new Map(), evidence=new Map();
+    const savedHistory=new Map();let historyRequest=0;
+    async function refreshHistory(number=selected) {
+        if(!loadHistory||!number||!model.device||!model.snapshot)return;
+        const currentScope=scope,request=++historyRequest;
+        if(savedHistory.size>=64&&!savedHistory.has(number))savedHistory.delete(savedHistory.keys().next().value);
+        savedHistory.set(number,{loading:true,events:[],request});render();
+        try {
+            const result=await loadHistory(model.device.device_id,model.snapshot.repository_id,number);
+            if(scope!==currentScope||savedHistory.get(number)?.request!==request)return;
+            savedHistory.set(number,{...result,loading:false,request});
+        } catch {if(scope===currentScope&&savedHistory.get(number)?.request===request)savedHistory.set(number,{events:[],error:true,request});}
+        if(scope===currentScope&&savedHistory.get(number)?.request===request)render();
+    }
     const rows=()=>[...(model.snapshot?.workflows ?? [])].sort((a,b)=>b.issue.number-a.issue.number);
     const state=row=>workflowState(row,model.progress,model.live);
     const selectedRow=()=>rows().find(row=>row.issue.number===selected);
@@ -53,15 +67,32 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         panel=name;
         for(const button of document.querySelectorAll("[data-work-panel]"))button.setAttribute("aria-pressed",String(button.dataset.workPanel===name));
         for(const key of ["status","plan","history"])document.getElementById("work-"+key+"-panel").hidden=key!==name;
+        if(name==="history"&&!savedHistory.has(selected))refreshHistory();
     }
     function badge(id,label,tone) {get(id).textContent=label;get(id).className="badge "+tone;}
     function checkRow(name,status) {const item=node("div",undefined,"check-row");item.append(node("span",name),node("span",status,{"成功":"passed","失敗":"failed"}[status]||""));return item;}
+    function sync(target, source) {
+        if (target.nodeType === 3) { if(target.data!==source.data)target.data=source.data; return; }
+        for(const attribute of [...target.attributes])if(!source.hasAttribute(attribute.name)&&!(target.tagName==="DETAILS"&&attribute.name==="open"))target.removeAttribute(attribute.name);
+        for(const attribute of source.attributes)if(target.getAttribute(attribute.name)!==attribute.value)target.setAttribute(attribute.name,attribute.value);
+        for(let i=0;i<source.childNodes.length;i++) {
+            const next=source.childNodes[i], current=target.childNodes[i];
+            if(current?.nodeName===next.nodeName)sync(current,next);
+            else if(current)current.replaceWith(next.cloneNode(true));
+            else target.append(next.cloneNode(true));
+        }
+        while(target.childNodes.length>source.childNodes.length)target.lastChild.remove();
+    }
     function detail(row) {
         get("detail").hidden=!row;
         if(!row){
             for(const id of ["number","how-number","title","badge","next-title","next-copy","what-body","how-body","failure-body","local-checks","ci-checks","discussion","links","history","steps"])get(id).replaceChildren();
             get("primary").removeAttribute("href");return;
         }
+        const identity=scope+":"+row.issue.number;
+        if(detailIdentity!==identity)get("discussion").replaceChildren();
+        detailIdentity=identity;
+        staged=new Map(["primary","links","ci-checks","discussion"].map(id=>[id,get(id).cloneNode(false)]));
         const info=state(row),ci=currentCI(row);
         const received=evidence.get(row.issue.number) ?? (!model.progress?.verification?.execution_id ? model.progress?.verification : undefined);
         const observation=verificationEvidence(row,model.snapshot,{...model.progress,verification:received},model.live);
@@ -71,7 +102,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         let action=row.phase==="triage"&&row.linear?link("LinearでHOWを確認 ↗",row.linear.url,"linear.app"):
             row.pull_request?link(ci.status==="failure"?"PRとCIを確認 ↗":"PRをレビュー ↗",row.pull_request.url,"github.com"):
             link(row.phase==="waiting-how"?"GitHubで計画を依頼 ↗":"WHATを確認 ↗",row.issue.url,"github.com");
-        action.id="workflow-primary";action.className="btn primary small";get("primary").replaceWith(action);
+        action.id="workflow-primary";action.className="btn primary small";staged.set("primary",action);
         get("codex").disabled=!!model.busy||!model.device;
         get("control").disabled=!!model.busy||!model.device||!model.live||!model.progress||model.progress.state==="offline";
         const step=["waiting-how","needs-how","triage"].includes(row.phase)?0:["approved","running"].includes(row.phase)?1:row.phase==="review"?3:row.phase==="done"||row.phase==="merged"?4:0;
@@ -108,8 +139,20 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         get("discussion").replaceChildren();
         for(const [title,comments] of [["WHATのコメント",row.what_comments||[]],["HOWのコメント",row.how_comments||[]]]) {const section=node("details");section.append(node("summary",title+"（"+comments.length+"件）"));for(const comment of comments){section.append(node("p",(comment.author||"投稿者不明")+" · "+comment.created_at,"check-note"),node("p",comment.body,"how-description"));}get("discussion").append(section);}
         if(row.feedback) get("discussion").append(node("h4","PRフィードバック"),node("p",[row.feedback.body,...(row.feedback.comments||[]).map(comment=>(comment.path||"")+" "+(comment.line||"")+" "+comment.body)].join("\n\n"),"how-description"));
-        get("history").replaceChildren(...(histories.get(row.issue.number)||[]).map(event=>{const item=node("li");const info=node("div");info.append(node("strong",event.title),node("p",event.body));item.append(node("time",new Date(event.time).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})),info);return item;}));
-        if(!get("history").children.length)get("history").append(node("li","この作業の進捗通知はまだありません。"));
+        const saved=savedHistory.get(row.issue.number);
+        const reasons={completed:"処理完了","web-paused":"Webから一時停止","approval-changed":"承認内容の変更","authority-unconfirmed":"実行権限を確認できません","interrupted":"端末で中断","pr-closed":"PR終了","target-changed":"対象コミットの変更","model-capacity":"モデル利用上限","rate-limited":"外部サービスの利用上限","needs-human":"人の判断が必要","verification":"検証失敗","runtime":"実行失敗"};
+        const stored=(saved?.events||[]).map(event=>{
+            const v=event.verification;
+            return {key:JSON.stringify([event.execution_id,event.stage,v&&[v.head_oid,v.target_oid,v.status,v.completed,v.total]]),time:event.recorded_at,
+              title:event.kind==="ended"?reasons[event.outcome?.reason]||"実行終了":event.kind==="started"?event.resumed?"実行再開（新しい実行）":"実行開始":event.kind==="disconnected"?"接続切断・実行結果は未確定":event.kind==="released"?"実行権の解放":stageLabels[event.stage]||event.stage,
+              body:"実行 "+event.execution_id+" · 端末 "+model.device.device_id+(v?" · 検証コミット "+v.head_oid+" · 基準 "+v.target_oid+" · "+v.completed+" / "+v.total+" · "+v.status:"")};
+        });
+        const keys=new Set(stored.map(event=>event.key));
+        const combined=[...stored,...(histories.get(row.issue.number)||[]).filter(event=>!keys.has(event.key))].sort((a,b)=>b.time.localeCompare(a.time));
+        get("history-status").textContent=saved?.loading?"保存済み履歴を取得中です。":saved?.error?"保存済み履歴を取得できません。履歴を更新して再試行してください。":saved?combined.length?(saved.truncated?"取得上限の200件を表示しています。":"保存済み履歴とこの画面の進捗を表示しています。検証結果は記載されたコミットの結果です。現在のPRの検証結果は状態欄で確認してください。"):"保存済み履歴はありません。":"履歴欄を開くと保存済み履歴を取得します。";
+        get("history").replaceChildren(...combined.map(event=>{const item=node("li");const info=node("div");info.append(node("strong",event.title),node("p",event.body));item.append(node("time",new Date(event.time).toLocaleString("ja-JP")),info);return item;}));
+        const updates=staged;staged=null;
+        for(const [id,content] of updates)sync(get(id),content);
         showPanel(panel);
     }
     function render() {
@@ -131,11 +174,12 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
     get("search").addEventListener("input",render);
     for(const button of document.querySelectorAll("[data-work-filter]"))button.addEventListener("click",()=>{filter=button.dataset.workFilter;for(const item of document.querySelectorAll("[data-work-filter]"))item.setAttribute("aria-pressed",String(item===button));render();});
     for(const button of document.querySelectorAll("[data-work-panel]"))button.addEventListener("click",()=>showPanel(button.dataset.workPanel));
+    get("history-refresh").addEventListener("click",()=>refreshHistory());
     get("device").addEventListener("change",()=>onDevice(get("device").value));get("create").addEventListener("click",onCreate);
     get("codex").addEventListener("click",()=>onCodex(false));get("control").addEventListener("click",()=>onCodex(true));
-    return {update(next) {
+    return {select(number) { if(rows().some(row=>row.issue.number===number)){selected=number;showPanel("status");render();get("primary").focus();} },update(next) {
         const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify([next.snapshot?.repository_id,next.snapshot?.repository]);
-        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
+        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();savedHistory.clear();historyRequest++;get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
         if(next.progress?.generation)generation=next.progress.generation;
         model=next;
         const report=next.live&&next.progress?.verification;
@@ -154,7 +198,51 @@ export function mountWorkflow({onDevice, onCodex, onCreate}) {
         if(next.pendingWhat)get("device").disabled=true;
         for(const button of document.querySelectorAll("[data-work-filter],[data-work-panel]"))button.disabled=!!next.busy||!next.snapshot;
         const progress=next.progress;
-        if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const key=JSON.stringify([progress.updated_at,title,progress.verification]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
+        if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const v=progress.verification;const key=JSON.stringify([progress.execution_id,progress.stage,v&&[v.head_oid,v.target_oid,v.status,v.completed,v.total]]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
         render();
+    }};
+}
+
+export function mountWorkflowNotifications(onSelect) {
+    const toggle=document.getElementById("workflow-notifications-toggle"), status=document.getElementById("workflow-notifications-status");
+    let userId="", scope="", enabled=false, previous=new Map(), current=new Set();
+    const supported=()=>typeof Notification!=="undefined";
+    const close=()=>{for(const notification of current)notification.close();current.clear();};
+    const preference=()=>{try{localStorage.setItem("oriel:notifications:"+userId,String(enabled));}catch{}};
+    function render() {
+        toggle.disabled=!userId||!supported();toggle.textContent=enabled?"通知を無効にする":"通知を有効にする";
+        status.textContent=!supported()?"このブラウザーは通知に対応していません。":!userId?"ログインすると通知を設定できます。":Notification.permission==="denied"?"通知はブラウザーで拒否されています。許可の変更はブラウザーの設定で行ってください。":enabled&&Notification.permission==="granted"?"通知は有効です。この画面を開いている間、承認待ち・レビュー待ち・停止を通知します。":"通知は無効です。";
+    }
+    toggle.addEventListener("click",async()=>{
+        const owner=userId;
+        if(enabled){enabled=false;close();preference();render();return;}
+        try{const permission=await Notification.requestPermission();if(owner!==userId)return;enabled=permission==="granted";preference();}catch{enabled=false;}
+        render();
+    });
+    return {update(model) {
+        if(userId!==(model.userId||"")) {
+            userId=model.userId||"";enabled=false;
+            try{enabled=!!userId&&localStorage.getItem("oriel:notifications:"+userId)==="true";}catch{}
+        }
+        const nextScope=JSON.stringify([userId,model.device?.device_id,model.snapshot?.repository_id,model.snapshot?.repository]);
+        if(scope!==nextScope){scope=nextScope;previous.clear();close();}
+        render();if(!userId||!model.snapshot)return;
+        const next=new Map();
+        for(const row of model.snapshot.workflows) {
+            const old=previous.get(row.issue.number);
+            const paused=model.live&&model.progress?.task?.issue_number===row.issue.number&&model.progress.state==="paused";
+            const key=paused?"paused":!model.live&&old?.phase===row.phase?old.key:row.phase;
+            next.set(row.issue.number,{phase:row.phase,key});
+            if(!old||old.key===key||!enabled||!supported()||Notification.permission!=="granted"||!["triage","review","blocked","paused"].includes(key))continue;
+            const label={triage:"承認待ち",review:"レビュー待ち",blocked:"停止中",paused:"一時停止"}[key];
+            try {
+                const notification=new Notification("#"+row.issue.number+" "+row.issue.title,{body:label,tag:scope+":"+row.issue.number});
+                current.add(notification);if(current.size>32){const first=current.values().next().value;first.close();current.delete(first);}
+                const targetScope=scope;
+                notification.onclick=()=>{notification.close();current.delete(notification);if(scope===targetScope&&enabled){window.focus();onSelect(row.issue.number);}};
+                notification.onclose=()=>current.delete(notification);
+            } catch { /* Notification failure must not interrupt workflow controls. */ }
+        }
+        previous=next;
     }};
 }

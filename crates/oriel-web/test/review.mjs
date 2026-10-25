@@ -57,7 +57,7 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
     deliver(message){this.listeners.message?.({data:JSON.stringify(message)});}
     send(raw){if(raw==='oriel:ping'){this.listeners.message?.({data:'oriel:pong'});return;}if(!this.codex)return;const m=JSON.parse(raw);window.fixtureRPCs.push(m);let result={};
       if(m.method==='model/list')result={data:[{model:'test-model',displayName:'検証用モデル',supportedReasoningEfforts:[{reasoningEffort:'high'}]}]};
-      if(m.method==='thread/list')result={data:[{id:'saved',name:'保存した会話'}]};
+      if(m.method==='thread/list')result=m.params.cursor?{data:[{id:'older',name:'51件目の会話'}],nextCursor:null}:{data:[{id:'saved',name:'保存した会話'},...Array.from({length:49},(_,i)=>({id:'saved-'+i,name:'会話 '+i}))],nextCursor:'page-2'};
       if(['thread/start','thread/fork','thread/resume','thread/read'].includes(m.method))result={thread:{id:m.params.threadId||'new',name:'保存した会話',turns:[{status:'completed',items:[{id:'message',type:'agentMessage',text:'保存済みの回答です。'+long.repeat(4)}]}]}};
       if(m.method==='thread/read'&&m.params.threadId==='auto-thread')result.thread.turns=[{id:'running',status:'inProgress',items:[]}];
       if(['turn/start','review/start'].includes(m.method))result={turn:{id:'running',status:'inProgress'}};
