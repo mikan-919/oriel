@@ -54,7 +54,6 @@ const refreshIssuesButton = document.getElementById("refresh-issues");
 const repositoryWork = document.getElementById("repository-work");
 const repositoryDetails = document.getElementById("repository-details");
 const repositoryStatus = document.getElementById("repository-status");
-const repositoryIssues = document.getElementById("repository-issues");
 const refreshRepositoryButton = document.getElementById("refresh-repository");
 const whatForm = document.getElementById("what-form");
 const whatFields = document.getElementById("what-fields");
@@ -235,7 +234,6 @@ function setUser(next) {
         issuesStatus.textContent = "";
         repositoryDetails.textContent = "";
         repositoryStatus.textContent = "";
-        repositoryIssues.replaceChildren();
         if (user || !next) integrationNotice = "";
         devices = [];
         deviceList.replaceChildren();
@@ -674,7 +672,6 @@ async function updateDevices() {
     }
     if (!devices.some((device) => device.device_id === repositoryDeviceId)) {
         repositoryRequest++;
-        repositoryIssues.replaceChildren();
         workflowSnapshot = null;
         repositoryDeviceId = pendingWhat ? pendingWhat.deviceId : devices.length === 1 ? devices[0].device_id : null;
     }
@@ -793,7 +790,6 @@ async function refreshIntegrations() {
     integrations = result;
     issuesRequest++;
     repositoryRequest++;
-    repositoryIssues.replaceChildren();
     workflowSnapshot = null;
     for (const provider of providers) {
         const controls = providerControls[provider];
@@ -879,7 +875,6 @@ function clearProviderSelection(provider) {
     issuesRequest++;
     repositoryRequest++;
     workflowSnapshot = null;
-    repositoryIssues.replaceChildren();
     repositoryStatus.textContent = "ワークフローを更新して現在の連携先を確認してください。";
     issuesStatus.textContent = "最近のIssueを更新 to load the current targets.";
     render();
@@ -975,7 +970,6 @@ async function refreshWorkflow(pushed) {
         if (error.sessionExpired) throw error;
         if (!currentAccount(epoch) || request !== repositoryRequest || repositoryDeviceId !== device.device_id) return;
         workflowSnapshot = null;
-        repositoryIssues.replaceChildren();
         const message = errorText(error);
         repositoryStatus.textContent = message.includes("provider state could not be confirmed")
             ? `現在の連携先状態を確認できません。ワークフロー操作は承認されていません。後で再試行してください。連携の失効が表示された場合は再連携してください。${message}`

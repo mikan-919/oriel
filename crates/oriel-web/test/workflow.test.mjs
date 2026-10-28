@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {workflowState,currentCI,currentVerification,verificationEvidence} from '../src/assets/workflow.js';
+import {workflowState,workflowLane,currentCI,currentVerification,verificationEvidence} from '../src/assets/workflow.js';
 const head='a'.repeat(40), target='b'.repeat(40);
 const row={issue:{number:86},phase:'review',pull_request:{head_oid:head},ci:{head_oid:head,status:'success',checks:[]}};
 test('CI success requires evidence for the current PR head',()=>{
@@ -43,4 +43,8 @@ test('execution notifications cannot replace revoked approval or fresh blocked f
   assert.notEqual(workflowState({...row,phase:'running'},{state:'offline'},true).group,'running');
   assert.equal(workflowState({...row,phase:'running'},progress,false).label,'実行状況未確認');
   assert.notEqual(workflowState({...row,phase:'approved'},null,false).group,'running');
+});
+test('workflow board maps every phase to one lane',()=>{
+  const phases={"waiting-how":'plan',"needs-how":'plan',triage:'plan',approved:'active',running:'active',blocked:'active',review:'review',merged:'review',done:'done',closed:'done'};
+  for(const [phase,lane] of Object.entries(phases))assert.equal(workflowLane({...row,phase},null,false),lane);
 });

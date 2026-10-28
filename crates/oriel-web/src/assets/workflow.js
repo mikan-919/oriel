@@ -34,12 +34,21 @@ export function verificationEvidence(row, snapshot, progress, live) {
 export function currentVerification(row, snapshot, progress, live) {
     return verificationEvidence(row,snapshot,progress,live).value;
 }
+export function workflowLane(row, progress, live) {
+    const group=workflowState(row,progress,live).group;
+    if(group==="done")return "done";
+    if(group==="review")return "review";
+    if(["running","blocked","ready"].includes(group))return "active";
+    return "plan";
+}
 
 export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
     let staged = null, detailIdentity = "";
     const get=id=>staged?.get(id) ?? document.getElementById("workflow-"+id);
     const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;return element;};
     const list=document.getElementById("repository-issues");
+    const laneNames=["plan","active","review","done"];
+    const laneLists=new Map(laneNames.map(name=>[name,get("lane-"+name)]));
     let model={}, selected=null, filter="all", panel="status", scope="", generation="", histories=new Map(), evidence=new Map();
     const savedHistory=new Map();let historyRequest=0;
     async function refreshHistory(number=selected) {
@@ -159,17 +168,20 @@ export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
         const focus=document.activeElement?.dataset?.workNumber;
         if(!selectedRow())selected=rows().find(row=>state(row).active)?.issue.number??rows().find(row=>!["done","closed"].includes(row.phase))?.issue.number??rows()[0]?.issue.number??null;
         const query=get("search").value.trim().toLowerCase();
-        const visible=rows().filter(row=>(filter==="all"||state(row).group===filter)&&(row.issue.number+" "+row.issue.title+" "+(row.linear?.identifier||"")).toLowerCase().includes(query));
-        for(const group of ["running","waiting","review"])get(group+"-count").textContent=model.snapshot?rows().filter(row=>state(row).group===group).length:"—";
-        get("done-count").textContent=model.snapshot?rows().filter(row=>row.phase==="done").length:"—";
+        const lane=row=>workflowLane(row,model.progress,model.live);
+        const visible=rows().filter(row=>(filter==="all"||lane(row)===filter)&&(row.issue.number+" "+row.issue.title+" "+(row.linear?.identifier||"")).toLowerCase().includes(query));
+        const countIds={plan:"waiting-count",active:"running-count",review:"review-count",done:"done-count"};
+        for(const name of laneNames)get(countIds[name]).textContent=model.snapshot?visible.filter(row=>lane(row)===name).length:"—";
         get("total").textContent=model.snapshot?visible.length+"件":"";
-        list.replaceChildren(...visible.map(row=>{const info=state(row),item=node("li"),button=node("button",undefined,"task");button.type="button";button.dataset.workNumber=row.issue.number;button.setAttribute("aria-pressed",String(row.issue.number===selected));
+        const cards=new Map(laneNames.map(name=>[name,[]]));
+        for(const row of visible){const info=state(row),item=node("li"),button=node("button",undefined,"task");button.type="button";button.dataset.workNumber=row.issue.number;button.setAttribute("aria-pressed",String(row.issue.number===selected));
             const meta=node("span",undefined,"task-meta");meta.append(node("span","#"+row.issue.number),node("span",row.linear?.identifier||"HOWを未作成"));
             const foot=node("span",undefined,"task-foot");foot.append(node("span",info.label,"badge "+info.tone));if(currentCI(row).status==="failure")foot.append(node("span","CI失敗","failed"));
-            button.append(meta,node("span",row.issue.title,"task-title"),foot);button.addEventListener("click",()=>{selected=row.issue.number;showPanel("status");render();if(matchMedia("(max-width: 760px)").matches)get("title").focus();else list.querySelector('[data-work-number="'+selected+'"]').focus({preventScroll:true});});item.append(button);return item;}));
+            button.append(meta,node("span",row.issue.title,"task-title"),foot);button.addEventListener("click",()=>{selected=row.issue.number;showPanel("status");render();if(matchMedia("(max-width: 760px)").matches)get("title").focus();else list.querySelector('[data-work-number="'+selected+'"]').focus({preventScroll:true});});item.append(button);cards.get(lane(row)).push(item);}
+        for(const name of laneNames){laneLists.get(name).replaceChildren(...cards.get(name));get("lane-"+name+"-empty").hidden=visible.length===0||cards.get(name).length>0;}
         if(focus)list.querySelector('[data-work-number="'+focus+'"]')?.focus({preventScroll:true});
         get("empty").hidden=visible.length>0;get("empty").textContent=model.snapshot?rows().length?"該当する作業はありません。":"作業はありません。WHATを作成して始めてください。":"作業の取得結果は未確認です。連携設定を確認し、更新してください。";
-        detail(selectedRow());
+        detail(visible.find(row=>row.issue.number===selected));
     }
     get("search").addEventListener("input",render);
     for(const button of document.querySelectorAll("[data-work-filter]"))button.addEventListener("click",()=>{filter=button.dataset.workFilter;for(const item of document.querySelectorAll("[data-work-filter]"))item.setAttribute("aria-pressed",String(item===button));render();});

@@ -34,7 +34,7 @@ try {
         const measurement=await page.evaluate(()=>({clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,offenders:[...document.querySelectorAll('body *')].filter(e=>e.getClientRects().length && e.getBoundingClientRect().right>innerWidth+1).slice(0,12).map(e=>e.id||e.tagName)}));
         const row={state,screen,...viewport,...measurement};results.push(row);
         // Keep representative images in git; measurements cover every combination.
-        if((viewport.width===320 && ['normal','codex'].includes(state)) || (state==='normal' && screen==='overview')) {
+        if((viewport.width===320 && ['normal','codex'].includes(state)) || (state==='normal' && screen==='overview') || (state==='normal' && screen==='workflow' && viewport.width===1440)) {
           writeFileSync(new URL(`${state}-${screen}-${viewport.width}x${viewport.height}.png`,output),await captureNlAssertImage({target:page,screenshotOptions:{fullPage:true}}));
         }
       }
