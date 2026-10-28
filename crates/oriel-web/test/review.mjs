@@ -73,7 +73,7 @@ for(const state of ['signed-out','pairing','normal','empty','loading','failed','
   };
   `;
   const fixture=html.replace(/<link[^>]*>/g,'').replace(/<script[\s\S]*?<\/script>/g,'')
-    .replace('</head>',`<style>${xtermCSS}\n${css}</style></head>`)
+    .replace('</head>',`<style data-xterm-style>${xtermCSS}</style><style>${css}</style></head>`)
     .replace('</body>',()=>`<script>${xterm}</script><script>${fit}</script><script>${setup}</script><script>${js}</script>${state==='codex'?'<script>setTimeout(()=>{showPage("codex",false);document.getElementById("codex-connect").click();},500);</script>':''}</body>`);
   writeFileSync(new URL(`${state}.html`,output),fixture);
 }

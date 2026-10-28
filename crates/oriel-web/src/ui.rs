@@ -49,11 +49,6 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
 
                 <title>"Oriel"</title>
 
-                <link
-                    rel="stylesheet"
-                    href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
-                >
-
                 <link rel="stylesheet" href="/dashboard.css">
             </head>
 

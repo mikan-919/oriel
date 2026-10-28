@@ -100,6 +100,7 @@ let deviceTimer;
 let deviceListFailed = false;
 let terminal;
 let terminalOpener;
+let terminalStyle;
 let fit;
 let socket;
 let progressSocket;
@@ -1015,6 +1016,24 @@ function sendResize() {
     }
 }
 
+function loadTerminalStyle() {
+    if (document.querySelector("[data-xterm-style]")) return Promise.resolve();
+    if (!terminalStyle) terminalStyle = new Promise((resolve, reject) => {
+        const style = document.createElement("link");
+        style.rel = "stylesheet";
+        style.href = "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css";
+        style.dataset.xtermStyle = "";
+        style.addEventListener("load", resolve, {once: true});
+        style.addEventListener("error", () => {
+            terminalStyle = undefined;
+            style.remove();
+            reject(new Error("端末表示用のスタイルを読み込めませんでした。再度お試しください。"));
+        }, {once: true});
+        document.head.append(style);
+    });
+    return terminalStyle;
+}
+
 async function openTerminal(device) {
     const opener = document.activeElement;
     const epoch = accountEpoch;
@@ -1028,6 +1047,7 @@ async function openTerminal(device) {
         const [{Terminal}, {FitAddon}] = await Promise.all([
             import("https://esm.sh/@xterm/xterm@6.0.0"),
             import("https://esm.sh/@xterm/addon-fit@0.11.0"),
+            loadTerminalStyle(),
         ]);
         terminal = new Terminal({
             cursorBlink: true,
