@@ -166,7 +166,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
         list.replaceChildren(...visible.map(row=>{const info=state(row),item=node("li"),button=node("button",undefined,"task");button.type="button";button.dataset.workNumber=row.issue.number;button.setAttribute("aria-pressed",String(row.issue.number===selected));
             const meta=node("span",undefined,"task-meta");meta.append(node("span","#"+row.issue.number),node("span",row.linear?.identifier||"HOWを未作成"));
             const foot=node("span",undefined,"task-foot");foot.append(node("span",info.label,"badge "+info.tone));if(currentCI(row).status==="failure")foot.append(node("span","CI失敗","failed"));
-            button.append(meta,node("span",row.issue.title,"task-title"),foot);button.addEventListener("click",()=>{selected=row.issue.number;showPanel("status");render();list.querySelector('[data-work-number="'+selected+'"]').focus({preventScroll:true});});item.append(button);return item;}));
+            button.append(meta,node("span",row.issue.title,"task-title"),foot);button.addEventListener("click",()=>{selected=row.issue.number;showPanel("status");render();if(matchMedia("(max-width: 760px)").matches)get("title").focus();else list.querySelector('[data-work-number="'+selected+'"]').focus({preventScroll:true});});item.append(button);return item;}));
         if(focus)list.querySelector('[data-work-number="'+focus+'"]')?.focus({preventScroll:true});
         get("empty").hidden=visible.length>0;get("empty").textContent=model.snapshot?rows().length?"該当する作業はありません。":"作業はありません。WHATを作成して始めてください。":"作業の取得結果は未確認です。連携設定を確認し、更新してください。";
         detail(selectedRow());

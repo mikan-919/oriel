@@ -80,6 +80,8 @@ try {
     panel=mountWorkflow({onDevice(){},onCodex(){},onCreate(){}});update();});
   assert.match(await text('local-checks'),/未受信.*実行履歴/);
   await page.setViewportSize({width:320,height:800});
+  await page.locator('[data-work-number="137"]').click();
+  assert.equal(await page.evaluate(()=>document.activeElement?.id),'workflow-title');
   await page.evaluate(()=>{
     const row=model.snapshot.workflows[0];
     row.what_comments=[{author:'reviewer',created_at:'2026-10-25',body:'First comment'}];

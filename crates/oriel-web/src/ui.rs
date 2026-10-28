@@ -69,13 +69,15 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                         <button type="button" data-page="settings">"設定"</button>
                     </nav>
                     <div class="dashboard-content content">
-                    <h1 id="page-title" tabindex="-1">"概要"</h1>
-                    <p id="account">"ログイン状態を確認中…"</p>
-                    <div id="anonymous-actions">
+                    <header class="app-header">
+                        <h1 id="page-title" tabindex="-1">"概要"</h1>
+                        <p id="account">"ログイン状態を確認中…"</p>
+                    </header>
+                    <div id="anonymous-actions" class="account-actions">
                         <button id="register" type="button">"Passkeyでアカウントを作成"</button>
                         <button id="login" type="button">"Passkeyでログイン"</button>
                     </div>
-                    <div id="session-actions" hidden="" data-region="settings">
+                    <div id="session-actions" class="account-actions" hidden="" data-region="settings">
                         <button id="backup" type="button">"予備のPasskeyを追加"</button>
                         <button id="logout" type="button">"ログアウト"</button>
                         <button id="refresh" type="button">"アカウントと端末を更新"</button>
@@ -147,25 +149,29 @@ pub(crate) async fn home(__cx: &Cx) -> Result<impl View> {
                     <section data-region="codex" aria-labelledby="codex-heading">
                         <h2 id="codex-heading">"Codexを操作"</h2>
                         <p>"端末で orield codex または orield workflow を実行してください。相談とレビューは読み取り専用です。ワークフローの実装にはHOWの承認が必要です。"</p>
-                        <label for="codex-device">"接続する端末"</label>
-                        <select id="codex-device"></select>
-                        <button id="codex-connect" type="button">"接続"</button>
-                        <p id="codex-status" role="status" aria-live="polite">"ログインするとCodexを操作できます。"</p>
-                        <label for="codex-engine">"操作するCodex"</label>
-                        <select id="codex-engine"><option value="" disabled="">"接続すると選択できます"</option></select>
-                        <div class="codex-controls">
-                            <button id="codex-pause" type="button">"自動ワークフローを一時停止"</button>
-                            <button id="codex-resume" type="button">"自動ワークフローを再開"</button>
+                        <div class="codex-setup">
+                            <section class="codex-connection" aria-labelledby="codex-connection-heading">
+                                <h3 id="codex-connection-heading">"接続"</h3>
+                                <label for="codex-device">"接続する端末"</label>
+                                <div class="inline-control"><select id="codex-device"></select><button id="codex-connect" type="button">"接続"</button></div>
+                                <p id="codex-status" role="status" aria-live="polite">"ログインするとCodexを操作できます。"</p>
+                                <label for="codex-engine">"操作するCodex"</label>
+                                <select id="codex-engine"><option value="" disabled="">"接続すると選択できます"</option></select>
+                                <div class="codex-controls">
+                                    <button id="codex-pause" type="button">"自動ワークフローを一時停止"</button>
+                                    <button id="codex-resume" type="button">"自動ワークフローを再開"</button>
+                                </div>
+                            </section>
+                            <fieldset>
+                                <legend>"モデル"</legend>
+                                <label for="codex-model">"使用するモデル"</label>
+                                <select id="codex-model"><option value="">"端末の既定モデル"</option></select>
+                                <label for="codex-effort">"推論量"</label>
+                                <select id="codex-effort"><option value="">"既定の推論量"</option></select>
+                                <button id="codex-workflow-model" type="button">"次回の実装にこのモデルを使う"</button>
+                            </fieldset>
                         </div>
                         <div id="codex-requests" aria-label="承認待ち・質問"></div>
-                        <fieldset>
-                            <legend>"モデル"</legend>
-                            <label for="codex-model">"使用するモデル"</label>
-                            <select id="codex-model"><option value="">"端末の既定モデル"</option></select>
-                            <label for="codex-effort">"推論量"</label>
-                            <select id="codex-effort"><option value="">"既定の推論量"</option></select>
-                            <button id="codex-workflow-model" type="button">"次回の実装にこのモデルを使う"</button>
-                        </fieldset>
                         <div class="codex-grid">
                             <section aria-labelledby="codex-conversations-heading">
                                 <h3 id="codex-conversations-heading">"会話"</h3>
