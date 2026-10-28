@@ -154,7 +154,7 @@ section section:not(.stat):not(.list-panel):not(.detail):not(.check-group) { min
 .workflow-tools { display:grid; grid-template-columns:minmax(140px,.55fr) minmax(220px,1fr); gap:12px; align-items:center; }
 .board-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .workflow-board { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:stretch; }
-.workflow-lane { min-width:0; border:1px solid var(--line); border-top-width:3px; border-radius:10px; background:#f7f9f6; box-shadow:var(--shadow); overflow:hidden; }
+.workflow-lane { display:flex; flex-direction:column; min-width:0; border:1px solid var(--line); border-top-width:3px; border-radius:10px; background:#f7f9f6; box-shadow:var(--shadow); overflow:hidden; }
 .workflow-lane.lane-plan { border-top-color:#c9a44e; }
 .workflow-lane.lane-active { border-top-color:var(--green); }
 .workflow-lane.lane-review { border-top-color:#667f91; }
@@ -163,11 +163,12 @@ section section:not(.stat):not(.list-panel):not(.detail):not(.check-group) { min
 .lane-heading h3 { font-size:13px; margin:0; }
 .lane-heading strong { display:grid; place-items:center; min-width:26px; height:26px; padding:0 7px; border-radius:999px; background:white; border:1px solid var(--line); font-size:12px; }
 .workflow-lane>p { color:var(--muted); font-size:11px; margin:3px 14px 10px; }
-.workflow-lane .tasks { display:grid; gap:8px; max-height:34rem; overflow:auto; padding:0 10px 10px; }
+.workflow-lane .tasks { display:grid; flex:1; min-height:0; align-content:start; gap:8px; max-height:34rem; overflow:auto; padding:0 10px 10px; }
+.workflow-lane .tasks:empty { display:none; }
 .workflow-lane .task { padding:12px; border-color:var(--line); background:white; box-shadow:0 1px 1px rgb(21 44 34 / 4%); }
 .workflow-lane .task:hover { background:#fbfcfa; border-color:#bdcbc4; }
 .workflow-lane .task[aria-pressed="true"] { background:var(--green-soft); border-color:#9fc2ad; }
-.workflow-lane .lane-empty { margin:0 10px 10px; padding:18px 10px; border:1px dashed var(--line); border-radius:8px; text-align:center; }
+.workflow-lane .lane-empty { display:grid; flex:1; place-items:center; margin:0 10px 10px; padding:18px 10px; border:1px dashed var(--line); border-radius:8px; text-align:center; }
 .board-empty { border:1px dashed var(--line); border-radius:10px; background:var(--paper); }
 #workflow-detail { margin-top:20px; }
 .workflow-help { margin-top:24px; }

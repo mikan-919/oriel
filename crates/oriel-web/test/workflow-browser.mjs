@@ -41,6 +41,27 @@ try {
   assert.equal(await page.locator('#workflow-lane-active [data-work-number="137"]').count(),1);
   const laneHeights=await page.locator('.workflow-lane').evaluateAll(lanes=>lanes.map(lane=>lane.getBoundingClientRect().height));
   assert.equal(new Set(laneHeights).size,1);
+  await page.evaluate(()=>{
+    window.heightState={workflows:model.snapshot.workflows,live:model.live,progress:model.progress};
+    const base=structuredClone(model.snapshot.workflows[0]);
+    model.live=false;model.progress=null;
+    model.snapshot.workflows=Array.from({length:88},(_,index)=>({...structuredClone(base),phase:'done',issue:{...base.issue,number:200-index,title:'完了した作業 '+index},linear:{identifier:'MIKAN-'+(200-index)},pull_request:null,ci:undefined}));
+    update();
+  });
+  const crowdedLaneMetrics=await page.locator('.workflow-lane').evaluateAll(lanes=>lanes.map(lane=>({
+    lane:lane.dataset.lane,
+    outer:lane.getBoundingClientRect().height,
+    tasks:lane.querySelector('.tasks').getBoundingClientRect().height,
+    empty:lane.querySelector('.lane-empty').getBoundingClientRect().height,
+    emptyMargin:parseFloat(getComputedStyle(lane.querySelector('.lane-empty')).marginBottom),
+  })));
+  assert.equal(new Set(crowdedLaneMetrics.map(lane=>lane.outer)).size,1);
+  const crowdedHeight=crowdedLaneMetrics.find(lane=>lane.lane==='done').tasks;
+  for(const lane of crowdedLaneMetrics.filter(lane=>lane.lane!=='done')) {
+    assert.equal(lane.tasks,0);
+    assert.ok(Math.abs(lane.empty+lane.emptyMargin-crowdedHeight)<1,JSON.stringify({lane,crowdedHeight}));
+  }
+  await page.evaluate(()=>{model.snapshot.workflows=heightState.workflows;model.live=heightState.live;model.progress=heightState.progress;update();});
   assert.equal(await page.locator('[data-work-filter]').count(),0);
   await page.locator('#workflow-search').fill('該当なし');
   assert.equal(await page.locator('#workflow-detail').isHidden(),true);
