@@ -134,7 +134,7 @@
 .account-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
 #status { font-size:12px; }
 button,select,input,textarea { color:var(--ink); font:inherit; }
-button:not([class]):not([data-work-panel]):not([data-work-filter]):not([data-page]),select { border:1px solid var(--line); border-radius:8px; background:white; padding:8px 12px; }
+button:not([class]):not([data-work-panel]):not([data-page]),select { border:1px solid var(--line); border-radius:8px; background:white; padding:8px 12px; }
 button:disabled { opacity:.5; cursor:not-allowed; }
 section[data-region]:not(#repository-work),#pairing { border:1px solid var(--line); border-radius:12px; padding:24px; background:white; box-shadow:var(--shadow); margin:20px 0; }
 section section:not(.stat):not(.list-panel):not(.detail):not(.check-group) { min-width:0; }
@@ -153,8 +153,7 @@ section section:not(.stat):not(.list-panel):not(.detail):not(.check-group) { min
 .workflow-command .workflow-target select { width:100%; }
 .workflow-tools { display:grid; grid-template-columns:minmax(140px,.55fr) minmax(220px,1fr); gap:12px; align-items:center; }
 .board-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-.workflow-filters { border:0; padding:0; margin:0 0 12px; }
-.workflow-board { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:start; }
+.workflow-board { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:stretch; }
 .workflow-lane { min-width:0; border:1px solid var(--line); border-top-width:3px; border-radius:10px; background:#f7f9f6; box-shadow:var(--shadow); overflow:hidden; }
 .workflow-lane.lane-plan { border-top-color:#c9a44e; }
 .workflow-lane.lane-active { border-top-color:var(--green); }

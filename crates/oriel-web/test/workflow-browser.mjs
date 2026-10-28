@@ -39,9 +39,12 @@ try {
   assert.match(await text('local-checks'),/1 \/ 2 件完了/);
   assert.match(await text('local-note'),/push前/);
   assert.equal(await page.locator('#workflow-lane-active [data-work-number="137"]').count(),1);
-  await page.locator('[data-work-filter="done"]').click();
+  const laneHeights=await page.locator('.workflow-lane').evaluateAll(lanes=>lanes.map(lane=>lane.getBoundingClientRect().height));
+  assert.equal(new Set(laneHeights).size,1);
+  assert.equal(await page.locator('[data-work-filter]').count(),0);
+  await page.locator('#workflow-search').fill('該当なし');
   assert.equal(await page.locator('#workflow-detail').isHidden(),true);
-  await page.locator('[data-work-filter="all"]').click();
+  await page.locator('#workflow-search').fill('');
   await page.evaluate(()=>{model.live=false;model.progress=null;update();});
   assert.equal(await page.locator('#workflow-lane-review [data-work-number="137"]').count(),1);
   assert.equal(await text('local-badge'),'進捗未確認');

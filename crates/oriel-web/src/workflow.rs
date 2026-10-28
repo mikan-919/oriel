@@ -20,7 +20,6 @@ pub(crate) fn page(__cx: &Cx) -> impl View {
                 <div class="workflow-target"><label for="workflow-device">"実行端末"</label><select id="workflow-device"></select><p id="workflow-connection" role="status">"接続状態は未確認です。"</p></div>
                 <div class="workflow-tools"><div class="board-heading"><h2 class="section-title" id="workflow-list-heading">"作業ボード "<span class="count" id="workflow-total"></span></h2><button class="btn small" id="refresh-repository" type="button" aria-label="ワークフローを更新">"↻"</button></div><label class="search"><span aria-hidden="true">"⌕"</span><input id="workflow-search" type="search" placeholder="タイトル・番号で検索" aria-label="作業を検索" /></label></div>
             </div>
-            <div class="filters workflow-filters" role="group" aria-label="工程の絞り込み"><button type="button" data-work-filter="all" aria-pressed="true">"すべて"</button><button type="button" data-work-filter="plan" aria-pressed="false">"計画"</button><button type="button" data-work-filter="active" aria-pressed="false">"実行・検証"</button><button type="button" data-work-filter="review" aria-pressed="false">"レビュー"</button><button type="button" data-work-filter="done" aria-pressed="false">"完了"</button></div>
             <p id="repository-status" role="status" aria-live="polite"></p>
             <div id="repository-issues" class="workflow-board" aria-labelledby="workflow-list-heading">
                 <section class="workflow-lane lane-plan" data-lane="plan" aria-labelledby="workflow-plan-heading">

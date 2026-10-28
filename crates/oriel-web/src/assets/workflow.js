@@ -49,7 +49,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
     const list=document.getElementById("repository-issues");
     const laneNames=["plan","active","review","done"];
     const laneLists=new Map(laneNames.map(name=>[name,get("lane-"+name)]));
-    let model={}, selected=null, filter="all", panel="status", scope="", generation="", histories=new Map(), evidence=new Map();
+    let model={}, selected=null, panel="status", scope="", generation="", histories=new Map(), evidence=new Map();
     const savedHistory=new Map();let historyRequest=0;
     async function refreshHistory(number=selected) {
         if(!loadHistory||!number||!model.device||!model.snapshot)return;
@@ -169,7 +169,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
         if(!selectedRow())selected=rows().find(row=>state(row).active)?.issue.number??rows().find(row=>!["done","closed"].includes(row.phase))?.issue.number??rows()[0]?.issue.number??null;
         const query=get("search").value.trim().toLowerCase();
         const lane=row=>workflowLane(row,model.progress,model.live);
-        const visible=rows().filter(row=>(filter==="all"||lane(row)===filter)&&(row.issue.number+" "+row.issue.title+" "+(row.linear?.identifier||"")).toLowerCase().includes(query));
+        const visible=rows().filter(row=>(row.issue.number+" "+row.issue.title+" "+(row.linear?.identifier||"")).toLowerCase().includes(query));
         const countIds={plan:"waiting-count",active:"running-count",review:"review-count",done:"done-count"};
         for(const name of laneNames)get(countIds[name]).textContent=model.snapshot?visible.filter(row=>lane(row)===name).length:"—";
         get("total").textContent=model.snapshot?visible.length+"件":"";
@@ -184,14 +184,13 @@ export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
         detail(visible.find(row=>row.issue.number===selected));
     }
     get("search").addEventListener("input",render);
-    for(const button of document.querySelectorAll("[data-work-filter]"))button.addEventListener("click",()=>{filter=button.dataset.workFilter;for(const item of document.querySelectorAll("[data-work-filter]"))item.setAttribute("aria-pressed",String(item===button));render();});
     for(const button of document.querySelectorAll("[data-work-panel]"))button.addEventListener("click",()=>showPanel(button.dataset.workPanel));
     get("history-refresh").addEventListener("click",()=>refreshHistory());
     get("device").addEventListener("change",()=>onDevice(get("device").value));get("create").addEventListener("click",onCreate);
     get("codex").addEventListener("click",()=>onCodex(false));get("control").addEventListener("click",()=>onCodex(true));
     return {select(number) { if(rows().some(row=>row.issue.number===number)){selected=number;showPanel("status");render();get("primary").focus();} },update(next) {
         const nextScope=(next.userId||"")+":"+(next.device?.device_id||"")+":"+JSON.stringify([next.snapshot?.repository_id,next.snapshot?.repository]);
-        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();savedHistory.clear();historyRequest++;get("search").value="";filter="all";document.getElementById("workflow-create-dialog").close();for(const button of document.querySelectorAll("[data-work-filter]"))button.setAttribute("aria-pressed",String(button.dataset.workFilter==="all"));}
+        if(scope!==nextScope || next.progress?.generation && generation && generation!==next.progress.generation){scope=nextScope;generation="";selected=null;panel="status";histories.clear();evidence.clear();savedHistory.clear();historyRequest++;get("search").value="";document.getElementById("workflow-create-dialog").close();}
         if(next.progress?.generation)generation=next.progress.generation;
         model=next;
         const report=next.live&&next.progress?.verification;
@@ -208,7 +207,7 @@ export function mountWorkflow({onDevice, onCodex, onCreate, loadHistory}) {
         get("connection").textContent="端末中継: "+terminal+" · ワークフロー: "+(next.live?stageLabels[next.progress?.stage]||"未接続":"未確認");
         get("create").disabled=!!next.busy||(!next.pendingWhat&&!next.snapshot);
         if(next.pendingWhat)get("device").disabled=true;
-        for(const button of document.querySelectorAll("[data-work-filter],[data-work-panel]"))button.disabled=!!next.busy||!next.snapshot;
+        for(const button of document.querySelectorAll("[data-work-panel]"))button.disabled=!!next.busy||!next.snapshot;
         const progress=next.progress;
         if(next.live&&progress?.task?.issue_number&&progress.updated_at){const number=progress.task.issue_number;const events=histories.get(number)||[];const title=stageLabels[progress.stage]||progress.state;const v=progress.verification;const key=JSON.stringify([progress.execution_id,progress.stage,v&&[v.head_oid,v.target_oid,v.status,v.completed,v.total]]);if(events[0]?.key!==key){events.unshift({key,time:progress.updated_at,title:title+"の進捗を受信",body:progress.verification?"端末検証 "+progress.verification.completed+" / "+progress.verification.total+" 件":"対象: #"+number});if(events.length>30)events.length=30;if(histories.size>=64&&!histories.has(number))histories.delete(histories.keys().next().value);histories.set(number,events);}}
         render();
