@@ -113,7 +113,7 @@ test('background polling stops for hidden tabs and resumes device discovery when
     setTimeout(callback, delay) {assert.ok([1000, 900000].includes(delay)); timer = callback; return 1;}, clearTimeout() {},
     staleProgress() {throw new Error('Unexpected progress expiry');}, errorText: String});
   vm.runInContext(source.slice(source.indexOf('document.addEventListener("visibilitychange"'),
-    source.indexOf('\nrender();\nperform(async () =>')), c);
+    source.indexOf('\nrender();\nasync function initialize()')), c);
   c.scheduleDevices();
   await timer();
   await periodic();

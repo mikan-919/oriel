@@ -125,6 +125,8 @@ function render() {
     anonymousActions.hidden = !!user;
     sessionActions.hidden = !user;
     for (const button of dashboard.querySelectorAll("button")) button.disabled = busy;
+    document.getElementById("register").disabled = busy || sessionLoading;
+    document.getElementById("login").disabled = busy || sessionLoading;
     renderOverview();
     renderWorkflowPanel();
     document.getElementById("workflow-onboarding").hidden = !!user && !!devices.length;
@@ -813,7 +815,9 @@ async function refreshIntegrations() {
         ? "最近のIssueを読み込み中…"
         : "リポジトリまたはチームを保存すると最近のIssueを確認できます。";
     render();
-    await refreshIssues();
+    refreshIssues().catch((error) => {
+        if (error.sessionExpired && epoch === accountEpoch) status.textContent = errorText(error);
+    });
 }
 
 async function startConnection(provider) {
@@ -1238,18 +1242,25 @@ function scheduleDevices() {
     }, pairClaimed && pairing.token && pairOwner?.id === user?.id ? 2000 : 900000);
 }
 render();
-perform(async () => {
+async function initialize() {
     const epoch = accountEpoch;
     try {
         setUser((await api("/api/session")).user);
+    } catch (error) {
+        if (!error.staleAccount && epoch === accountEpoch) status.textContent = errorText(error);
     } finally {
         if (epoch === accountEpoch) {
             sessionLoading = false;
             render();
         }
     }
-    await refreshAccountData();
-});
+    try {
+        await refreshAccountData();
+    } catch (error) {
+        if (!error.staleAccount) status.textContent = errorText(error);
+    }
+}
+initialize();
 
 let currentPage = "workflow";
 const pageNames = {overview: "概要", workflow: "ワークフロー", codex: "Codex", devices: "端末", settings: "設定"};
